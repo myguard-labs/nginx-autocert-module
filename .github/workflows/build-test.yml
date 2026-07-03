@@ -1334,7 +1334,7 @@ jobs:
   slowloris-read:
     name: Slow-drip total-read budget (#37) [${{ matrix.flavor }}]
     needs: [resolve]
-    runs-on: [self-hosted, builder02, lxc]
+    runs-on: [self-hosted, builder02, docker]
     timeout-minutes: 20
     strategy:
       fail-fast: false
