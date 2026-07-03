@@ -180,7 +180,7 @@ jobs:
   coexist-native-acme:
     name: Coexist with native angie acme (-t)
     needs: [resolve, build-angie]
-    runs-on: [self-hosted, builder02, lxc]
+    runs-on: [self-hosted, builder02, docker]
     timeout-minutes: 15
     steps:
       - name: Checkout module
@@ -561,7 +561,7 @@ jobs:
   acme-directory:
     name: ACME account register over TLS (M4b/M4c/M4d) [${{ matrix.flavor }}]
     needs: [resolve, build-nginx, build-angie]
-    runs-on: [self-hosted, builder02, lxc]
+    runs-on: [self-hosted, builder02, docker]
     timeout-minutes: 15
     strategy:
       fail-fast: false
@@ -584,7 +584,7 @@ jobs:
   eab-account:
     name: EAB newAccount registration (M15) [${{ matrix.flavor }}]
     needs: [resolve, build-nginx, build-angie]
-    runs-on: [self-hosted, builder02, lxc]
+    runs-on: [self-hosted, builder02, docker]
     timeout-minutes: 15
     strategy:
       fail-fast: false
@@ -607,7 +607,7 @@ jobs:
   dns01-order:
     name: dns-01 order plumbing (D2, #16) [${{ matrix.flavor }}]
     needs: [resolve, build-nginx, build-angie]
-    runs-on: [self-hosted, builder02, lxc]
+    runs-on: [self-hosted, builder02, docker]
     timeout-minutes: 15
     strategy:
       fail-fast: false
@@ -630,7 +630,7 @@ jobs:
   dns01-exec-hook:
     name: dns-01 exec-hook full issuance (D3, #16) [${{ matrix.flavor }}]
     needs: [resolve, build-nginx, build-angie]
-    runs-on: [self-hosted, builder02, lxc]
+    runs-on: [self-hosted, builder02, docker]
     timeout-minutes: 15
     strategy:
       fail-fast: false
@@ -653,7 +653,7 @@ jobs:
   wildcard-issue:
     name: wildcard (*.) issuance + serve (D4, #16) [${{ matrix.flavor }}]
     needs: [resolve, build-nginx, build-angie]
-    runs-on: [self-hosted, builder02, lxc]
+    runs-on: [self-hosted, builder02, docker]
     timeout-minutes: 15
     strategy:
       fail-fast: false
@@ -676,7 +676,7 @@ jobs:
   wildcard-shared:
     name: autocert_wildcard shared cert + suppression (D5, #16) [${{ matrix.flavor }}]
     needs: [resolve, build-nginx, build-angie]
-    runs-on: [self-hosted, builder02, lxc]
+    runs-on: [self-hosted, builder02, docker]
     timeout-minutes: 15
     strategy:
       fail-fast: false
@@ -745,7 +745,7 @@ jobs:
   multi-ca:
     name: multi-CA full issuance (M5, #15) [${{ matrix.flavor }}]
     needs: [resolve, build-nginx, build-angie]
-    runs-on: [self-hosted, builder02, lxc]
+    runs-on: [self-hosted, builder02, docker]
     timeout-minutes: 15
     strategy:
       fail-fast: false
@@ -769,7 +769,7 @@ jobs:
   multi-ca-contact:
     name: per-CA account contact (one mailto per CA) [${{ matrix.flavor }}]
     needs: [resolve, build-nginx, build-angie]
-    runs-on: [self-hosted, builder02, lxc]
+    runs-on: [self-hosted, builder02, docker]
     timeout-minutes: 15
     strategy:
       fail-fast: false
@@ -793,7 +793,7 @@ jobs:
   single-process-reload:
     name: master_process off reload (driver + serve rebind) [${{ matrix.flavor }}]
     needs: [resolve, build-nginx, build-angie]
-    runs-on: [self-hosted, builder02, lxc]
+    runs-on: [self-hosted, builder02, docker]
     timeout-minutes: 15
     strategy:
       fail-fast: false
@@ -816,7 +816,7 @@ jobs:
   reload-inflight:
     name: master_process off reload while ACME in flight (cancel_inflight) [${{ matrix.flavor }}]
     needs: [resolve, build-nginx, build-angie]
-    runs-on: [self-hosted, builder02, lxc]
+    runs-on: [self-hosted, builder02, docker]
     timeout-minutes: 15
     strategy:
       fail-fast: false
@@ -862,7 +862,7 @@ jobs:
   order-authz:
     name: ACME order + authz reaches valid (M6a) [${{ matrix.flavor }}]
     needs: [resolve, build-nginx, build-angie]
-    runs-on: [self-hosted, builder02, lxc]
+    runs-on: [self-hosted, builder02, docker]
     timeout-minutes: 15
     strategy:
       fail-fast: false
@@ -886,7 +886,7 @@ jobs:
   tls-alpn-issue:
     name: tls-alpn-01 full issuance, no port 80 (M10c) [${{ matrix.flavor }}]
     needs: [resolve, build-nginx, build-angie]
-    runs-on: [self-hosted, builder02, lxc]
+    runs-on: [self-hosted, builder02, docker]
     timeout-minutes: 15
     strategy:
       fail-fast: false
@@ -909,7 +909,7 @@ jobs:
   rsa-issue:
     name: RSA-2048 full issuance (autocert_key_type rsa2048) [${{ matrix.flavor }}]
     needs: [resolve, build-nginx, build-angie]
-    runs-on: [self-hosted, builder02, lxc]
+    runs-on: [self-hosted, builder02, docker]
     timeout-minutes: 15
     strategy:
       fail-fast: false
@@ -932,7 +932,7 @@ jobs:
   dual-cert-issue:
     name: Dual-cert issuance (autocert_key_type p384 rsa2048) [${{ matrix.flavor }}]
     needs: [resolve, build-nginx, build-angie]
-    runs-on: [self-hosted, builder02, lxc]
+    runs-on: [self-hosted, builder02, docker]
     timeout-minutes: 15
     strategy:
       fail-fast: false
@@ -956,7 +956,7 @@ jobs:
   dual-cert-serve:
     name: Dual-cert serving (EC-only vs RSA-only sigalgs) [${{ matrix.flavor }}]
     needs: [resolve, build-nginx, build-angie]
-    runs-on: [self-hosted, builder02, lxc]
+    runs-on: [self-hosted, builder02, docker]
     timeout-minutes: 15
     strategy:
       fail-fast: false
@@ -979,7 +979,7 @@ jobs:
   renewal:
     name: ACME renewal + multi-name issuance (M8) [${{ matrix.flavor }}]
     needs: [resolve, build-nginx, build-angie]
-    runs-on: [self-hosted, builder02, lxc]
+    runs-on: [self-hosted, builder02, docker]
     timeout-minutes: 15
     strategy:
       fail-fast: false
@@ -1003,7 +1003,7 @@ jobs:
   backoff:
     name: Per-name failure backoff (M9b) [${{ matrix.flavor }}]
     needs: [resolve, build-nginx, build-angie]
-    runs-on: [self-hosted, builder02, lxc]
+    runs-on: [self-hosted, builder02, docker]
     timeout-minutes: 15
     strategy:
       fail-fast: false
@@ -1027,7 +1027,7 @@ jobs:
   retry-after:
     name: 429 / Retry-After rate-limit awareness (M9c) [${{ matrix.flavor }}]
     needs: [resolve, build-nginx, build-angie]
-    runs-on: [self-hosted, builder02, lxc]
+    runs-on: [self-hosted, builder02, docker]
     timeout-minutes: 15
     strategy:
       fail-fast: false
@@ -1051,7 +1051,7 @@ jobs:
   mock-400-repoll:
     name: 400-on-respond -> re-poll -> finalize (mock CA, M6/#35) [${{ matrix.flavor }}]
     needs: [resolve, build-nginx, build-angie]
-    runs-on: [self-hosted, builder02, lxc]
+    runs-on: [self-hosted, builder02, docker]
     timeout-minutes: 15
     strategy:
       fail-fast: false
@@ -1075,7 +1075,7 @@ jobs:
   mock-finalize-ready:
     name: finalize-before-ready -> poll -> re-finalize (mock CA) [${{ matrix.flavor }}]
     needs: [resolve, build-nginx, build-angie]
-    runs-on: [self-hosted, builder02, lxc]
+    runs-on: [self-hosted, builder02, docker]
     timeout-minutes: 15
     strategy:
       fail-fast: false
@@ -1099,7 +1099,7 @@ jobs:
   mock-download-400-retry:
     name: download 400 -> re-poll order -> retry download (mock CA) [${{ matrix.flavor }}]
     needs: [resolve, build-nginx, build-angie]
-    runs-on: [self-hosted, builder02, lxc]
+    runs-on: [self-hosted, builder02, docker]
     timeout-minutes: 15
     strategy:
       fail-fast: false
@@ -1123,7 +1123,7 @@ jobs:
   mock-order-poll-retry:
     name: transient order poll -> re-poll, not abort (mock CA) [${{ matrix.flavor }}]
     needs: [resolve, build-nginx, build-angie]
-    runs-on: [self-hosted, builder02, lxc]
+    runs-on: [self-hosted, builder02, docker]
     timeout-minutes: 15
     strategy:
       fail-fast: false
@@ -1147,7 +1147,7 @@ jobs:
   mock-freshness-wrong-domain:
     name: wrong-domain stored leaf -> reissue (M2, mock CA) [${{ matrix.flavor }}]
     needs: [resolve, build-nginx, build-angie]
-    runs-on: [self-hosted, builder02, lxc]
+    runs-on: [self-hosted, builder02, docker]
     timeout-minutes: 15
     strategy:
       fail-fast: false
@@ -1171,7 +1171,7 @@ jobs:
   store-certbot:
     name: certbot store layout (live/<domain>/4 files) [${{ matrix.flavor }}]
     needs: [resolve, build-nginx, build-angie]
-    runs-on: [self-hosted, builder02, lxc]
+    runs-on: [self-hosted, builder02, docker]
     timeout-minutes: 15
     strategy:
       fail-fast: false
@@ -1195,7 +1195,7 @@ jobs:
   store-symlink-swap:
     name: "store TOCTOU: planted-symlink component refused [${{ matrix.flavor }}]"
     needs: [resolve, build-nginx, build-angie]
-    runs-on: [self-hosted, builder02, lxc]
+    runs-on: [self-hosted, builder02, docker]
     timeout-minutes: 15
     strategy:
       fail-fast: false
@@ -1219,7 +1219,7 @@ jobs:
   cert-validate-reject:
     name: pre-store cert validation rejects bad leaf (${{ matrix.cert_case }}) [${{ matrix.flavor }}]
     needs: [resolve, build-nginx, build-angie]
-    runs-on: [self-hosted, builder02, lxc]
+    runs-on: [self-hosted, builder02, docker]
     timeout-minutes: 15
     strategy:
       fail-fast: false
@@ -1310,7 +1310,7 @@ jobs:
   config-rejects:
     name: config-time rejection of invalid directive values [${{ matrix.flavor }}]
     needs: [resolve, build-nginx, build-angie]
-    runs-on: [self-hosted, builder02, lxc]
+    runs-on: [self-hosted, builder02, docker]
     timeout-minutes: 10
     strategy:
       fail-fast: false
