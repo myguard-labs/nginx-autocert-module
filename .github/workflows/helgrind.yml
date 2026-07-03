@@ -1,4 +1,4 @@
-name: Valgrind
+name: Helgrind
 
 # Action pins:
 # actions/checkout@v5 -> 93cb6efe18208431cddfb8368fd83d5badbf9bfd
@@ -10,22 +10,22 @@ env:
 
 on:
   schedule:
-    # Monthly, 1st @ 03:30 UTC.
-    - cron: "30 3 1 * *"
+    # Monthly, 1st @ 04:30 UTC.
+    - cron: "30 4 1 * *"
   workflow_dispatch: {}
 
 concurrency:
-  group: valgrind-${{ github.ref }}
+  group: helgrind-${{ github.ref }}
   cancel-in-progress: true
 
 permissions:
   contents: read
 
 jobs:
-  memcheck:
-    name: Memcheck
+  helgrind:
+    name: Helgrind
     runs-on: [self-hosted, builder02, lxc]
-    # Long monthly memcheck soak on self-hosted — no GitHub 6h cap.
+    # Long monthly helgrind soak on self-hosted — no GitHub 6h cap.
     timeout-minutes: 240
     steps:
       - name: Checkout module
@@ -48,7 +48,7 @@ jobs:
         uses: ./.github/actions/setup
         with:
           packages: build-essential ccache curl libpcre2-dev libssl-dev valgrind zlib1g-dev
-          ccache-key: valgrind-nginx
+          ccache-key: helgrind-nginx
 
       - name: Restore nginx tarball cache
         id: nginx-tarball
@@ -108,15 +108,13 @@ jobs:
             "$GITHUB_WORKSPACE/src/ngx_autocert_json.c" \
             $OBJS
 
-      - name: Run unit tests under Memcheck
+      - name: Run unit tests under Helgrind
         run: |
-          runner="valgrind --tool=memcheck --track-origins=yes --leak-check=full"
-          runner="$runner --show-leak-kinds=definite,indirect"
-          runner="$runner --errors-for-leak-kinds=definite,indirect --error-exitcode=99"
+          runner="valgrind --tool=helgrind --error-exitcode=99"
           $runner ./test_crypto
           $runner ./test_json
 
-      - name: Load modules under Memcheck
+      - name: Load modules under Helgrind
         run: |
           set -euo pipefail
           NGX="$GITHUB_WORKSPACE/nginx-${NGINX_VERSION}"
@@ -143,11 +141,7 @@ jobs:
           }
           EOF
           valgrind \
-            --tool=memcheck \
-            --track-origins=yes \
-            --leak-check=full \
-            --show-leak-kinds=definite,indirect \
-            --errors-for-leak-kinds=none \
+            --tool=helgrind \
             --error-exitcode=99 \
             "$NGX/objs/nginx" -t -p "$PREFIX" -c "$PREFIX/conf/nginx.conf"
 

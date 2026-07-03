@@ -34,7 +34,9 @@ jobs:
   fuzz:
     name: Parser fuzz (JSON + HTTP)
     runs-on: [self-hosted, builder02, lxc]
-    timeout-minutes: 35
+    # WIDE+LONG monthly discovery on self-hosted (free, no GitHub 6h cap) —
+    # replaces the local nginx-module-stress cron. 2 targets x 7200s = ~4h.
+    timeout-minutes: 300
 
     steps:
       - name: Checkout module
@@ -109,7 +111,8 @@ jobs:
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             echo "FUZZ_SECS=${{ github.event.inputs.duration }}" >> "$GITHUB_ENV"
           else
-            echo "FUZZ_SECS=900" >> "$GITHUB_ENV"
+            # Monthly self-hosted budget: 2 targets x 7200s = ~4h/module.
+            echo "FUZZ_SECS=14400" >> "$GITHUB_ENV"
           fi
 
       # Restore corpus from prior scheduled run so the fuzzer extends existing
@@ -178,3 +181,16 @@ jobs:
             ${{ github.workspace }}/tests/fuzz/corpus
             ${{ github.workspace }}/tests/fuzz/corpus_http
           retention-days: 30
+
+      - name: Notify Discord on failure
+        if: failure() && github.event_name == 'schedule'
+        env:
+          DISCORD_BOT_TOKEN: ${{ secrets.DISCORD_BOT_TOKEN }}
+          DISCORD_CHANNEL_BUILDS: ${{ secrets.DISCORD_CHANNEL_BUILDS }}
+        run: |
+          [ -n "$DISCORD_BOT_TOKEN" ] || exit 0
+          curl -fsS -X POST \
+            -H "Authorization: Bot $DISCORD_BOT_TOKEN" \
+            -H "Content-Type: application/json" \
+            "https://discord.com/api/v10/channels/$DISCORD_CHANNEL_BUILDS/messages" \
+            -d "{\"content\":\"🔴 ${{ github.repository }} — ${{ github.workflow }} FAILED (scheduled). ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\"}" || true
