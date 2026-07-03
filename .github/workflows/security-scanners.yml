@@ -29,7 +29,7 @@ permissions:
 jobs:
   secure:
     name: Secure
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, builder02, lxc]
     timeout-minutes: 25
     permissions:
       contents: read
