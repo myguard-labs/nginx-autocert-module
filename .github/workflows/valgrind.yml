@@ -58,13 +58,17 @@ jobs:
           key: src-tarball-nginx-${{ env.NGINX_VERSION }}
 
       - name: Fetch nginx
-        if: steps.nginx-tarball.outputs.cache-hit != 'true'
+        # Do NOT gate on cache-hit: on self-hosted runners actions/cache can
+        # report a hit while the path is empty, so always ensure the file is
+        # actually present (idempotent — curl only when missing).
         run: |
           set -euo pipefail
           mkdir -p ~/.cache/src-tarballs
-          curl -fsSL \
-            -o "$HOME/.cache/src-tarballs/nginx-${NGINX_VERSION}.tar.gz" \
-            "https://nginx.org/download/nginx-${NGINX_VERSION}.tar.gz"
+          tarball="$HOME/.cache/src-tarballs/nginx-${NGINX_VERSION}.tar.gz"
+          if [ ! -s "$tarball" ]; then
+            curl -fsSL -o "$tarball" \
+              "https://nginx.org/download/nginx-${NGINX_VERSION}.tar.gz"
+          fi
 
       - name: Extract nginx
         run: |
