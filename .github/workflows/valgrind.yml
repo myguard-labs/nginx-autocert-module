@@ -24,7 +24,7 @@ permissions:
 jobs:
   memcheck:
     name: Memcheck
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, builder02, lxc]
     timeout-minutes: 60
     steps:
       - name: Checkout module

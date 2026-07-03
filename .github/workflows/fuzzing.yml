@@ -33,7 +33,7 @@ permissions:
 jobs:
   fuzz:
     name: Parser fuzz (JSON + HTTP)
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, builder02, lxc]
     timeout-minutes: 35
 
     steps:
