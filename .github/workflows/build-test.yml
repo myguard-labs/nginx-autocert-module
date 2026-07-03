@@ -245,13 +245,16 @@ jobs:
           key: src-tarball-nginx-${{ needs.resolve.outputs.nginx_version }}
 
       - name: Fetch nginx ${{ needs.resolve.outputs.nginx_version }}
-        if: steps.nginx-tarball.outputs.cache-hit != 'true'
+        # Do NOT gate on cache-hit: on self-hosted runners actions/cache can
+        # report a hit while the path is empty, so always ensure the file is
+        # actually present (idempotent — curl only when missing).
         run: |
           set -euo pipefail
           mkdir -p ~/.cache/src-tarballs
-          curl -fsSL \
-            -o ~/.cache/src-tarballs/nginx-${{ needs.resolve.outputs.nginx_version }}.tar.gz \
-            "${{ needs.resolve.outputs.nginx_url }}"
+          tarball=~/.cache/src-tarballs/nginx-${{ needs.resolve.outputs.nginx_version }}.tar.gz
+          if [ ! -s "$tarball" ]; then
+            curl -fsSL -o "$tarball" "${{ needs.resolve.outputs.nginx_url }}"
+          fi
 
       - name: Extract nginx ${{ needs.resolve.outputs.nginx_version }}
         run: |
@@ -1359,12 +1362,16 @@ jobs:
           path: ~/.cache/src-tarballs
           key: src-tarball-${{ matrix.flavor }}-${{ matrix.version }}
       - name: Fetch ${{ matrix.flavor }} ${{ matrix.version }}
-        if: steps.tarball-cache.outputs.cache-hit != 'true'
+        # Do NOT gate on cache-hit: on self-hosted runners actions/cache can
+        # report a hit while the path is empty, so always ensure the file is
+        # actually present (idempotent — curl only when missing).
         run: |
           set -euo pipefail
           mkdir -p ~/.cache/src-tarballs
-          curl -fsSL -o ~/.cache/src-tarballs/${{ matrix.flavor }}-${{ matrix.version }}.tar.gz \
-            "${{ matrix.url }}"
+          tarball=~/.cache/src-tarballs/${{ matrix.flavor }}-${{ matrix.version }}.tar.gz
+          if [ ! -s "$tarball" ]; then
+            curl -fsSL -o "$tarball" "${{ matrix.url }}"
+          fi
       - name: Build ${{ matrix.flavor }} module with a tiny (2s) total-read budget
         run: |
           set -euo pipefail
