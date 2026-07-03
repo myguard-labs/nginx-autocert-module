@@ -36,13 +36,17 @@ runs:
         key: src-tarball-${{ inputs.flavor }}-${{ inputs.version }}
 
     - name: Fetch ${{ inputs.flavor }} ${{ inputs.version }}
-      if: steps.tarball-cache.outputs.cache-hit != 'true'
+      # Do NOT gate on cache-hit: on self-hosted runners actions/cache can
+      # report a hit while the path is empty, so always ensure the file is
+      # actually present (idempotent — curl only when missing).
       shell: bash
       run: |
         set -euo pipefail
         mkdir -p ~/.cache/src-tarballs
-        curl -fsSL -o ~/.cache/src-tarballs/${{ inputs.flavor }}-${{ inputs.version }}.tar.gz \
-          "${{ inputs.url }}"
+        tarball=~/.cache/src-tarballs/${{ inputs.flavor }}-${{ inputs.version }}.tar.gz
+        if [ ! -s "$tarball" ]; then
+          curl -fsSL -o "$tarball" "${{ inputs.url }}"
+        fi
 
     - name: Extract ${{ inputs.flavor }} ${{ inputs.version }}
       shell: bash
