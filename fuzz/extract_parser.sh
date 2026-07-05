@@ -24,8 +24,8 @@
 set -euo pipefail
 
 FUZZ_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SRC="$FUZZ_DIR/../../src/ngx_autocert_json.c"
-HDR="$FUZZ_DIR/../../src/ngx_autocert_json.h"
+SRC="$FUZZ_DIR/../src/ngx_autocert_json.c"
+HDR="$FUZZ_DIR/../src/ngx_autocert_json.h"
 OUT="$FUZZ_DIR/generated_json.inc"
 
 if [ ! -f "$SRC" ]; then

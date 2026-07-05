@@ -4,7 +4,7 @@ Coverage-guided (libFuzzer) fuzzing of the two parsers that read attacker-
 influenceable ACME server bytes: the JSON parser and the HTTP-response parser.
 Both targets are built from the SHIPPED parser source by their `extract_*.sh`
 slicers — no hand-maintained copy and no nginx build tree required.
-`tests/fuzz/build.sh` builds both (`fuzz_json`, `fuzz_http`).
+`fuzz/build.sh` builds both (`fuzz_json`, `fuzz_http`).
 
 ## Targets
 
@@ -83,8 +83,8 @@ heap-buffer-overflow.
 
 ```bash
 # needs clang with libFuzzer (clang >= 6) — no nginx build tree needed
-CC=clang bash tests/fuzz/build.sh          # -> tests/fuzz/fuzz_json + tests/fuzz/fuzz_http
-cd tests/fuzz
+CC=clang bash fuzz/build.sh          # -> fuzz/fuzz_json + fuzz/fuzz_http
+cd fuzz
 ./fuzz_json -max_total_time=120 -print_final_stats=1 corpus/
 ./fuzz_http -max_total_time=120 -print_final_stats=1 corpus_http/
 ```
@@ -92,7 +92,7 @@ cd tests/fuzz
 The valgrind-replay path (plain compile, no sanitizers):
 
 ```bash
-CC=clang CFLAGS='-g -O1' bash tests/fuzz/build.sh
+CC=clang CFLAGS='-g -O1' bash fuzz/build.sh
 ```
 
 A crash drops a `crash-*` reproducer; re-run with `./fuzz_json crash-<id>` to
@@ -132,6 +132,8 @@ responses:
 
 ## CI
 
-`.github/workflows/fuzzing.yml` runs this monthly (1st of the month) and on
-manual dispatch, mirroring the `valgrind` / `codeql` heavy-job cadence.
-The per-change gate is the ASan+UBSan build-test suite in `build-test.yml`.
+`.github/workflows/ci-deep.yml` runs both targets long (14400s each) monthly
+(1st of the month) and on manual dispatch, alongside the memcheck/helgrind soaks
+and the security scanners. `.github/workflows/ci-fast.yml` runs a 120s/target
+regression on every PR/push (with `fuzz.dict`), plus a 60s memcheck soak. The
+per-change build gate is the ASan+UBSan build-test suite in `build-test.yml`.
