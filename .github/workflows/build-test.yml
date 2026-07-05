@@ -61,8 +61,8 @@ jobs:
 
       - name: Validate scripts and source
         run: |
-          bash -n tests/e2e/*.sh tests/fuzz/*.sh tests/unit/*.sh
-          shellcheck tests/e2e/*.sh tests/fuzz/*.sh tests/unit/*.sh
+          bash -n tests/e2e/*.sh fuzz/*.sh tests/unit/*.sh
+          shellcheck tests/e2e/*.sh fuzz/*.sh tests/unit/*.sh
           # Reject literal NUL bytes in tracked C sources: they make git/rg treat
           # the file as binary and silently drop it from source search / review.
           if LC_ALL=C grep -laP '\x00' src/*.c src/*.h; then
@@ -387,7 +387,7 @@ jobs:
           # ngx_autocert_acme.c by extract_http.sh and compiled against the
           # fuzz shim — no nginx objects needed (the rest of that TU is
           # event/SSL/resolver machinery the parser does not touch).
-          bash tests/fuzz/extract_http.sh
+          bash fuzz/extract_http.sh
           gcc -Wall -Wextra -Werror -I"$GITHUB_WORKSPACE" \
             -o test_http "$GITHUB_WORKSPACE/tests/unit/test_http.c"
           ./test_http

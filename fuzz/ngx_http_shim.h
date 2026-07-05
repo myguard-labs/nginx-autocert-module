@@ -14,7 +14,7 @@
  * Used by BOTH the standalone unit test (tests/unit/test_http.c, compiled against
  * an nginx tree but the parser surface still routed through this slice) — no,
  * see test_http.c which includes this shim + the .inc directly — and the
- * libFuzzer target tests/fuzz/fuzz_http.c.
+ * libFuzzer target fuzz/fuzz_http.c.
  */
 
 #ifndef NGX_AUTOCERT_HTTP_FUZZ_SHIM_H

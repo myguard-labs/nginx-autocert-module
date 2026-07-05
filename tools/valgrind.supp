@@ -1,0 +1,42 @@
+# Valgrind leak suppressions for nginx CORE allocations that are intentionally
+# never freed when nginx runs to exit (the soak drives a real master+worker and
+# then sends QUIT). These are nginx's own arenas, not this module — each
+# suppression is pinned to the specific nginx core frame so a real leak in the
+# autocert module (which always carries an ngx_autocert_*/ngx_http_autocert_*
+# frame) is never hidden.
+
+{
+   nginx-set-environment-not-freed-at-exit
+   Memcheck:Leak
+   match-leak-kinds: definite,indirect
+   fun:malloc
+   fun:ngx_alloc
+   fun:ngx_set_environment
+}
+
+{
+   nginx-event-process-init-arena-not-freed-at-exit
+   Memcheck:Leak
+   match-leak-kinds: definite,indirect
+   fun:malloc
+   fun:ngx_alloc
+   fun:ngx_event_process_init
+}
+
+# OpenSSL one-time global init (autocert links -lssl -lcrypto). The library's
+# internal error-state / algorithm tables are process-global and never freed;
+# a real module leak still carries an ngx_autocert_* frame.
+{
+   openssl-global-init-not-freed-at-exit
+   Memcheck:Leak
+   match-leak-kinds: definite,indirect,reachable
+   ...
+   obj:*/libcrypto.so*
+}
+{
+   openssl-ssl-global-init-not-freed-at-exit
+   Memcheck:Leak
+   match-leak-kinds: definite,indirect,reachable
+   ...
+   obj:*/libssl.so*
+}

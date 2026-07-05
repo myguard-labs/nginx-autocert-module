@@ -1,0 +1,126 @@
+name: CI Fast
+
+# Fast dynamic analysis on every PR/push — kept SHORT so PR feedback stays
+# quick. build-test.yml already does the full build + ASan/UBSan unit/e2e
+# matrix; THIS file adds only the two cheap dynamic gates:
+#   fuzz-regression : 120s/target on the JSON + HTTP ACME parsers (+ fuzz.dict)
+#   memcheck-lite   : 60s valgrind memcheck soak of the HTTP-01 serve path
+#                     (helgrind is deep-only)
+# Long discovery (hours fuzz, full memcheck+helgrind soak, scanners) lives in
+# ci-deep.yml (monthly cron + workflow_dispatch).
+#
+# Action pins (keep in sync with build-test.yml header):
+# actions/checkout@v5        -> 93cb6efe18208431cddfb8368fd83d5badbf9bfd
+# actions/upload-artifact@v5 -> 330a01c490aca151604b8cf639adc76d48f6c5d4
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  NGINX_VERSION: ""
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+  workflow_dispatch: {}
+
+concurrency:
+  group: ci-fast-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # ── Short fuzz regression — both parser targets, 120s each ────────────────
+  fuzz-regression:
+    name: Fuzz regression (120s/target)
+    runs-on: [self-hosted, builder02, lxc]
+    timeout-minutes: 30
+    steps:
+      - name: Checkout module
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+
+      - name: Install clang + libFuzzer
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang
+
+      - name: Build fuzz targets
+        run: bash fuzz/build.sh "$GITHUB_WORKSPACE/fuzz"
+
+      - name: Run each target 120s
+        run: |
+          set -euo pipefail
+          cd fuzz
+          for t in json:corpus http:corpus_http; do
+            name=${t%%:*}; corp=${t##*:}
+            echo "== fuzz_${name} (120s) =="
+            set +e
+            "./fuzz_${name}" \
+              -max_total_time=120 \
+              -dict=fuzz.dict \
+              -print_final_stats=1 \
+              -artifact_prefix="crash-${name}-" \
+              "${corp}/"
+            rc=$?
+            set -e
+            [ $rc -eq 0 ] || { echo "❌ fuzz_${name} crash (exit $rc)"; exit 1; }
+            echo "✓ no crashes in fuzz_${name} 120s"
+          done
+
+      - name: Upload crash artifacts
+        if: failure()
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        with:
+          name: fuzz-fast-crashes
+          path: |
+            ${{ github.workspace }}/fuzz/crash-*
+          retention-days: 14
+
+  # ── Short memcheck soak — 60s, no helgrind (helgrind = deep only) ─────────
+  memcheck-lite:
+    name: Memcheck lite (60s soak)
+    runs-on: [self-hosted, builder02, lxc]
+    timeout-minutes: 45
+    steps:
+      - name: Checkout module
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+
+      - name: Resolve latest mainline nginx
+        run: |
+          set -euo pipefail
+          ver=$(curl -fsSL https://nginx.org/en/download.html \
+            | grep -oP 'nginx-\K[0-9]+\.[0-9]+\.[0-9]+(?=\.tar\.gz)' \
+            | sort -V | tail -1)
+          [ -n "$ver" ] || { echo "::error::cannot resolve nginx version"; exit 1; }
+          echo "NGINX_VERSION=$ver" >> "$GITHUB_ENV"
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential curl libpcre2-dev libssl-dev pkg-config \
+            valgrind wget zlib1g-dev
+
+      - name: Build debug nginx + autocert module (dynamic, AUTOCERT_TEST=1)
+        run: |
+          set -euo pipefail
+          test -f "nginx-${NGINX_VERSION}.tar.gz" || \
+            wget -q -O "nginx-${NGINX_VERSION}.tar.gz" \
+              "https://nginx.org/download/nginx-${NGINX_VERSION}.tar.gz"
+          tar -xzf "nginx-${NGINX_VERSION}.tar.gz"
+          cd "nginx-${NGINX_VERSION}"
+          AUTOCERT_TEST=1 ./configure \
+            --with-compat --with-debug --with-threads --with-http_ssl_module \
+            --with-cc-opt="-DNGX_DEBUG_PALLOC=1 -g3 -O0 -fno-omit-frame-pointer -funwind-tables" \
+            --add-dynamic-module="$GITHUB_WORKSPACE"
+          make -j"$(nproc)"
+
+      - name: Memcheck soak (60s)
+        env:
+          USE_VALGRIND: "1"
+          NGX_BUILD_DIR: ${{ github.workspace }}/nginx-${{ env.NGINX_VERSION }}
+        run: |
+          bash tools/soak.sh \
+            "$GITHUB_WORKSPACE/nginx-${NGINX_VERSION}/objs/nginx" 60 4
