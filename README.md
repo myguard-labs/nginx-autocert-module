@@ -1,7 +1,9 @@
 # nginx-autocert-module
 
 [![Build & Test](https://github.com/myguard-labs/nginx-autocert-module/actions/workflows/build-test.yml/badge.svg)](https://github.com/myguard-labs/nginx-autocert-module/actions/workflows/build-test.yml)
-[![CI Fast](https://github.com/myguard-labs/nginx-autocert-module/actions/workflows/ci-fast.yml/badge.svg)](https://github.com/myguard-labs/nginx-autocert-module/actions/workflows/ci-fast.yml)
+[![Security scanners](https://github.com/myguard-labs/nginx-autocert-module/actions/workflows/security-scanners.yml/badge.svg)](https://github.com/myguard-labs/nginx-autocert-module/actions/workflows/security-scanners.yml)
+[![Fuzzing](https://github.com/myguard-labs/nginx-autocert-module/actions/workflows/fuzzing.yml/badge.svg)](https://github.com/myguard-labs/nginx-autocert-module/actions/workflows/fuzzing.yml)
+[![Valgrind](https://github.com/myguard-labs/nginx-autocert-module/actions/workflows/valgrind.yml/badge.svg)](https://github.com/myguard-labs/nginx-autocert-module/actions/workflows/valgrind.yml)
 [![CI Deep](https://github.com/myguard-labs/nginx-autocert-module/actions/workflows/ci-deep.yml/badge.svg)](https://github.com/myguard-labs/nginx-autocert-module/actions/workflows/ci-deep.yml)
 
 **Automatic TLS certificates for NGINX — built into the server.**

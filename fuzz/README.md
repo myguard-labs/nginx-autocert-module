@@ -134,6 +134,7 @@ responses:
 
 `.github/workflows/ci-deep.yml` runs both targets long (14400s each) monthly
 (1st of the month) and on manual dispatch, alongside the memcheck/helgrind soaks
-and the security scanners. `.github/workflows/ci-fast.yml` runs a 120s/target
-regression on every PR/push (with `fuzz.dict`), plus a 60s memcheck soak. The
-per-change build gate is the ASan+UBSan build-test suite in `build-test.yml`.
+and the security scanners. `.github/workflows/fuzzing.yml` runs a 120s/target
+regression on every PR/push (with `fuzz.dict`); `valgrind.yml` (60s memcheck
+soak) and `security-scanners.yml` gate the same PR/push events. The per-change
+build gate is the ASan+UBSan build-test suite in `build-test.yml`.
