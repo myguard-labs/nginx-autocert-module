@@ -9,6 +9,8 @@
 
 **Automatic TLS certificates for NGINX — built into the server.**
 
+Features: wildcard, TLS-ALPN01 (skip port 80), dual-cert.
+
 `nginx-autocert-module` is an [ACME](https://datatracker.ietf.org/doc/html/rfc8555)
 client that lives *inside* NGINX. Add `autocert on;` to a vhost and NGINX itself
 obtains, serves, and renews a certificate from Let's Encrypt (or any ACME CA) for
