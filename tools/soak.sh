@@ -72,14 +72,14 @@ RUN=("$NGINX" -p "$WORK" -c "$WORK/conf/nginx.conf")
 if [ "${USE_VALGRIND:-0}" = "1" ]; then
     RUN=(valgrind --error-exitcode=99 --leak-check=full
          --errors-for-leak-kinds=definite
-         --suppressions="$SUPP" --log-file="$WORK/logs/valgrind.%p"
+         --suppressions="$SUPP" --gen-suppressions=all --log-file="$WORK/logs/valgrind.%p"
          "${RUN[@]}")
 elif [ "${USE_HELGRIND:-0}" = "1" ]; then
     # Data-race / lock-order checking (challenge store rbtree + shared memory).
     # Reuses the same suppression file; --error-exitcode=99 so a detected race
     # fails the job rather than relying on grep-of-log alone.
     RUN=(valgrind --tool=helgrind --error-exitcode=99
-         --suppressions="$SUPP" --log-file="$WORK/logs/helgrind.%p"
+         --suppressions="$SUPP" --gen-suppressions=all --log-file="$WORK/logs/helgrind.%p"
          "${RUN[@]}")
 fi
 
@@ -146,6 +146,16 @@ if ls "$WORK"/logs/valgrind.* "$WORK"/logs/helgrind.* >/dev/null 2>&1; then
         echo "FAIL: valgrind/helgrind errors:"
         grep -E 'ERROR SUMMARY|definitely lost' \
             "$WORK"/logs/valgrind.* "$WORK"/logs/helgrind.* 2>/dev/null
+        # Dump every log holding errors in full: the WORK dir is wiped on
+        # exit, so this is the only place the stacks (and the exact
+        # suppression blocks from --gen-suppressions=all) survive, e.g.
+        # in a CI job log.
+        for _vglog in "$WORK"/logs/valgrind.* "$WORK"/logs/helgrind.*; do
+            [ -f "$_vglog" ] || continue
+            grep -qE 'ERROR SUMMARY: [1-9]|definitely lost: [1-9]' "$_vglog" || continue
+            echo "---- $_vglog ----"
+            cat "$_vglog"
+        done
         problems=1
     fi
 fi
