@@ -191,6 +191,16 @@ ngx_autocert_acme_cancel_inflight(void)
         ngx_close_connection(c);
         r->peer.connection = NULL;
     }
+
+    /*
+     * The request pool is normally destroyed by the step's *_done handler, but
+     * we suppress that handler here (done=1, no r->handler call). Nothing else
+     * aliases this pool once the connection is closed: c->pool == r->pool but
+     * ngx_close_connection() does not destroy c->pool. `r` itself lives in this
+     * pool, so this must be the last statement. Without it the pool leaks on
+     * every master_process-off reload that lands with a request in flight.
+     */
+    ngx_destroy_pool(r->pool);
 }
 
 
