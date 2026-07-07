@@ -1680,6 +1680,8 @@ ngx_autocert_order_validate_cert(ngx_autocert_order_t *order)
     X509      *leaf, *x;
     EVP_PKEY  *key;
     ngx_int_t  rc = NGX_ERROR;
+    ngx_str_t  verify;
+    u_char     verify_buf[256];
 
     leaf = NULL;
     key = NULL;
@@ -1730,10 +1732,23 @@ ngx_autocert_order_validate_cert(ngx_autocert_order_t *order)
 
     /* A matching key alone is not sufficient: a trusted-but-buggy CA could
      * sign the CSR key into another DNS name, or return an unusable validity
-     * window. Reject it before it can replace the last known-good certificate. */
-    if (X509_check_host(leaf, (char *) order->domain.data, order->domain.len,
-                        0, NULL) != 1)
+     * window. Reject it before it can replace the last known-good certificate.
+     *
+     * For a wildcard "*.rest" domain we cannot ask X509_check_host about the
+     * literal "*." (the wildcard lives in the leaf's SAN, not the query name),
+     * so probe with a concrete sub-label "x.rest" — default wildcard matching
+     * then answers whether the leaf's "*.rest" SAN covers it. Mirrors the
+     * driver/serve/crypto paths, which all rewrite the same way. */
+    verify = order->domain;
+    if (verify.len > 2 && verify.len < sizeof(verify_buf)
+        && verify.data[0] == '*' && verify.data[1] == '.')
     {
+        verify_buf[0] = 'x';
+        ngx_memcpy(verify_buf + 1, verify.data + 1, verify.len - 1);
+        verify.data = verify_buf;       /* '*' -> 'x', same length */
+    }
+
+    if (X509_check_host(leaf, (char *) verify.data, verify.len, 0, NULL) != 1) {
         ngx_log_error(NGX_LOG_ERR, order->log, 0,
                       "autocert: downloaded leaf does not cover \"%V\"",
                       &order->domain);
