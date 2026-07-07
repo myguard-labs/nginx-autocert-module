@@ -5,6 +5,7 @@
 [![Fuzzing](https://github.com/myguard-labs/nginx-autocert-module/actions/workflows/fuzzing.yml/badge.svg)](https://github.com/myguard-labs/nginx-autocert-module/actions/workflows/fuzzing.yml)
 [![Valgrind](https://github.com/myguard-labs/nginx-autocert-module/actions/workflows/valgrind.yml/badge.svg)](https://github.com/myguard-labs/nginx-autocert-module/actions/workflows/valgrind.yml)
 [![CI Deep](https://github.com/myguard-labs/nginx-autocert-module/actions/workflows/ci-deep.yml/badge.svg)](https://github.com/myguard-labs/nginx-autocert-module/actions/workflows/ci-deep.yml)
+[![CodeQL](https://github.com/myguard-labs/nginx-autocert-module/actions/workflows/codeql.yml/badge.svg)](https://github.com/myguard-labs/nginx-autocert-module/actions/workflows/codeql.yml)
 
 **Automatic TLS certificates for NGINX — built into the server.**
 
