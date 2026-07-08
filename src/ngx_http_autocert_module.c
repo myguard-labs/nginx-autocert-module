@@ -445,6 +445,20 @@ ngx_http_autocert_init_main_conf(ngx_conf_t *cf, void *conf)
     /* User spec: 7d default (industry-safer 30d noted but honoring request). */
     ngx_conf_init_value(amcf->renew_before, 7 * 24 * 60 * 60);
 
+    /*
+     * Clamp renew_before to a sane upper bound. It is subtracted from a cert's
+     * notAfter to decide the renew instant (driver: now >= notAfter - renew_before);
+     * a value at/above the cert lifetime makes that always-true, so every sweep
+     * reissues — hammering the CA and tripping ACME rate limits (self-DoS). No
+     * real deployment renews more than ~89d ahead (Let's Encrypt certs live 90d).
+     * Reject rather than silently clamp so a fat-fingered value is obvious.
+     */
+    if (amcf->renew_before <= 0 || amcf->renew_before > 89 * 24 * 60 * 60) {
+        ngx_log_error(NGX_LOG_EMERG, cf->log, 0,
+                      "autocert_renew_before must be > 0 and <= 89d");
+        return NGX_CONF_ERROR;
+    }
+
     if (amcf->key_types == NGX_CONF_UNSET_PTR) {
         ngx_uint_t  *kt;
 

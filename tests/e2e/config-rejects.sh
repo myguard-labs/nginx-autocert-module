@@ -130,4 +130,32 @@ expect_reject "autocert_key_type over cap" \
     "    autocert_key_type p256 p384 rsa2048 rsa3072 rsa4096;" \
     "at most 4 key types"
 
+# renew_before is subtracted from a cert's notAfter to pick the renew instant; a
+# value at/above the cert lifetime makes "now >= notAfter - renew_before" always
+# true, so every sweep reissues -> CA hammering / ACME rate-limit self-DoS. Clamp
+# to <= 89d at config time (LE certs live 90d) rather than fail mysteriously.
+expect_reject "autocert_renew_before over 89d" \
+    "    autocert_renew_before 90d;" \
+    "autocert_renew_before must be > 0 and <= 89d"
+expect_reject "autocert_renew_before absurd" \
+    "    autocert_renew_before 999999999;" \
+    "autocert_renew_before must be > 0 and <= 89d"
+
+# Sanity: a normal renew_before window is accepted.
+cat > "$PREFIX/conf/nginx.conf" <<EOF
+load_module $HTTP_SO;
+error_log $PREFIX/logs/error.log;
+events {}
+http {
+    autocert on;
+    autocert_contact a@b.com;
+    autocert_store_path $PREFIX/store;
+    autocert_renew_before 30d;
+    server { listen $PORT; server_name x.example.com; }
+}
+EOF
+"$SERVER_BIN" -t -p "$PREFIX" -c "$PREFIX/conf/nginx.conf" 2>&1 | grep -q "syntax is ok" \
+    || { echo "::error::a valid autocert_renew_before was rejected"; exit 1; }
+echo "✓ valid autocert_renew_before accepted"
+
 echo "✓✓ config-time rejection checks verified"
