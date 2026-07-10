@@ -5,7 +5,7 @@
 
 #include "ngx_http_autocert_crypto.h"
 #include "ngx_autocert_shared.h"
-#include "ngx_http_autocert_conf.h"     /* ngx_autocert_str_is_ip */
+#include "ngx_autocert_ident.h"         /* ngx_autocert_str_is_ip, _cert_covers */
 
 #include <limits.h>
 #include <errno.h>
