@@ -120,8 +120,20 @@ ngx_autocert_get_conf(ngx_cycle_t *cycle, ngx_autocert_conf_t *out)
         ngx_http_core_loc_conf_t  *clcf;
 
         clcf = http_ctx->loc_conf[ngx_http_core_module.ctx_index];
+        /*
+         * "Has at least one name server configured?" The member that answers
+         * this changed shape in angie 1.12.0: `ngx_resolver_t.connections` went
+         * from an `ngx_array_t` (mainline nginx, angie < 1.12.0) to a linked
+         * list of `ngx_resolver_connection_t *` (angie >= 1.12.0, NULL when no
+         * servers — see its ngx_resolver_create "no name servers defined").
+         */
+#if (defined(angie_version) && angie_version >= 1012000)
+        if (clcf != NULL && clcf->resolver != NULL
+            && clcf->resolver->connections != NULL)
+#else
         if (clcf != NULL && clcf->resolver != NULL
             && clcf->resolver->connections.nelts > 0)
+#endif
         {
             out->resolver = clcf->resolver;
         }

@@ -972,7 +972,11 @@ rearm:
             }
         }
         if (soonest != 0) {
-            ngx_msec_t  until = (ngx_msec_t) (soonest - now) * 1000;
+            /* 64-bit multiply BEFORE the ngx_msec_t narrow (mirrors the
+             * renew_before math above): soonest is CAP-bounded today so this
+             * cannot wrap, but doing it in 64-bit is regression-proof if the
+             * eligibility CAP ever grows. */
+            ngx_msec_t  until = (ngx_msec_t) ((uint64_t) (soonest - now) * 1000);
             if (until < interval) {
                 interval = until;
             }
