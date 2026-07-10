@@ -9,8 +9,9 @@
 #
 # We drive both:
 #   - Two server{} blocks (two domains) -> assert BOTH get a cert on first run.
-#   - autocert_renew_before is set absurdly large (larger than the Pebble cert
-#     lifetime) so every stored cert is permanently "inside" its renew window.
+#   - Pebble issues 1h certs (certificateValidityPeriod: 3600) and
+#     autocert_renew_before is 2h (> lifetime, under the 89d config clamp) so
+#     every stored cert is permanently "inside" its renew window.
 #     A reload spawns a fresh helper whose initial scan therefore reissues both
 #     domains. We capture each leaf's serial before the reload and assert it
 #     changes after — i.e. a genuine reissue landed atomically in the store and
@@ -86,7 +87,13 @@ cat > "$PREFIX/pebble-config.json" <<EOF
     "httpPort": 80,
     "tlsPort": 5001,
     "ocspResponderURL": "",
-    "externalAccountBindingRequired": false
+    "externalAccountBindingRequired": false,
+    "profiles": {
+      "default": {
+        "description": "short-lived certs so renew_before <= 89d forces a renewal",
+        "validityPeriod": 3600
+      }
+    }
   }
 }
 EOF
@@ -108,8 +115,9 @@ done
 
 docker cp "$PEBBLE_NAME:/test/certs/pebble.minica.pem" "$PREFIX/ca.pem"
 
-# renew_before far exceeds the Pebble cert lifetime => every cert is always
-# inside its renew window, so a fresh helper scan reissues it.
+# Pebble issues 1h certs here (certificateValidityPeriod: 3600); renew_before 2h
+# exceeds that lifetime => every cert is always inside its renew window, so a
+# fresh helper scan reissues it. 2h stays under the 89d config clamp.
 cat > "$PREFIX/conf/nginx.conf" <<EOF
 load_module $HTTP_SO;
 user root;   # worker-0 ACME driver writes the store; keep worker uid able to
@@ -122,7 +130,7 @@ http {
     autocert_resolver 127.0.0.1:${DNS_PORT};
     autocert_ca_trusted_certificate $PREFIX/ca.pem;
     autocert_store_path $PREFIX/store;
-    autocert_renew_before 9999d;
+    autocert_renew_before 2h;
     server { listen 80; server_name ${DOMAIN_A}; }
     server { listen 80; server_name ${DOMAIN_B}; }
 }
@@ -151,7 +159,7 @@ SERIAL_B1=$(wait_for_cert "$CHAIN_B") || { echo "::error::${DOMAIN_B} not provis
 echo "✓ both domains provisioned (multi-name): A=$SERIAL_A1 B=$SERIAL_B1"
 
 # Reload -> fresh helper -> initial scan finds both inside the renew window
-# (renew_before huge) -> reissues both. New serials prove a real reissue.
+# (renew_before 2h > 1h cert lifetime) -> reissues both. New serials prove it.
 echo "== reload: force renewal scan =="
 "$SERVER_BIN" -p "$PREFIX" -c "$PREFIX/conf/nginx.conf" -s reload
 
@@ -192,7 +200,7 @@ echo "✓ renewed key/chain pairs are consistent, no staging leftover (atomic sw
 echo "== restart with small renew_before (healthy certs not due) =="
 "$SERVER_BIN" -p "$PREFIX" -c "$PREFIX/conf/nginx.conf" -s stop
 sleep 1
-sed -i 's/autocert_renew_before 9999d;/autocert_renew_before 60s;/' \
+sed -i 's/autocert_renew_before 2h;/autocert_renew_before 60s;/' \
     "$PREFIX/conf/nginx.conf"
 "$SERVER_BIN" -t -p "$PREFIX" -c "$PREFIX/conf/nginx.conf"
 "$SERVER_BIN" -p "$PREFIX" -c "$PREFIX/conf/nginx.conf"
