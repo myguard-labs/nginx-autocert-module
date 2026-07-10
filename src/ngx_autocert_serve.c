@@ -715,6 +715,23 @@ ngx_http_autocert_cert_cb(SSL *ssl_conn, void *arg)
     store = host;
     store_hash = hash;
 
+    /*
+     * By default the store key is the SNI verbatim — an identity map for a dns
+     * name. An IP identifier, however, is stored under its fs_segment form
+     * (IPv6 -> "_ip6_..." since ':' is not a legal path segment), so an IP SNI
+     * must be mapped the same way the driver mapped it at issuance or the store
+     * lookup misses. IPv4 maps to itself; only IPv6 actually changes.
+     */
+    if (ngx_autocert_str_is_ip(&host, NULL) != 0) {
+        size_t  seg_len = ngx_autocert_fs_segment(key_buf, sizeof(key_buf),
+                                                  &host);
+        if (seg_len != 0) {
+            store.data = key_buf;
+            store.len = seg_len;
+            store_hash = ngx_crc32_short(store.data, store.len);
+        }
+    }
+
     if (sctx->names != NULL && !ngx_autocert_serve_name_match(sctx, &host, hash))
     {
         ngx_int_t   matched = 0;
@@ -1104,8 +1121,10 @@ ngx_http_autocert_cache_reload(ngx_autocert_cert_t *c, ngx_uint_t slot,
     /* Verify against the REQUESTED SNI (verify), not the store key (host): for a
      * wildcard match host is the shared "_wildcard_.<rest>" fs-segment, which is
      * not a DNS name the leaf's "*.rest" SAN covers. X509_check_host matches the
-     * cert's wildcard SAN against the concrete SNI correctly. */
-    if (X509_check_host(leaf, (char *) verify->data, verify->len, 0, NULL) != 1) {
+     * cert's wildcard SAN against the concrete SNI correctly. An IP identifier
+     * is carried in an iPAddress SAN, which X509_check_host never matches, so
+     * ngx_autocert_cert_covers dispatches to X509_check_ip_asc for an IP. */
+    if (!ngx_autocert_cert_covers(leaf, verify)) {
         ngx_log_error(NGX_LOG_ERR, log, 0,
                       "autocert: certificate identity mismatch for \"%V\" "
                       "(store \"%V\")", verify, host);

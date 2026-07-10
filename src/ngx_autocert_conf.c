@@ -102,6 +102,7 @@ ngx_autocert_get_conf(ngx_cycle_t *cycle, ngx_autocert_conf_t *out)
     out->path = amcf->path;
     out->renew_before = amcf->renew_before;
     out->challenge = amcf->challenge;
+    out->profile = amcf->profile;
     out->challenge_zone = amcf->challenge_zone;
     out->names = amcf->names;
     out->ca_list = amcf->ca_list;

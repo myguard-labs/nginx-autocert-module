@@ -1287,6 +1287,7 @@ ngx_autocert_start_order_for(ngx_cycle_t *cycle, ngx_autocert_conf_t *acf,
     order->key_type = key_type;     /* dual-cert: this variant's leaf key type */
     order->store = acf->store;
     order->store_path = acf->path;
+    order->profile = acf->profile;
     order->handler = ngx_autocert_order_complete;
     order->data = cycle;
 

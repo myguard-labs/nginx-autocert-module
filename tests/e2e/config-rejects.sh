@@ -158,4 +158,74 @@ EOF
     || { echo "::error::a valid autocert_renew_before was rejected"; exit 1; }
 echo "✓ valid autocert_renew_before accepted"
 
+# --- IP-address certs (RFC 8738) ---------------------------------------------
+
+# An IP identifier can only be validated over http-01 / tls-alpn-01; dns-01 is
+# meaningless for an address (no zone to place a TXT under). The name loop
+# rejects an IP server_name under dns-01 at postconfig. The reject template
+# hardcodes a dns server_name, so these use a bespoke config with an IP name.
+expect_reject_ip() {
+    local label="$1" name="$2" chal="$3" want="$4"
+    cat > "$PREFIX/conf/nginx.conf" <<EOF
+load_module $HTTP_SO;
+error_log $PREFIX/logs/error.log;
+events {}
+http {
+    autocert on;
+    autocert_contact a@b.com;
+    autocert_store_path $PREFIX/store;
+    autocert_challenge $chal;
+    autocert_dns_hook_add /bin/true;
+    autocert_dns_hook_remove /bin/true;
+    server { listen $PORT; server_name $name; }
+}
+EOF
+    local out rc=0
+    out=$("$SERVER_BIN" -t -p "$PREFIX" -c "$PREFIX/conf/nginx.conf" 2>&1) || rc=$?
+    if [ "$rc" -eq 0 ]; then
+        echo "::error::$label: config ACCEPTED but should be rejected"
+        printf '%s\n' "$out" | sed 's/^/    /'; return 1
+    fi
+    printf '%s' "$out" | grep -q "$want" || {
+        echo "::error::$label: rejected, but not for expected reason ($want)"
+        printf '%s\n' "$out" | sed 's/^/    /'; return 1; }
+    echo "✓ $label rejected at config time"
+}
+
+expect_reject_ip "IPv4 server_name under dns-01" "192.0.2.1" "dns-01" \
+    "cannot issue a certificate for IP address"
+# nginx stores an IPv6 server_name unbracketed, e.g. "2001:db8::1".
+expect_reject_ip "IPv6 server_name under dns-01" "2001:db8::1" "dns-01" \
+    "cannot issue a certificate for IP address"
+
+# autocert_profile is emitted verbatim into the newOrder JSON, so a value with a
+# JSON-special / out-of-charset byte is rejected at config load. Use a quoted
+# value so the out-of-charset byte reaches our check rather than tripping the
+# nginx tokenizer first (a bare '"' or '{' is a config metacharacter).
+expect_reject "autocert_profile with slash" \
+    '    autocert_profile "a/b";' \
+    "autocert_profile .* contains an invalid character"
+expect_reject "autocert_profile with space" \
+    '    autocert_profile "a b";' \
+    "autocert_profile .* contains an invalid character"
+
+# Sanity: an IP server_name under http-01 and a valid profile are accepted.
+cat > "$PREFIX/conf/nginx.conf" <<EOF
+load_module $HTTP_SO;
+error_log $PREFIX/logs/error.log;
+events {}
+http {
+    autocert on;
+    autocert_contact a@b.com;
+    autocert_store_path $PREFIX/store;
+    autocert_challenge http-01;
+    autocert_profile shortlived;
+    server { listen $PORT; server_name 192.0.2.1; }
+    server { listen $PORT; server_name 2001:db8::1; }
+}
+EOF
+"$SERVER_BIN" -t -p "$PREFIX" -c "$PREFIX/conf/nginx.conf" 2>&1 | grep -q "syntax is ok" \
+    || { echo "::error::a valid IP-cert + profile config was rejected"; exit 1; }
+echo "✓ IP server_names + autocert_profile accepted under http-01"
+
 echo "✓✓ config-time rejection checks verified"
