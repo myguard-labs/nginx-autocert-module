@@ -137,7 +137,7 @@ jobs:
 
   build-nginx:
     name: Build & load (nginx ${{ needs.resolve.outputs.nginx_version }})
-    needs: resolve
+    needs: [validation, resolve]
     runs-on: [self-hosted, builder02, lxc]
     timeout-minutes: 20
     steps:
@@ -158,7 +158,7 @@ jobs:
   # compile-only stance — see history.md 2026-06-20.)
   build-angie:
     name: Build & load (angie ${{ needs.resolve.outputs.angie_version }})
-    needs: resolve
+    needs: [validation, resolve]
     runs-on: [self-hosted, builder02, lxc]
     timeout-minutes: 20
     steps:
@@ -180,31 +180,11 @@ jobs:
   # proves: matched builds work, mismatched builds are refused by the module's
   # ABI guard (clean [emerg], never SIGSEGV). Self-contained — no dependency on
   # our private deb patches.
-  abi-mismatch-guard:
-    name: ABI-drift guard (matched OK, mismatch refused)
-    needs: resolve
-    runs-on: [self-hosted, builder02, lxc]
-    timeout-minutes: 25
-    steps:
-      - name: Checkout module
-        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
-      - name: Build vanilla + enlarged angie, run ABI matrix
-        shell: bash
-        env:
-          ANGIE_URL: ${{ needs.resolve.outputs.angie_url }}
-        run: |
-          set -euo pipefail
-          WORKSPACE="$GITHUB_WORKSPACE" bash tests/e2e/abi-build-and-check.sh
-
-  # Prove a PRODUCTION build (no AUTOCERT_TEST) omits the test-only seed
-  # directives entirely, so a stray/templated autocert_test_challenge cannot
-  # inject a forged key authorization. Builds the module withOUT the flag and
-  # asserts `nginx -t` rejects the directive as unknown.
-  test-directives-guard:
-    name: Test-only directives rejected in prod build
-    needs: resolve
-    runs-on: [self-hosted, builder02, lxc]
-    timeout-minutes: 20
+  guard-suite:
+    name: Guard suite
+    needs: [validation, resolve]
+    runs-on: [self-hosted, builder02, docker]
+    timeout-minutes: 35
     steps:
       - name: Checkout module
         uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
@@ -212,36 +192,41 @@ jobs:
       - name: Setup build deps
         uses: ./.github/actions/setup
         with:
-          ccache-key: build-nginx-${{ needs.resolve.outputs.nginx_version }}
+          ccache-key: guard-${{ needs.resolve.outputs.nginx_version }}-${{ needs.resolve.outputs.angie_version }}
 
-      - name: Restore nginx tarball cache
-        id: nginx-tarball
+      - name: Restore source tarball cache
+        id: tarball-cache
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: ~/.cache/src-tarballs
-          key: src-tarball-nginx-${{ needs.resolve.outputs.nginx_version }}
+          key: src-tarball-guard-${{ needs.resolve.outputs.nginx_version }}-${{ needs.resolve.outputs.angie_version }}
 
-      - name: Fetch nginx ${{ needs.resolve.outputs.nginx_version }}
+      - name: Fetch nginx + angie tarballs
         # Do NOT gate on cache-hit: on self-hosted runners actions/cache can
         # report a hit while the path is empty, so always ensure the file is
         # actually present (idempotent — curl only when missing).
         run: |
           set -euo pipefail
           mkdir -p ~/.cache/src-tarballs
-          tarball=~/.cache/src-tarballs/nginx-${{ needs.resolve.outputs.nginx_version }}.tar.gz
-          if [ ! -s "$tarball" ]; then
-            curl -fsSL -o "$tarball" "${{ needs.resolve.outputs.nginx_url }}"
-          fi
+          nginx_tar=~/.cache/src-tarballs/nginx-${{ needs.resolve.outputs.nginx_version }}.tar.gz
+          angie_tar=~/.cache/src-tarballs/angie-${{ needs.resolve.outputs.angie_version }}.tar.gz
+          [ -s "$nginx_tar" ] || curl -fsSL -o "$nginx_tar" "${{ needs.resolve.outputs.nginx_url }}"
+          [ -s "$angie_tar" ] || curl -fsSL -o "$angie_tar" "${{ needs.resolve.outputs.angie_url }}"
 
-      - name: Extract nginx ${{ needs.resolve.outputs.nginx_version }}
+      - name: ABI-drift guard (matched OK, mismatch refused)
+        env:
+          ANGIE_URL: ${{ needs.resolve.outputs.angie_url }}
         run: |
           set -euo pipefail
-          tar -xzf ~/.cache/src-tarballs/nginx-${{ needs.resolve.outputs.nginx_version }}.tar.gz
+          WORKSPACE="$GITHUB_WORKSPACE" bash tests/e2e/abi-build-and-check.sh
 
-      - name: Build prod (no AUTOCERT_TEST) + assert directive rejected
+      - name: Test-only directives rejected in prod build
         run: |
           set -euo pipefail
-          cd "${{ needs.resolve.outputs.nginx_dir }}"
+          mkdir -p prod-nginx
+          tar -xzf ~/.cache/src-tarballs/nginx-${{ needs.resolve.outputs.nginx_version }}.tar.gz \
+            -C prod-nginx --strip-components=1
+          cd prod-nginx
           # No AUTOCERT_TEST in the env: the test-only directives must be absent.
           ./configure --with-compat --with-http_ssl_module \
             --with-cc="ccache cc" \
@@ -271,11 +256,41 @@ jobs:
           done
           ccache -s || true
 
-  crypto-unit:
-    name: Crypto unit tests (M3)
-    needs: [resolve, build-nginx]
+      - name: Slow-drip total-read budget (#37)
+        run: |
+          set -euo pipefail
+          run_slowloris() {
+            local flavor="$1" version="$2" tarball="$3"
+            local dir="slow-${flavor}"
+            rm -rf "$dir"; mkdir -p "$dir"
+            tar -xzf "$tarball" -C "$dir" --strip-components=1
+            cd "$dir"
+            # -DNGX_AUTOCERT_READ_TOTAL=2000 shrinks the 60s budget to 2s so the
+            # slow-drip abort is observable in a few seconds, not a minute.
+            AUTOCERT_TEST=1 ./configure --with-compat --with-http_ssl_module \
+              --with-cc="ccache cc" \
+              --with-cc-opt="-Wall -Wextra -Werror -DNGX_AUTOCERT_READ_TOTAL=2000" \
+              --add-dynamic-module="$GITHUB_WORKSPACE" > "/tmp/conf-${flavor}.log" 2>&1 \
+              || { tail -40 "/tmp/conf-${flavor}.log"; exit 1; }
+            make > "/tmp/make-${flavor}.log" 2>&1 || { tail -40 "/tmp/make-${flavor}.log"; exit 1; }
+            test -f objs/ngx_http_autocert_module.so
+            BIN=objs/${flavor}; [ -x "$BIN" ] || BIN=objs/nginx
+            test -x "$BIN"
+            SERVER_BIN="$PWD/$BIN" NGX_BUILD_DIR="$PWD" \
+              bash "$GITHUB_WORKSPACE/tests/e2e/slowloris-read.sh"
+            cd "$GITHUB_WORKSPACE"
+            echo "✓ slowloris budget guard passed for ${flavor} ${version}"
+          }
+          run_slowloris nginx "${{ needs.resolve.outputs.nginx_version }}" \
+            "$HOME/.cache/src-tarballs/nginx-${{ needs.resolve.outputs.nginx_version }}.tar.gz"
+          run_slowloris angie "${{ needs.resolve.outputs.angie_version }}" \
+            "$HOME/.cache/src-tarballs/angie-${{ needs.resolve.outputs.angie_version }}.tar.gz"
+
+  unit-tests:
+    name: Unit tests
+    needs: [resolve, build-nginx, guard-suite]
     runs-on: [self-hosted, builder02, lxc]
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - name: Checkout module
         uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
@@ -291,113 +306,47 @@ jobs:
           name: build-nginx
           path: ${{ needs.resolve.outputs.nginx_dir }}
 
-      - name: Build + run crypto unit tests
+      - name: Build + run unit tests
         run: |
           set -euo pipefail
           NGX="$GITHUB_WORKSPACE/${{ needs.resolve.outputs.nginx_dir }}"
-          INC="-I$NGX/src/core -I$NGX/src/event -I$NGX/src/os/unix -I$NGX/objs"
-          OBJS="$NGX/objs/src/core/ngx_palloc.o $NGX/objs/src/core/ngx_string.o \
+          CORE_INC="-I$NGX/src/core -I$NGX/src/event -I$NGX/src/os/unix -I$NGX/objs"
+          BASE_OBJS="$NGX/objs/src/core/ngx_palloc.o $NGX/objs/src/core/ngx_string.o \
                 $NGX/objs/src/os/unix/ngx_time.o $NGX/objs/src/core/ngx_times.o \
-                $NGX/objs/src/core/ngx_inet.o $NGX/objs/src/os/unix/ngx_alloc.o"
+                $NGX/objs/src/os/unix/ngx_alloc.o"
+          INET_OBJS="$BASE_OBJS $NGX/objs/src/core/ngx_inet.o"
+          STORE_OBJS="$BASE_OBJS $NGX/objs/src/core/ngx_slab.o \
+                $NGX/objs/src/core/ngx_rbtree.o $NGX/objs/src/core/ngx_crc32.o \
+                $NGX/objs/src/core/ngx_shmtx.o"
+
           # INC and OBJS are flag/object lists that must word-split.
           # ngx_inet.o: crypto.c now pulls ngx_autocert_str_is_ip (IP-cert arc),
           # which references ngx_inet_addr / ngx_inet6_addr.
           # shellcheck disable=SC2086
-          gcc -Wall -Wextra -Werror $INC -o test_crypto \
+          gcc -Wall -Wextra -Werror $CORE_INC -o test_crypto \
             "$GITHUB_WORKSPACE/tests/unit/test_crypto.c" \
             "$GITHUB_WORKSPACE/src/ngx_http_autocert_crypto.c" \
-            $OBJS -lssl -lcrypto
+            $INET_OBJS -lssl -lcrypto
           ./test_crypto
 
-  json-unit:
-    name: JSON parser unit tests (M4c)
-    needs: [resolve, build-nginx]
-    runs-on: [self-hosted, builder02, lxc]
-    timeout-minutes: 10
-    steps:
-      - name: Checkout module
-        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
-
-      - name: Setup build deps
-        uses: ./.github/actions/setup
-        with:
-          packages: build-essential libssl-dev
-
-      - name: Download nginx build
-        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
-        with:
-          name: build-nginx
-          path: ${{ needs.resolve.outputs.nginx_dir }}
-
-      - name: Build + run JSON unit tests
-        run: |
-          set -euo pipefail
-          NGX="$GITHUB_WORKSPACE/${{ needs.resolve.outputs.nginx_dir }}"
-          INC="-I$NGX/src/core -I$NGX/src/event -I$NGX/src/os/unix -I$NGX/objs"
-          OBJS="$NGX/objs/src/core/ngx_palloc.o $NGX/objs/src/core/ngx_string.o \
-                $NGX/objs/src/os/unix/ngx_time.o $NGX/objs/src/core/ngx_times.o \
-                $NGX/objs/src/os/unix/ngx_alloc.o"
-          # INC and OBJS are flag/object lists that must word-split.
           # shellcheck disable=SC2086
-          gcc -Wall -Wextra -Werror $INC -o test_json \
+          gcc -Wall -Wextra -Werror $CORE_INC -o test_json \
             "$GITHUB_WORKSPACE/tests/unit/test_json.c" \
             "$GITHUB_WORKSPACE/src/ngx_autocert_json.c" \
-            $OBJS
+            $BASE_OBJS
           ./test_json
 
-  ipident-unit:
-    name: IP-identifier helper unit tests (I1)
-    needs: [resolve, build-nginx]
-    runs-on: [self-hosted, builder02, lxc]
-    timeout-minutes: 10
-    steps:
-      - name: Checkout module
-        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
-
-      - name: Setup build deps
-        uses: ./.github/actions/setup
-        with:
-          packages: build-essential libssl-dev
-
-      - name: Download nginx build
-        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
-        with:
-          name: build-nginx
-          path: ${{ needs.resolve.outputs.nginx_dir }}
-
-      - name: Build + run IP-identifier unit tests
-        run: |
-          set -euo pipefail
-          NGX="$GITHUB_WORKSPACE/${{ needs.resolve.outputs.nginx_dir }}"
-          INC="-I$NGX/src/core -I$NGX/src/event -I$NGX/src/event/modules \
+          HTTP_INC="-I$NGX/src/core -I$NGX/src/event -I$NGX/src/event/modules \
                -I$NGX/src/event/quic -I$NGX/src/os/unix -I$NGX/objs \
                -I$NGX/src/http -I$NGX/src/http/modules"
-          OBJS="$NGX/objs/src/core/ngx_string.o $NGX/objs/src/core/ngx_inet.o \
+          IPIDENT_OBJS="$NGX/objs/src/core/ngx_string.o $NGX/objs/src/core/ngx_inet.o \
                 $NGX/objs/src/core/ngx_palloc.o $NGX/objs/src/os/unix/ngx_alloc.o"
-          # INC and OBJS are flag/object lists that must word-split.
           # shellcheck disable=SC2086
-          gcc -Wall -Wextra -Werror $INC -o test_ipident \
+          gcc -Wall -Wextra -Werror $HTTP_INC -o test_ipident \
             "$GITHUB_WORKSPACE/tests/unit/test_ipident.c" \
-            $OBJS -lssl -lcrypto
+            $IPIDENT_OBJS -lssl -lcrypto
           ./test_ipident
 
-  http-unit:
-    name: HTTP parser unit tests (M4b)
-    needs: [resolve, build-nginx]
-    runs-on: [self-hosted, builder02, lxc]
-    timeout-minutes: 10
-    steps:
-      - name: Checkout module
-        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
-
-      - name: Setup build deps
-        uses: ./.github/actions/setup
-        with:
-          packages: build-essential
-
-      - name: Build + run HTTP parser unit tests
-        run: |
-          set -euo pipefail
           # Self-contained: the parser bodies are sliced from the shipped
           # ngx_autocert_acme.c by extract_http.sh and compiled against the
           # fuzz shim — no nginx objects needed (the rest of that TU is
@@ -407,118 +356,29 @@ jobs:
             -o test_http "$GITHUB_WORKSPACE/tests/unit/test_http.c"
           ./test_http
 
-  challenge-unit:
-    name: Challenge store unit tests (M5)
-    needs: [resolve, build-nginx]
-    runs-on: [self-hosted, builder02, lxc]
-    timeout-minutes: 10
-    steps:
-      - name: Checkout module
-        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
-
-      - name: Setup build deps
-        uses: ./.github/actions/setup
-        with:
-          packages: build-essential
-
-      - name: Download nginx build
-        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
-        with:
-          name: build-nginx
-          path: ${{ needs.resolve.outputs.nginx_dir }}
-
-      - name: Build + run challenge store unit tests
-        run: |
-          set -euo pipefail
-          NGX="$GITHUB_WORKSPACE/${{ needs.resolve.outputs.nginx_dir }}"
-          INC="-I$NGX/src/core -I$NGX/src/event -I$NGX/src/os/unix -I$NGX/objs"
-          # slab/rbtree/crc32/shmtx on top of the base pool/string/time objs.
-          OBJS="$NGX/objs/src/core/ngx_palloc.o $NGX/objs/src/core/ngx_string.o \
-                $NGX/objs/src/os/unix/ngx_time.o $NGX/objs/src/core/ngx_times.o \
-                $NGX/objs/src/os/unix/ngx_alloc.o $NGX/objs/src/core/ngx_slab.o \
-                $NGX/objs/src/core/ngx_rbtree.o $NGX/objs/src/core/ngx_crc32.o \
-                $NGX/objs/src/core/ngx_shmtx.o"
           # The store source carries an (intentional) unused init-zone `data`
           # param, so compile it with nginx's own -Wall (no -Wextra), and keep
           # -Wextra -Werror on the test TU.
           # shellcheck disable=SC2086
-          gcc -Wall -Werror $INC -c \
+          gcc -Wall -Werror $CORE_INC -c \
             "$GITHUB_WORKSPACE/src/ngx_autocert_challenge.c" -o challenge.o
           # shellcheck disable=SC2086
-          gcc -Wall -Wextra -Werror $INC -c \
+          gcc -Wall -Wextra -Werror $CORE_INC -c \
             "$GITHUB_WORKSPACE/tests/unit/test_challenge.c" -o test_challenge_tu.o
           # shellcheck disable=SC2086
-          gcc -o test_challenge test_challenge_tu.o challenge.o $OBJS
+          gcc -o test_challenge test_challenge_tu.o challenge.o $STORE_OBJS
           ./test_challenge
 
-  alpn-unit:
-    name: ALPN store unit tests (M10b)
-    needs: [resolve, build-nginx]
-    runs-on: [self-hosted, builder02, lxc]
-    timeout-minutes: 10
-    steps:
-      - name: Checkout module
-        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
-
-      - name: Setup build deps
-        uses: ./.github/actions/setup
-        with:
-          packages: build-essential
-
-      - name: Download nginx build
-        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
-        with:
-          name: build-nginx
-          path: ${{ needs.resolve.outputs.nginx_dir }}
-
-      - name: Build + run ALPN store unit tests
-        run: |
-          set -euo pipefail
-          NGX="$GITHUB_WORKSPACE/${{ needs.resolve.outputs.nginx_dir }}"
-          INC="-I$NGX/src/core -I$NGX/src/event -I$NGX/src/os/unix -I$NGX/objs"
-          OBJS="$NGX/objs/src/core/ngx_palloc.o $NGX/objs/src/core/ngx_string.o \
-                $NGX/objs/src/os/unix/ngx_time.o $NGX/objs/src/core/ngx_times.o \
-                $NGX/objs/src/os/unix/ngx_alloc.o $NGX/objs/src/core/ngx_slab.o \
-                $NGX/objs/src/core/ngx_rbtree.o $NGX/objs/src/core/ngx_crc32.o \
-                $NGX/objs/src/core/ngx_shmtx.o"
           # shellcheck disable=SC2086
-          gcc -Wall -Werror $INC -c \
+          gcc -Wall -Werror $CORE_INC -c \
             "$GITHUB_WORKSPACE/src/ngx_autocert_alpn.c" -o alpn.o
           # shellcheck disable=SC2086
-          gcc -Wall -Wextra -Werror $INC -c \
+          gcc -Wall -Wextra -Werror $CORE_INC -c \
             "$GITHUB_WORKSPACE/tests/unit/test_alpn.c" -o test_alpn_tu.o
           # shellcheck disable=SC2086
-          gcc -o test_alpn test_alpn_tu.o alpn.o $OBJS
+          gcc -o test_alpn test_alpn_tu.o alpn.o $STORE_OBJS
           ./test_alpn
 
-  cert-time-unit:
-    name: Cert-expiry unit tests (M8)
-    needs: [resolve, build-nginx]
-    runs-on: [self-hosted, builder02, lxc]
-    timeout-minutes: 10
-    steps:
-      - name: Checkout module
-        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
-
-      - name: Setup build deps
-        uses: ./.github/actions/setup
-        with:
-          packages: build-essential libssl-dev
-
-      - name: Download nginx build
-        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
-        with:
-          name: build-nginx
-          path: ${{ needs.resolve.outputs.nginx_dir }}
-
-      - name: Build + run cert-expiry unit tests
-        run: |
-          set -euo pipefail
-          NGX="$GITHUB_WORKSPACE/${{ needs.resolve.outputs.nginx_dir }}"
-          INC="-I$NGX/src/core -I$NGX/src/event -I$NGX/src/os/unix -I$NGX/objs"
-          OBJS="$NGX/objs/src/core/ngx_palloc.o $NGX/objs/src/core/ngx_string.o \
-                $NGX/objs/src/os/unix/ngx_time.o $NGX/objs/src/core/ngx_times.o \
-                $NGX/objs/src/core/ngx_inet.o $NGX/objs/src/os/unix/ngx_alloc.o"
           # ngx_inet.o: crypto.c (include-shimmed here) now pulls
           # ngx_autocert_str_is_ip, which references ngx_inet_addr/ngx_inet6_addr.
           # _GNU_SOURCE: the test cross-checks ngx_autocert_timegm against libc
@@ -526,42 +386,17 @@ jobs:
           # ngx_autocert_timegm, so run it from the repo root (relative fixture
           # path tests/unit/fixture_leaf.pem).
           # shellcheck disable=SC2086
-          gcc -D_GNU_SOURCE -Wall -Wextra -Werror $INC -o test_cert_time \
+          gcc -D_GNU_SOURCE -Wall -Wextra -Werror $CORE_INC -o test_cert_time \
             "$GITHUB_WORKSPACE/tests/unit/test_cert_time.c" \
-            $OBJS -lssl -lcrypto
+            $INET_OBJS -lssl -lcrypto
           ./test_cert_time
 
-  account-jsonsafe-unit:
-    name: Account json_safe unit tests (M4d)
-    needs: [resolve, build-nginx]
-    runs-on: [self-hosted, builder02, lxc]
-    timeout-minutes: 10
-    steps:
-      - name: Checkout module
-        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
-
-      - name: Setup build deps
-        uses: ./.github/actions/setup
-        with:
-          packages: build-essential
-
-      - name: Download nginx build
-        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
-        with:
-          name: build-nginx
-          path: ${{ needs.resolve.outputs.nginx_dir }}
-
-      - name: Build + run account json_safe unit tests
-        run: |
-          set -euo pipefail
-          NGX="$GITHUB_WORKSPACE/${{ needs.resolve.outputs.nginx_dir }}"
-          INC="-I$NGX/src/core -I$NGX/src/event -I$NGX/src/os/unix -I$NGX/objs"
           # Slice just ngx_autocert_account_json_safe from the shipped account
           # source — the function depends only on ngx_str_t, so no nginx objects
           # are linked.
           bash tests/unit/extract_jsonsafe.sh
           # shellcheck disable=SC2086
-          gcc -Wall -Wextra -Werror -Itests/unit $INC -o test_account_jsonsafe \
+          gcc -Wall -Wextra -Werror -Itests/unit $CORE_INC -o test_account_jsonsafe \
             "$GITHUB_WORKSPACE/tests/unit/test_account_jsonsafe.c"
           ./test_account_jsonsafe
 
@@ -572,13 +407,17 @@ jobs:
 
   # Batched Pebble e2e: the whole tests/e2e suite for one flavor runs in a
   # SINGLE job via tests/e2e/run-all.sh, so the build artifact is downloaded
-  # once and every script runs sequentially against it. Two jobs (nginx +
-  # angie) then run in parallel on the two self-hosted lanes. This replaced ~33
+  # once and every script runs sequentially against it. Flavor jobs can run in
+  # parallel because run-all.sh exports flavor-scoped host ports. This replaced
+  # ~33
   # per-script × 2-flavor matrix jobs (66 total), each of which had re-paid the
   # checkout + download-artifact + apt boilerplate before a single ~90s test —
   # with only ~2 runner lanes that serialized into a very long queue. run-all.sh
   # carries the per-script sudo policy + the cert-validate-reject case fan-out
   # and fails the job if ANY script fails (fail-fast off, summary at the end).
+  #
+  # Keep max-parallel above the current two-flavor matrix so future flavor/case
+  # expansion does not accidentally serialize after the port namespacing work.
   e2e:
     name: e2e suite (Pebble) [${{ matrix.flavor }}]
     needs: [resolve, build-nginx, build-angie]
@@ -586,12 +425,15 @@ jobs:
     timeout-minutes: 60
     strategy:
       fail-fast: false
+      max-parallel: 4
       matrix:
         include:
           - flavor: nginx
             dir: ${{ needs.resolve.outputs.nginx_dir }}
+            port_offset: 0
           - flavor: angie
             dir: ${{ needs.resolve.outputs.angie_dir }}
+            port_offset: 1000
     steps:
       - name: Checkout module
         uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
@@ -622,69 +464,8 @@ jobs:
           BIN="$NGX/objs/${{ matrix.flavor }}"
           [ -f "$BIN" ] || BIN="$NGX/objs/nginx"
           chmod +x "$BIN"
-          SERVER_BIN="$BIN" NGX_BUILD_DIR="$NGX" FLAVOR="${{ matrix.flavor }}"             bash tests/e2e/run-all.sh
-
-  slowloris-read:
-    name: Slow-drip total-read budget (#37) [${{ matrix.flavor }}]
-    needs: [resolve]
-    runs-on: [self-hosted, builder02, docker]
-    timeout-minutes: 20
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - flavor: nginx
-            version: ${{ needs.resolve.outputs.nginx_version }}
-            url: ${{ needs.resolve.outputs.nginx_url }}
-            dir: ${{ needs.resolve.outputs.nginx_dir }}
-          - flavor: angie
-            version: ${{ needs.resolve.outputs.angie_version }}
-            url: ${{ needs.resolve.outputs.angie_url }}
-            dir: ${{ needs.resolve.outputs.angie_dir }}
-    steps:
-      - name: Checkout module
-        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
-      - name: Setup build deps
-        uses: ./.github/actions/setup
-        with:
-          ccache-key: build-slowloris-${{ matrix.flavor }}-${{ matrix.version }}
-      - name: Restore source tarball cache
-        id: tarball-cache
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
-        with:
-          path: ~/.cache/src-tarballs
-          key: src-tarball-${{ matrix.flavor }}-${{ matrix.version }}
-      - name: Fetch ${{ matrix.flavor }} ${{ matrix.version }}
-        # Do NOT gate on cache-hit: on self-hosted runners actions/cache can
-        # report a hit while the path is empty, so always ensure the file is
-        # actually present (idempotent — curl only when missing).
-        run: |
-          set -euo pipefail
-          mkdir -p ~/.cache/src-tarballs
-          tarball=~/.cache/src-tarballs/${{ matrix.flavor }}-${{ matrix.version }}.tar.gz
-          if [ ! -s "$tarball" ]; then
-            curl -fsSL -o "$tarball" "${{ matrix.url }}"
-          fi
-      - name: Build ${{ matrix.flavor }} module with a tiny (2s) total-read budget
-        run: |
-          set -euo pipefail
-          tar -xzf ~/.cache/src-tarballs/${{ matrix.flavor }}-${{ matrix.version }}.tar.gz
-          cd "${{ matrix.dir }}"
-          # -DNGX_AUTOCERT_READ_TOTAL=2000 shrinks the 60s budget to 2s so the
-          # slow-drip abort is observable in a few seconds, not a minute.
-          ./configure --with-compat --with-http_ssl_module \
-            --with-cc="ccache cc" \
-            --with-cc-opt="-Wall -Wextra -Werror -DNGX_AUTOCERT_READ_TOTAL=2000" \
-            --add-dynamic-module="$GITHUB_WORKSPACE" > /tmp/conf.log 2>&1 \
-            || { tail -40 /tmp/conf.log; exit 1; }
-          make > /tmp/make.log 2>&1 || { tail -40 /tmp/make.log; exit 1; }
-          test -f objs/ngx_http_autocert_module.so
-          BIN=objs/${{ matrix.flavor }}; [ -x "$BIN" ] || BIN=objs/nginx
-          test -x "$BIN"
-      - name: A byte-dripping CA must be cut off by the total-read budget
-        run: |
-          set -euo pipefail
-          NGX="$GITHUB_WORKSPACE/${{ matrix.dir }}"
-          BIN="$NGX/objs/${{ matrix.flavor }}"; [ -x "$BIN" ] || BIN="$NGX/objs/nginx"
-          SERVER_BIN="$BIN" NGX_BUILD_DIR="$NGX" \
-            bash "$GITHUB_WORKSPACE/tests/e2e/slowloris-read.sh"
+          run_offset=$(( ((GITHUB_RUN_ID % 20) + 1) * 2000 ))
+          port_offset=$(( run_offset + ${{ matrix.port_offset }} ))
+          echo "e2e port offset: run_offset=${run_offset} flavor_offset=${{ matrix.port_offset }} port_offset=${port_offset}"
+          SERVER_BIN="$BIN" NGX_BUILD_DIR="$NGX" FLAVOR="${{ matrix.flavor }}" AC_PORT_OFFSET="$port_offset" \
+            bash tests/e2e/run-all.sh

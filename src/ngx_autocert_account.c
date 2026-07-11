@@ -645,7 +645,7 @@ ngx_autocert_account_build_eab(ngx_autocert_account_t *acct, ngx_str_t *jwk,
     }
     p = ngx_cpymem(signing_input.data, b64_protected.data, b64_protected.len);
     *p++ = '.';
-    p = ngx_cpymem(p, b64_payload.data, b64_payload.len);
+    ngx_memcpy(p, b64_payload.data, b64_payload.len);
 
     if (ngx_http_autocert_hmac_sha256(acct->pool, &hmac_key, &signing_input,
                                       &mac)

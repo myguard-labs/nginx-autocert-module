@@ -17,6 +17,8 @@
 #   SERVER_BIN     path to the built nginx/angie binary (required)
 #   NGX_BUILD_DIR  unpacked build dir (required; scripts read it too)
 #   FLAVOR         nginx | angie (default: basename of SERVER_BIN)
+#   AC_PORT_OFFSET optional integer added to host-bound test ports; defaults by
+#                  FLAVOR (nginx=0, angie=1000) so flavor jobs can run in parallel.
 #
 # Exit non-zero if ANY script fails; runs them all first (fail-fast off, matching
 # the old matrix `fail-fast: false`) and prints a summary table at the end.
@@ -28,6 +30,44 @@ NGX_BUILD_DIR="${NGX_BUILD_DIR:?set NGX_BUILD_DIR to the unpacked build dir}"
 FLAVOR="${FLAVOR:-$(basename "$SERVER_BIN")}"
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+if [ -z "${AC_PORT_OFFSET:-}" ]; then
+    case "$FLAVOR" in
+        angie) AC_PORT_OFFSET=1000 ;;
+        *)     AC_PORT_OFFSET=0 ;;
+    esac
+fi
+
+PORT_BASES=(
+    5001 5002 5021 5998 5999
+    8055 8056 8057 8080 8081 8082 8083 8084 8085 8086 8087 8088 8089
+    8443 8444 8463 8466 8543
+    14000 14001 14011 14013 14014 14021 14031 14037 14041 14042
+    14066 14071 14072 14081 14443 14444
+    15000 15001 15353 15354 15355 15356 15357 15358
+    15453 15455 15463 15465 15466 15473 15475 15483 15487 15489
+    15493 15571 15581 18089 18090 18185 18190
+)
+
+set_port() {
+    local base="$1"
+    export "AC_PORT_${base}=$((base + AC_EFFECTIVE_PORT_OFFSET))"
+}
+
+set_ports() {
+    local extra_offset="$1"
+    AC_EFFECTIVE_PORT_OFFSET=$((AC_PORT_OFFSET + extra_offset))
+    export AC_EFFECTIVE_PORT_OFFSET
+    local base
+    for base in "${PORT_BASES[@]}"; do
+        set_port "$base"
+    done
+}
+
+export AC_PORT_OFFSET
+
+set_ports 0
+echo "e2e ${FLAVOR}: AC_PORT_OFFSET=${AC_PORT_OFFSET} AC_PORT_14000=${AC_PORT_14000} AC_PORT_15000=${AC_PORT_15000}"
 
 # The Pebble e2e suite, in a sensible order (cheap config/lint first, heavy
 # issuance later). Keep in sync with build-test.yml's e2e set: a script here but
@@ -67,6 +107,7 @@ SCRIPTS=(
   mock-download-400-retry.sh:sudo
   mock-order-poll-retry.sh:sudo
   mock-freshness-wrong-domain.sh:sudo
+  mock-origin-pin.sh:sudo
   store-certbot.sh:sudo
   store-symlink-swap.sh:sudo
 )
@@ -79,6 +120,13 @@ PASS=(); FAIL=(); SKIP=()
 
 run_one() {
     local label="$1"; shift
+    local slot="$1"; shift
+    local safe_label="${label//[^A-Za-z0-9_.-]/-}"
+    set_ports "$((slot * 100))"
+    AC_E2E_PREFIX="/tmp/ac-${FLAVOR}-${GITHUB_RUN_ID:-local}-$(printf '%02d' "$slot")-${safe_label}"
+    export AC_E2E_PREFIX
+    echo "e2e ${FLAVOR}: ${label}: AC_EFFECTIVE_PORT_OFFSET=${AC_EFFECTIVE_PORT_OFFSET} AC_PORT_8080=${AC_PORT_8080} AC_PORT_14000=${AC_PORT_14000} AC_PORT_15000=${AC_PORT_15000}"
+    echo "e2e ${FLAVOR}: ${label}: PREFIX=${AC_E2E_PREFIX}"
     echo "::group::e2e ${FLAVOR}: ${label}"
     local rc=0
     "$@" || rc=$?
@@ -94,7 +142,16 @@ run_one() {
 
 invoke() {   # invoke <use_sudo> <script-abs> [extra env KEY=VAL ...]
     local use_sudo="$1" script="$2"; shift 2
-    local env_kv=("SERVER_BIN=$SERVER_BIN" "NGX_BUILD_DIR=$NGX_BUILD_DIR" "$@")
+    local env_kv=("SERVER_BIN=$SERVER_BIN" "NGX_BUILD_DIR=$NGX_BUILD_DIR" \
+                  "AC_PORT_OFFSET=$AC_PORT_OFFSET" \
+                  "AC_EFFECTIVE_PORT_OFFSET=$AC_EFFECTIVE_PORT_OFFSET" \
+                  "PREFIX=$AC_E2E_PREFIX" "$@")
+    local name
+    while IFS='=' read -r name _; do
+        case "$name" in
+            AC_PORT_*) env_kv+=("$name=${!name}") ;;
+        esac
+    done < <(env)
     if [ "$use_sudo" = sudo ]; then
         sudo env "${env_kv[@]}" bash "$script"
     else
@@ -104,6 +161,7 @@ invoke() {   # invoke <use_sudo> <script-abs> [extra env KEY=VAL ...]
 
 chmod +x "$SERVER_BIN" 2>/dev/null || true
 
+slot=0
 for entry in "${SCRIPTS[@]}"; do
     script="${entry%%:*}"
     mode="${entry#"$script"}"; mode="${mode#:}"   # "sudo" or ""
@@ -113,7 +171,8 @@ for entry in "${SCRIPTS[@]}"; do
         SKIP+=("$script (missing)")
         continue
     fi
-    run_one "$script" invoke "${mode:-nosudo}" "$path"
+    run_one "$script" "$slot" invoke "${mode:-nosudo}" "$path"
+    slot=$((slot + 1))
 done
 
 # cert-validate-reject: one run per fixture case.
@@ -121,7 +180,8 @@ cvr="$HERE/cert-validate-reject.sh"
 if [ -f "$cvr" ]; then
     for case in "${CERT_CASES[@]}"; do
         run_one "cert-validate-reject.sh [$case]" \
-            invoke sudo "$cvr" "CERT_CASE=$case"
+            "$slot" invoke sudo "$cvr" "CERT_CASE=$case"
+        slot=$((slot + 1))
     done
 else
     echo "::warning::cert-validate-reject.sh missing — skipping"

@@ -476,6 +476,18 @@ If a previous run created the store as root, fix it once with
    publicly trusted, and (per the account-hash rule above) staging keeps its own
    account.
 
+5. **Origin-pinned ACME client.** The outbound client is pinned to the origin
+   (scheme `https`, host, port) of the configured `autocert_ca` directory URL.
+   Every resource URL the CA returns — `newNonce`, `newAccount`, `newOrder`,
+   `finalize`, the authorizations, the challenge, the final certificate — must
+   stay on that origin or the request is refused before any account-signed JWS
+   is sent. TLS verification already stops untrusted endpoints; this additionally
+   stops a compromised or malicious directory document from redirecting the
+   client at *another* HTTPS origin that merely happens to be in the trust store
+   (an SSRF-shaped risk that widens with a broad private trust bundle). Real CAs
+   (Let's Encrypt, ZeroSSL, Pebble) serve every resource from the directory's own
+   origin, so this is transparent.
+
 This module exposes **no nginx variables** — it is purely a cert/challenge-serving
 module.
 

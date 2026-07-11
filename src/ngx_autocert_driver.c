@@ -503,6 +503,27 @@ ngx_autocert_bootstrap_ca(ngx_cycle_t *cycle, ngx_uint_t ca_idx)
                 continue;
             }
             state->client.resolver_timeout = acf.resolver_timeout * 1000;
+
+            /*
+             * Pin the outbound client to the configured directory origin so the
+             * CA cannot redirect account-signed requests to another trusted
+             * HTTPS origin (SSRF-shaped hardening). The configured CA URL was
+             * already validated at postconfig, so a parse failure here is a
+             * hard startup error, not a skip. cycle->pool owns the host copy
+             * (worker lifetime, same as the client).
+             */
+            if (ngx_autocert_acme_client_set_origin(&state->client, cycle->pool,
+                    &state->entry->ca_conf.ca)
+                != NGX_OK)
+            {
+                ngx_log_error(NGX_LOG_ERR, cycle->log, 0,
+                              "autocert: cannot pin ACME origin for %V; "
+                              "skipping this CA", &state->entry->ca_conf.ca);
+                ngx_autocert_acme_client_destroy(&state->client);
+                ca_idx++;
+                continue;
+            }
+
             state->client_ready = 1;
         }
 

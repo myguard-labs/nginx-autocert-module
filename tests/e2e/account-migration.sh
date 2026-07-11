@@ -47,7 +47,7 @@ http {
     autocert_ca https://127.0.0.1:1/dir;     # unreachable: migration is pre-CA
     autocert_store_path $PREFIX/store;
     server {
-        listen 8080;
+        listen ${AC_PORT_8080:-8080};
         server_name a.example.com;
         autocert on;
     }

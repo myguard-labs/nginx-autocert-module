@@ -28,7 +28,7 @@ NET_NAME="acalpn-net-$$"
 PEBBLE_NAME="acalpn-pebble-$$"
 DNS_NAME="acalpn-dns-$$"
 ORDER_DOMAIN="alpn.example.com"
-ALPN_PORT=5001                     # nginx listens ssl here; Pebble VA tlsPort
+ALPN_PORT="${ALPN_PORT:-${AC_PORT_5001:-5001}}"                     # nginx listens ssl here; Pebble VA tlsPort
 
 cleanup() {
     "$SERVER_BIN" -p "$PREFIX" -c "$PREFIX/conf/nginx.conf" -s stop 2>/dev/null || true
@@ -46,11 +46,11 @@ HOST_IP=$(docker network inspect "$NET_NAME" \
 echo "== host IP reachable from containers: $HOST_IP =="
 
 echo "== starting challtestsrv (pebble -> 127.0.0.1 for the helper; order domain -> host) =="
-DNS_PORT=15453
+DNS_PORT="${DNS_PORT:-${AC_PORT_15453:-15453}}"
 MGMT_PORT=$((DNS_PORT + 1))
 docker run -d --name "$DNS_NAME" --network "$NET_NAME" \
-    -p ${DNS_PORT}:53/udp -p ${DNS_PORT}:53/tcp \
-    -p ${MGMT_PORT}:8055 \
+    -p "${DNS_PORT}":53/udp -p "${DNS_PORT}":53/tcp \
+    -p "${MGMT_PORT}":8055 \
     ghcr.io/letsencrypt/pebble-challtestsrv:latest \
     -dnsserver :53 -management :8055 \
     -http01 "" -https01 "" -tlsalpn01 "" -doh "" \
@@ -79,7 +79,7 @@ cat > "$PREFIX/pebble-config.json" <<EOF
     "managementListenAddress": "0.0.0.0:15000",
     "certificate": "test/certs/localhost/cert.pem",
     "privateKey": "test/certs/localhost/key.pem",
-    "httpPort": 5999,
+    "httpPort": ${AC_PORT_5999:-5999},
     "tlsPort": ${ALPN_PORT},
     "ocspResponderURL": "",
     "externalAccountBindingRequired": false
@@ -89,15 +89,16 @@ EOF
 
 echo "== starting Pebble (VA -> tls-alpn-01 on :${ALPN_PORT} at the order domain) =="
 docker run -d --name "$PEBBLE_NAME" --network "$NET_NAME" \
-    -p 14000:14000 -p 15000:15000 \
+    -p "${AC_PORT_14000:-14000}":14000 -p "${AC_PORT_15000:-15000}":15000 \
     -e PEBBLE_VA_NOSLEEP=1 \
+    -e PEBBLE_WFE_NONCEREJECT=0 \
     -v "$PREFIX/pebble-config.json:/test/config/pebble-config.json:ro" \
     ghcr.io/letsencrypt/pebble:latest \
     -config /test/config/pebble-config.json \
     -dnsserver "${DNS_CONTAINER_IP}:53" -strict >/dev/null
 
 for i in $(seq 1 30); do
-    if curl -ksf https://127.0.0.1:14000/dir >/dev/null 2>&1; then break; fi
+    if curl -ksf "https://127.0.0.1:${AC_PORT_14000:-14000}/dir" >/dev/null 2>&1; then break; fi
     sleep 1
     [ "$i" = 30 ] && { echo "Pebble did not come up"; docker logs "$PEBBLE_NAME"; exit 1; }
 done
@@ -113,7 +114,7 @@ events {}
 http {
     autocert on;
     autocert_contact admin@example.com;
-    autocert_ca https://pebble:14000/dir;
+    autocert_ca https://pebble:${AC_PORT_14000:-14000}/dir;
     autocert_resolver 127.0.0.1:${DNS_PORT};
     autocert_ca_trusted_certificate $PREFIX/ca.pem;
     autocert_store_path $PREFIX/store;

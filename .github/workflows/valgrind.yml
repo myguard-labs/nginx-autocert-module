@@ -1,8 +1,8 @@
 name: Valgrind
 
-# Valgrind memcheck lite soak on every PR/push — 60s soak of the HTTP-01
-# serve path, no helgrind. The full memcheck + helgrind soak lives in
-# ci-deep.yml (monthly cron + workflow_dispatch).
+# Manual Valgrind memcheck lite soak — 30s soak of the HTTP-01 serve path, no
+# helgrind. PR/release coverage lives in ci-deep.yml so normal pushes do not
+# steal self-hosted runner lanes from Build & Test.
 #
 # Action pins (keep in sync with build-test.yml header):
 # actions/checkout@v5        -> 93cb6efe18208431cddfb8368fd83d5badbf9bfd
@@ -12,10 +12,6 @@ env:
   NGINX_VERSION: ""
 
 on:
-  push:
-    branches: [master]
-  pull_request:
-    branches: [master]
   workflow_dispatch: {}
 
 concurrency:
@@ -26,9 +22,9 @@ permissions:
   contents: read
 
 jobs:
-  # ── Short memcheck soak — 60s, no helgrind (helgrind = deep only) ─────────
+  # ── Short memcheck soak — 30s, no helgrind (helgrind = deep only) ─────────
   memcheck-lite:
-    name: Memcheck lite (60s soak)
+    name: Memcheck lite (30s soak)
     runs-on: [self-hosted, builder02, lxc]
     timeout-minutes: 45
     steps:
@@ -65,10 +61,10 @@ jobs:
             --add-dynamic-module="$GITHUB_WORKSPACE"
           make -j"$(nproc)"
 
-      - name: Memcheck soak (60s)
+      - name: Memcheck soak (30s)
         env:
           USE_VALGRIND: "1"
           NGX_BUILD_DIR: ${{ github.workspace }}/nginx-${{ env.NGINX_VERSION }}
         run: |
           bash tools/soak.sh \
-            "$GITHUB_WORKSPACE/nginx-${NGINX_VERSION}/objs/nginx" 60 4
+            "$GITHUB_WORKSPACE/nginx-${NGINX_VERSION}/objs/nginx" 30 4

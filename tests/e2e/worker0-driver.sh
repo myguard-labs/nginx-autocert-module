@@ -21,7 +21,7 @@ SRV=nginx; [ -x "$N/objs/angie" ] && SRV=angie
 HTTP_SO="$N/objs/ngx_http_autocert_module.so"
 [ -f "$HTTP_SO" ] || { echo "missing $HTTP_SO"; exit 1; }
 
-PORT="${AC_TEST_PORT:-18185}"
+PORT="${AC_TEST_PORT:-${AC_PORT_18185:-18185}}"
 P=/tmp/ac-worker0
 STORE="$P/store"
 

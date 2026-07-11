@@ -29,7 +29,7 @@ HTTP_SO="$NGX_BUILD_DIR/objs/ngx_http_autocert_module.so"
 PREFIX="${PREFIX:-/tmp/ac-eab}"
 PEBBLE_NAME="ac-pebble-eab-$$"
 DNS_NAME="ac-dns-eab-$$"
-DNS_PORT=15354
+DNS_PORT="${DNS_PORT:-${AC_PORT_15354:-15354}}"
 
 EAB_KID="kid-1"
 EAB_HMAC="zWNDZM6eQGHWpSRTPal5eIUYFTu7EajVIoguysqZ9wG44nMEtx3MUAsUDkMTQ12W"
@@ -51,8 +51,8 @@ cat > "$PREFIX/conf/pebble-config.json" <<EOF
     "managementListenAddress": "0.0.0.0:15000",
     "certificate": "test/certs/localhost/cert.pem",
     "privateKey": "test/certs/localhost/key.pem",
-    "httpPort": 5002,
-    "tlsPort": 5001,
+    "httpPort": ${AC_PORT_5002:-5002},
+    "tlsPort": ${AC_PORT_5001:-5001},
     "externalAccountBindingRequired": true,
     "externalAccountMACKeys": {
       "$EAB_KID": "$EAB_HMAC"
@@ -62,20 +62,21 @@ cat > "$PREFIX/conf/pebble-config.json" <<EOF
 EOF
 
 echo "== starting Pebble (EAB required) =="
-docker run -d --name "$PEBBLE_NAME" -p 14000:14000 -p 15000:15000 \
+docker run -d --name "$PEBBLE_NAME" -p "${AC_PORT_14000:-14000}":14000 -p "${AC_PORT_15000:-15000}":15000 \
     -e PEBBLE_VA_NOSLEEP=1 \
+    -e PEBBLE_WFE_NONCEREJECT=0 \
     -v "$PREFIX/conf/pebble-config.json:/test/config/pebble-config.json:ro" \
     ghcr.io/letsencrypt/pebble:latest >/dev/null
 
 echo "== starting challtestsrv (resolves 'pebble' -> 127.0.0.1) =="
-docker run -d --name "$DNS_NAME" -p ${DNS_PORT}:53/udp -p ${DNS_PORT}:53/tcp \
+docker run -d --name "$DNS_NAME" -p "${DNS_PORT}":53/udp -p "${DNS_PORT}":53/tcp \
     ghcr.io/letsencrypt/pebble-challtestsrv:latest \
     -dnsserver :53 -management :8055 \
     -http01 "" -https01 "" -tlsalpn01 "" -doh "" \
     -defaultIPv4 127.0.0.1 -defaultIPv6 "" >/dev/null
 
 for i in $(seq 1 30); do
-    if curl -ksf https://127.0.0.1:14000/dir >/dev/null 2>&1; then break; fi
+    if curl -ksf "https://127.0.0.1:${AC_PORT_14000:-14000}/dir" >/dev/null 2>&1; then break; fi
     sleep 1
     [ "$i" = 30 ] && { echo "Pebble did not come up"; docker logs "$PEBBLE_NAME"; exit 1; }
 done
@@ -91,13 +92,13 @@ events {}
 http {
     autocert on;
     autocert_contact admin@example.com;
-    autocert_ca https://pebble:14000/dir;
+    autocert_ca https://pebble:${AC_PORT_14000:-14000}/dir;
     autocert_resolver 127.0.0.1:${DNS_PORT};
     autocert_ca_trusted_certificate $PREFIX/ca.pem;
     autocert_store_path $PREFIX/store;
 $1
     server {
-        listen 8080;
+        listen ${AC_PORT_8080:-8080};
         server_name a.example.com;
     }
 }

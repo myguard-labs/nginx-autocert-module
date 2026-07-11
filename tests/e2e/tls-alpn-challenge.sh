@@ -28,7 +28,7 @@ HTTP_SO="$NGX_BUILD_DIR/objs/ngx_http_autocert_module.so"
 [ -f "$HTTP_SO" ] || { echo "missing $HTTP_SO"; exit 1; }
 
 PREFIX="${PREFIX:-/tmp/ac-tls-alpn}"
-PORT="${AC_TEST_PORT:-8543}"
+PORT="${AC_TEST_PORT:-${AC_PORT_8543:-8543}}"
 DOMAIN="alpn.example.com"
 KEYAUTH="test-token.0123456789abcdef0123456789abcdef0123456789ab"
 

@@ -26,8 +26,8 @@ PREFIX="${PREFIX:-/tmp/ac-dns01-hook}"
 NET_NAME="ac-dns01h-net-$$"
 PEBBLE_NAME="ac-dns01h-pebble-$$"
 DNS_NAME="ac-dns01h-dns-$$"
-DNS_PORT=15356
-MGMT_PORT=8055
+DNS_PORT="${DNS_PORT:-${AC_PORT_15356:-15356}}"
+MGMT_PORT="${MGMT_PORT:-${AC_PORT_8055:-8055}}"
 ORDER_DOMAIN="dns01hook.example.com"
 
 cleanup() {
@@ -44,11 +44,11 @@ docker network create "$NET_NAME" >/dev/null
 
 echo "== pebble-challtestsrv (DNS :53 + mgmt :${MGMT_PORT}; default A -> 127.0.0.1) =="
 # defaultIPv4 127.0.0.1 makes "pebble" resolve to the host loopback where Pebble
-# is published, so the nginx ACME client can reach https://pebble:14000/dir.
+# is published, so the nginx ACME client can reach https://pebble:${AC_PORT_14000:-14000}/dir.
 # http01/https01/tlsalpn01 challenge responders are disabled (dns-01 only).
 docker run -d --name "$DNS_NAME" --network "$NET_NAME" \
-    -p ${DNS_PORT}:53/udp -p ${DNS_PORT}:53/tcp \
-    -p ${MGMT_PORT}:8055 \
+    -p "${DNS_PORT}":53/udp -p "${DNS_PORT}":53/tcp \
+    -p "${MGMT_PORT}":8055 \
     ghcr.io/letsencrypt/pebble-challtestsrv:latest \
     -dnsserver :53 -management :8055 \
     -http01 "" -https01 "" -tlsalpn01 "" -doh "" \
@@ -71,8 +71,8 @@ cat > "$PREFIX/pebble-config.json" <<EOF
     "managementListenAddress": "0.0.0.0:15000",
     "certificate": "test/certs/localhost/cert.pem",
     "privateKey": "test/certs/localhost/key.pem",
-    "httpPort": 5999,
-    "tlsPort": 5998,
+    "httpPort": ${AC_PORT_5999:-5999},
+    "tlsPort": ${AC_PORT_5998:-5998},
     "ocspResponderURL": "",
     "externalAccountBindingRequired": false
   }
@@ -81,15 +81,16 @@ EOF
 
 echo "== Pebble (validates dns-01 via challtestsrv) =="
 docker run -d --name "$PEBBLE_NAME" --network "$NET_NAME" \
-    -p 14000:14000 -p 15000:15000 \
+    -p "${AC_PORT_14000:-14000}":14000 -p "${AC_PORT_15000:-15000}":15000 \
     -e PEBBLE_VA_NOSLEEP=1 \
+    -e PEBBLE_WFE_NONCEREJECT=0 \
     -v "$PREFIX/pebble-config.json:/test/config/pebble-config.json:ro" \
     ghcr.io/letsencrypt/pebble:latest \
     -config /test/config/pebble-config.json \
     -dnsserver "${DNS_CONTAINER_IP}:53" -strict >/dev/null
 
 for i in $(seq 1 30); do
-    if curl -ksf https://127.0.0.1:14000/dir >/dev/null 2>&1; then break; fi
+    if curl -ksf "https://127.0.0.1:${AC_PORT_14000:-14000}/dir" >/dev/null 2>&1; then break; fi
     sleep 1
     [ "$i" = 30 ] && { echo "Pebble did not come up"; docker logs "$PEBBLE_NAME"; exit 1; }
 done
@@ -119,7 +120,7 @@ events {}
 http {
     autocert on;
     autocert_contact admin@example.com;
-    autocert_ca https://pebble:14000/dir;
+    autocert_ca https://pebble:${AC_PORT_14000:-14000}/dir;
     autocert_resolver 127.0.0.1:${DNS_PORT};
     autocert_ca_trusted_certificate $PREFIX/ca.pem;
     autocert_store_path $PREFIX/store;
@@ -129,7 +130,7 @@ http {
     autocert_dns_propagation_delay 0;
     autocert_dns_hook_timeout 15;
     server {
-        listen 8080;
+        listen ${AC_PORT_8080:-8080};
         server_name ${ORDER_DOMAIN};
         autocert on;
     }

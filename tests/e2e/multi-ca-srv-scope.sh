@@ -53,14 +53,14 @@ http {
 
     # vhost A: inherits the http{} default CA (CA-A).
     server {
-        listen 8080;
+        listen ${AC_PORT_8080:-8080};
         server_name a.example.com;
         autocert on;
     }
 
     # vhost B: overrides the CA per-vhost (CA-B) -> its own ca_list entry.
     server {
-        listen 8081;
+        listen ${AC_PORT_8081:-8081};
         server_name b.example.com;
         autocert on;
         autocert_ca https://127.0.0.1:2/ca-b;
@@ -68,7 +68,7 @@ http {
 
     # vhost C: no autocert_ca -> inherits CA-A, joins A's group.
     server {
-        listen 8082;
+        listen ${AC_PORT_8082:-8082};
         server_name c.example.com;
         autocert on;
     }
@@ -107,7 +107,7 @@ events {}
 http {
     autocert_store_path $PREFIX/store;
     server {
-        listen 8083;
+        listen ${AC_PORT_8083:-8083};
         server_name d.example.com;
         autocert on;
         autocert_staging on;
@@ -138,12 +138,12 @@ http {
     autocert_ca https://127.0.0.1:1/ca-a;
     autocert_store_path $PREFIX/store;
     server {
-        listen 8084;
+        listen ${AC_PORT_8084:-8084};
         server_name p.example.com;
         autocert on;
     }
     server {
-        listen 8085;
+        listen ${AC_PORT_8085:-8085};
         server_name q.example.com;
         autocert on;
         autocert_staging on;
@@ -178,13 +178,13 @@ http {
     autocert_contact admin@example.com;
     autocert_store_path $PREFIX/store;
     server {
-        listen 8086;
+        listen ${AC_PORT_8086:-8086};
         server_name dup.example.com;
         autocert on;
         autocert_ca https://127.0.0.1:1/ca-a;
     }
     server {
-        listen 8087;
+        listen ${AC_PORT_8087:-8087};
         server_name dup.example.com;
         autocert on;
         autocert_ca https://127.0.0.1:2/ca-b;
@@ -211,8 +211,8 @@ http {
     autocert_contact admin@example.com;
     autocert_ca https://127.0.0.1:1/ca-a;
     autocert_store_path $PREFIX/store;
-    server { listen 8088; server_name sds.example.com; autocert on; }
-    server { listen 8089; server_name sds.example.com; autocert on; }
+    server { listen ${AC_PORT_8088:-8088}; server_name sds.example.com; autocert on; }
+    server { listen ${AC_PORT_8089:-8089}; server_name sds.example.com; autocert on; }
 }
 EOF
 if ! "$SERVER_BIN" -t -p "$PREFIX" -c "$PREFIX/conf/same.conf" 2>"$PREFIX/logs/same.err"; then

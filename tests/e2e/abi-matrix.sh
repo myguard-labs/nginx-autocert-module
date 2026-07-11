@@ -56,7 +56,7 @@ http {
     autocert_store_path $dir/store;
     autocert_contact a@b.com;
     server {
-        listen 127.0.0.1:8444 ssl;
+        listen 127.0.0.1:${AC_PORT_8444:-8444} ssl;
         server_name auto.example.com;
         autocert on;
         ssl_certificate $dir/c;

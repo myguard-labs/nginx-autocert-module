@@ -49,13 +49,13 @@ HOST_IP=$(docker network inspect "$NET_NAME" \
     -f '{{ (index .IPAM.Config 0).Gateway }}')
 echo "== host IP reachable from containers: $HOST_IP =="
 
-DNS_PORT=15353
+DNS_PORT="${DNS_PORT:-${AC_PORT_15353:-15353}}"
 MGMT_PORT=$((DNS_PORT + 1))
 # good -> host (VA can fetch); bad -> 192.0.2.1 (TEST-NET-1, unroutable) so the
 # VA never reaches a token responder and the order keeps failing.
 docker run -d --name "$DNS_NAME" --network "$NET_NAME" \
-    -p ${DNS_PORT}:53/udp -p ${DNS_PORT}:53/tcp \
-    -p ${MGMT_PORT}:8055 \
+    -p "${DNS_PORT}":53/udp -p "${DNS_PORT}":53/tcp \
+    -p "${MGMT_PORT}":8055 \
     ghcr.io/letsencrypt/pebble-challtestsrv:latest \
     -dnsserver :53 -management :8055 \
     -http01 "" -https01 "" -tlsalpn01 "" -doh "" \
@@ -84,8 +84,8 @@ cat > "$PREFIX/pebble-config.json" <<EOF
     "managementListenAddress": "0.0.0.0:15000",
     "certificate": "test/certs/localhost/cert.pem",
     "privateKey": "test/certs/localhost/key.pem",
-    "httpPort": 80,
-    "tlsPort": 5001,
+    "httpPort": ${AC_PORT_5002:-5002},
+    "tlsPort": ${AC_PORT_5001:-5001},
     "ocspResponderURL": "",
     "externalAccountBindingRequired": false
   }
@@ -94,15 +94,16 @@ EOF
 
 echo "== starting Pebble =="
 docker run -d --name "$PEBBLE_NAME" --network "$NET_NAME" \
-    -p 14000:14000 -p 15000:15000 \
+    -p "${AC_PORT_14000:-14000}":14000 -p "${AC_PORT_15000:-15000}":15000 \
     -e PEBBLE_VA_NOSLEEP=1 \
+    -e PEBBLE_WFE_NONCEREJECT=0 \
     -v "$PREFIX/pebble-config.json:/test/config/pebble-config.json:ro" \
     ghcr.io/letsencrypt/pebble:latest \
     -config /test/config/pebble-config.json \
     -dnsserver "${DNS_CONTAINER_IP}:53" -strict >/dev/null
 
 for i in $(seq 1 30); do
-    if curl -ksf https://127.0.0.1:14000/dir >/dev/null 2>&1; then break; fi
+    if curl -ksf "https://127.0.0.1:${AC_PORT_14000:-14000}/dir" >/dev/null 2>&1; then break; fi
     sleep 1
     [ "$i" = 30 ] && { echo "Pebble did not come up"; docker logs "$PEBBLE_NAME"; exit 1; }
 done
@@ -119,14 +120,14 @@ events {}
 http {
     autocert on;
     autocert_contact admin@example.com;
-    autocert_ca https://pebble:14000/dir;
+    autocert_ca https://pebble:${AC_PORT_14000:-14000}/dir;
     autocert_resolver 127.0.0.1:${DNS_PORT};
     autocert_resolver_timeout 5s;
     autocert_ca_trusted_certificate $PREFIX/ca.pem;
     autocert_store_path $PREFIX/store;
     autocert_renew_before 130s;
-    server { listen 80; server_name ${GOOD}; }
-    server { listen 80; server_name ${BAD}; }
+    server { listen ${AC_PORT_5002:-5002}; server_name ${GOOD}; }
+    server { listen ${AC_PORT_5002:-5002}; server_name ${BAD}; }
 }
 EOF
 

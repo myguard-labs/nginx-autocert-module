@@ -29,6 +29,7 @@
 
 
 static ngx_int_t ngx_autocert_acme_parse_url(ngx_autocert_acme_request_t *r);
+static ngx_int_t ngx_autocert_acme_check_origin(ngx_autocert_acme_request_t *r);
 static ngx_int_t ngx_autocert_acme_url_part_safe(ngx_str_t *s);
 static void ngx_autocert_acme_resolve_handler(ngx_resolver_ctx_t *ctx);
 static ngx_int_t ngx_autocert_acme_connect(ngx_autocert_acme_request_t *r,
@@ -140,6 +141,40 @@ ngx_autocert_acme_client_create(ngx_autocert_acme_client_t *client,
     client->timeout = timeout;
     client->log = cycle->log;
 
+    ngx_str_null(&client->origin_host);
+    client->origin_port = 0;
+    client->origin_is_ipv6 = 0;
+    client->origin_pinned = 0;
+
+    return NGX_OK;
+}
+
+
+ngx_int_t
+ngx_autocert_acme_client_set_origin(ngx_autocert_acme_client_t *client,
+    ngx_pool_t *pool, ngx_str_t *dir_url)
+{
+    ngx_autocert_acme_request_t  probe;
+
+    /*
+     * Reuse the request URL parser to extract the authority of the configured
+     * directory URL. parse_url only reads r->url and writes host/port/is_ipv6
+     * (host becomes a NUL-terminated copy in r->pool), so a stack request with
+     * just pool+url set is enough.
+     */
+    ngx_memzero(&probe, sizeof(ngx_autocert_acme_request_t));
+    probe.pool = pool;
+    probe.url = *dir_url;
+
+    if (ngx_autocert_acme_parse_url(&probe) != NGX_OK) {
+        return NGX_ERROR;
+    }
+
+    client->origin_host = probe.host;     /* NUL-terminated pool copy */
+    client->origin_port = probe.port;
+    client->origin_is_ipv6 = probe.host_is_ipv6 ? 1 : 0;
+    client->origin_pinned = 1;
+
     return NGX_OK;
 }
 
@@ -225,6 +260,10 @@ ngx_autocert_acme_request(ngx_autocert_acme_request_t *r)
     ngx_log_debug3(NGX_LOG_DEBUG_CORE, r->log, 0,
                    "autocert: parsed URL host %V port %d uri %V",
                    &r->host, (int) r->port, &r->uri);
+
+    if (ngx_autocert_acme_check_origin(r) != NGX_OK) {
+        return NGX_ERROR;
+    }
 
     r->content_length = -1;
 
@@ -434,6 +473,41 @@ ngx_autocert_acme_parse_url(ngx_autocert_acme_request_t *r)
         ngx_memcpy(h, r->host.data, r->host.len);
         h[r->host.len] = '\0';
         r->host.data = h;
+    }
+
+    return NGX_OK;
+}
+
+
+/*
+ * Origin pin (SSRF-shaped hardening). Once the client has recorded the
+ * configured directory origin, refuse any resource URL that leaves it (different
+ * host/port, or an IPv4-vs-IPv6 authority mismatch). The scheme is already
+ * forced to https by parse_url. A compromised or malicious directory document
+ * cannot then point the account-signed JWS client at another trusted HTTPS
+ * origin. A client with no pin (origin opt-out / probe) accepts any https:// URL.
+ * Kept out of parse_url so the fuzz harness can lift the pure URL splitter
+ * without the client type. Assumes parse_url has already populated host/port.
+ */
+static ngx_int_t
+ngx_autocert_acme_check_origin(ngx_autocert_acme_request_t *r)
+{
+    ngx_autocert_acme_client_t  *c = r->client;
+
+    if (c == NULL || !c->origin_pinned) {
+        return NGX_OK;
+    }
+
+    if (r->port != c->origin_port
+        || (r->host_is_ipv6 ? 1 : 0) != c->origin_is_ipv6
+        || r->host.len != c->origin_host.len
+        || ngx_strncasecmp(r->host.data, c->origin_host.data, r->host.len) != 0)
+    {
+        ngx_log_error(NGX_LOG_ERR, r->log, 0,
+                      "autocert: ACME URL \"%V\" leaves the configured CA "
+                      "origin (host \"%V\" port %ui); refusing",
+                      &r->url, &c->origin_host, (ngx_uint_t) c->origin_port);
+        return NGX_ERROR;
     }
 
     return NGX_OK;

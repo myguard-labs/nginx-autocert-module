@@ -41,12 +41,12 @@ http {
     autocert_ca https://127.0.0.1:1/dir;
     autocert_store_path $PREFIX/store;
     server {
-        listen 8080;
+        listen ${AC_PORT_8080:-8080};
         server_name a.example.com b.example.com;
         autocert on;
     }
     server {
-        listen 8081;
+        listen ${AC_PORT_8081:-8081};
         server_name c.example.com;
         autocert on;
     }

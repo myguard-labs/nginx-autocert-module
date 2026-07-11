@@ -31,10 +31,10 @@ HTTP_SO="$NGX_BUILD_DIR/objs/ngx_http_autocert_module.so"
 
 PREFIX="${PREFIX:-/tmp/ac-multica-contact}"
 CA_HOST="mockca.example.com"
-CA_PORT_A=14041
-CA_PORT_B=14042
+CA_PORT_A="${CA_PORT_A:-${AC_PORT_14041:-14041}}"
+CA_PORT_B="${CA_PORT_B:-${AC_PORT_14042:-14042}}"
 DNS_NAME="ac-mcc-dns-$$"
-DNS_PORT=15493
+DNS_PORT="${DNS_PORT:-${AC_PORT_15493:-15493}}"
 NAME_A="ca-a.example.com"
 NAME_B="ca-b.example.com"
 EMAIL_A="a-admin@example.com"
@@ -64,7 +64,7 @@ done
 
 docker network ls >/dev/null
 docker run -d --name "$DNS_NAME" \
-    -p ${DNS_PORT}:53/udp -p ${DNS_PORT}:53/tcp \
+    -p "${DNS_PORT}":53/udp -p "${DNS_PORT}":53/tcp \
     ghcr.io/letsencrypt/pebble-challtestsrv:latest \
     -dnsserver :53 -management :8055 \
     -http01 "" -https01 "" -tlsalpn01 "" -doh "" \
@@ -255,7 +255,7 @@ http {
     # CA overrides do NOT inherit trust from http{} — repeat
     # autocert_ca_trusted_certificate inside each overriding server (index.md durable fact).
     server {
-        listen 80;
+        listen ${AC_PORT_5002:-5002};
         server_name ${NAME_A};
         autocert on;
         autocert_contact ${EMAIL_A};
@@ -263,7 +263,7 @@ http {
         autocert_ca_trusted_certificate $PREFIX/ca.pem;
     }
     server {
-        listen 80;
+        listen ${AC_PORT_5002:-5002};
         server_name ${NAME_B};
         autocert on;
         autocert_contact ${EMAIL_B};
@@ -324,7 +324,7 @@ http {
     autocert_resolver 127.0.0.1:${DNS_PORT};
     autocert_store_path $PREFIX/store2;
     server {
-        listen 80;
+        listen ${AC_PORT_5002:-5002};
         server_name c1.example.com;
         autocert on;
         autocert_contact one@example.com;
@@ -332,7 +332,7 @@ http {
         autocert_ca_trusted_certificate $PREFIX/ca.pem;
     }
     server {
-        listen 80;
+        listen ${AC_PORT_5002:-5002};
         server_name c2.example.com;
         autocert on;
         autocert_contact two@example.com;

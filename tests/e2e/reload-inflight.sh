@@ -54,11 +54,11 @@ HTTP_SO="$NGX_BUILD_DIR/objs/ngx_http_autocert_module.so"
 [ -f "$HTTP_SO" ] || { echo "missing $HTTP_SO"; exit 1; }
 
 PREFIX="${PREFIX:-/tmp/ac-reload-inflight}"
-PORT="${AC_TEST_PORT:-8466}"
+PORT="${AC_TEST_PORT:-${AC_PORT_8466:-8466}}"
 CA_HOST="mockca.example.com"
-CA_PORT="${AC_CA_PORT:-14066}"
+CA_PORT="${AC_CA_PORT:-${AC_PORT_14066:-14066}}"
 DNS_NAME="ac-reload-dns-$$"
-DNS_PORT="${AC_DNS_PORT:-15466}"
+DNS_PORT="${AC_DNS_PORT:-${AC_PORT_15466:-15466}}"
 NAME="reloadinflight.example.com"
 
 MOCK_PID=""
@@ -234,7 +234,7 @@ events {}
 http {
     autocert on;
     autocert_contact admin@example.com;
-    autocert_ca https://${CA_HOST}:${CA_PORT}/dir;
+    autocert_ca "https://${CA_HOST}:${CA_PORT}/dir";
     autocert_resolver 127.0.0.1:${DNS_PORT};
     autocert_resolver_timeout 5s;
     autocert_ca_trusted_certificate $PREFIX/ca.pem;

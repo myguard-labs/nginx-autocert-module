@@ -41,6 +41,22 @@ typedef struct {
     ngx_msec_t       connect_timeout;
     ngx_msec_t       timeout;        /* per-request read/write/handshake */
     ngx_log_t       *log;
+
+    /*
+     * Origin pin (SSRF-shaped hardening). Parsed once from the configured ACME
+     * directory URL: every subsequent resource URL the CA hands back (newOrder,
+     * finalize, authorizations, challenge, certificate, ...) MUST resolve to the
+     * same scheme(https)/host/port, so a malicious or compromised directory
+     * cannot redirect the account-signed JWS client at an arbitrary HTTPS origin
+     * that merely happens to be in the trust store. host is a NUL-terminated
+     * pool copy; host.len == 0 means "not pinned" (pin disabled). Match is
+     * case-insensitive on host and exact on port; host_is_ipv6 distinguishes a
+     * bracketed IPv6 authority. Set with ngx_autocert_acme_client_set_origin().
+     */
+    ngx_str_t        origin_host;
+    in_port_t        origin_port;
+    unsigned         origin_is_ipv6:1;
+    unsigned         origin_pinned:1;
 } ngx_autocert_acme_client_t;
 
 
@@ -137,6 +153,18 @@ ngx_int_t ngx_autocert_acme_client_create(ngx_autocert_acme_client_t *client,
     ngx_msec_t timeout);
 
 void ngx_autocert_acme_client_destroy(ngx_autocert_acme_client_t *client);
+
+/*
+ * Pin the client's ACME origin to the configured directory URL. Parses dir_url
+ * (must be an absolute https:// URL) and records its host/port so every later
+ * request through this client is required to stay on that origin. pool owns the
+ * NUL-terminated host copy (worker-lifetime). Returns NGX_OK, or NGX_ERROR if
+ * dir_url is not a parseable https:// URL (caller should fail startup). Passing
+ * this is optional: a client with no origin set accepts any https:// URL (the
+ * pre-pin behavior), which is what an explicit multi-origin opt-out selects.
+ */
+ngx_int_t ngx_autocert_acme_client_set_origin(ngx_autocert_acme_client_t *client,
+    ngx_pool_t *pool, ngx_str_t *dir_url);
 
 /*
  * Cancel the single in-flight request (if any) WITHOUT calling its handler:
