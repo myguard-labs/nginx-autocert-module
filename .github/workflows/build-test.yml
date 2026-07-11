@@ -464,5 +464,8 @@ jobs:
           BIN="$NGX/objs/${{ matrix.flavor }}"
           [ -f "$BIN" ] || BIN="$NGX/objs/nginx"
           chmod +x "$BIN"
-          SERVER_BIN="$BIN" NGX_BUILD_DIR="$NGX" FLAVOR="${{ matrix.flavor }}" AC_PORT_OFFSET="${{ matrix.port_offset }}" \
+          run_offset=$(( ((GITHUB_RUN_ID % 20) + 1) * 2000 ))
+          port_offset=$(( run_offset + ${{ matrix.port_offset }} ))
+          echo "e2e port offset: run_offset=${run_offset} flavor_offset=${{ matrix.port_offset }} port_offset=${port_offset}"
+          SERVER_BIN="$BIN" NGX_BUILD_DIR="$NGX" FLAVOR="${{ matrix.flavor }}" AC_PORT_OFFSET="$port_offset" \
             bash tests/e2e/run-all.sh
