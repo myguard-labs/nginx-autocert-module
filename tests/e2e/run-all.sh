@@ -121,8 +121,12 @@ PASS=(); FAIL=(); SKIP=()
 run_one() {
     local label="$1"; shift
     local slot="$1"; shift
+    local safe_label="${label//[^A-Za-z0-9_.-]/-}"
     set_ports "$((slot * 100))"
+    AC_E2E_PREFIX="/tmp/ac-${FLAVOR}-${GITHUB_RUN_ID:-local}-$(printf '%02d' "$slot")-${safe_label}"
+    export AC_E2E_PREFIX
     echo "e2e ${FLAVOR}: ${label}: AC_EFFECTIVE_PORT_OFFSET=${AC_EFFECTIVE_PORT_OFFSET} AC_PORT_8080=${AC_PORT_8080} AC_PORT_14000=${AC_PORT_14000} AC_PORT_15000=${AC_PORT_15000}"
+    echo "e2e ${FLAVOR}: ${label}: PREFIX=${AC_E2E_PREFIX}"
     echo "::group::e2e ${FLAVOR}: ${label}"
     local rc=0
     "$@" || rc=$?
@@ -140,7 +144,8 @@ invoke() {   # invoke <use_sudo> <script-abs> [extra env KEY=VAL ...]
     local use_sudo="$1" script="$2"; shift 2
     local env_kv=("SERVER_BIN=$SERVER_BIN" "NGX_BUILD_DIR=$NGX_BUILD_DIR" \
                   "AC_PORT_OFFSET=$AC_PORT_OFFSET" \
-                  "AC_EFFECTIVE_PORT_OFFSET=$AC_EFFECTIVE_PORT_OFFSET" "$@")
+                  "AC_EFFECTIVE_PORT_OFFSET=$AC_EFFECTIVE_PORT_OFFSET" \
+                  "PREFIX=$AC_E2E_PREFIX" "$@")
     local name
     while IFS='=' read -r name _; do
         case "$name" in

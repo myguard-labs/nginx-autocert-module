@@ -61,7 +61,7 @@ echo "== starting challtestsrv (pebble -> 127.0.0.1 view for the helper; order d
 # A single address mapping the order domain to the host IP is enough for the VA;
 # the helper reaches Pebble through the published 14000 with host 'pebble'.
 DNS_PORT="${DNS_PORT:-${AC_PORT_15353:-15353}}"
-MGMT_PORT=$((DNS_PORT + 1))
+MGMT_PORT="${MGMT_PORT:-${AC_PORT_15354:-15354}}"
 docker run -d --name "$DNS_NAME" --network "$NET_NAME" \
     -p "${DNS_PORT}":53/udp -p "${DNS_PORT}":53/tcp \
     -p "${MGMT_PORT}":8055 \
