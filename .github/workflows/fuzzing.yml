@@ -1,8 +1,8 @@
 name: Fuzzing
 
-# Fast fuzz regression gate on every PR/push — 30s/target on the JSON + HTTP
-# ACME parsers (+ fuzz.dict). Long discovery fuzz lives in ci-deep.yml
-# (monthly cron + workflow_dispatch).
+# Manual fast fuzz regression — 30s/target on the JSON + HTTP ACME parsers
+# (+ fuzz.dict). PR/release coverage lives in ci-deep.yml so normal pushes do
+# not steal self-hosted runner lanes from Build & Test.
 #
 # Action pins (keep in sync with build-test.yml header):
 # actions/checkout@v5        -> 93cb6efe18208431cddfb8368fd83d5badbf9bfd
@@ -13,10 +13,6 @@ env:
   NGINX_VERSION: ""
 
 on:
-  push:
-    branches: [master]
-  pull_request:
-    branches: [master]
   workflow_dispatch: {}
 
 concurrency:

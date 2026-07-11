@@ -1,9 +1,8 @@
 name: CI Deep
 
-# Exhaustive dynamic analysis — monthly cron + on-demand only, NEVER on PR.
-# The PR-time gates live in standalone workflows: fuzzing.yml (fast fuzz
-# regression), valgrind.yml (memcheck lite soak) and security-scanners.yml
-# (scanners) run on every PR/push; THIS file keeps the exhaustive long runs.
+# Exhaustive dynamic analysis — monthly cron, release, and on-demand only,
+# NEVER on PR. Normal PR/push CI stays on Build & Test; this workflow is the
+# fuzz + Valgrind release/deep gate.
 # codeql.yml is dropped entirely: CodeQL / the GitHub Security tab is
 # GitHub-Advanced-Security only and does nothing on a private repo, so the
 # SARIF-upload path is removed too — the scanners still run and GATE on
@@ -23,6 +22,8 @@ env:
   NGINX_VERSION: ""
 
 on:
+  release:
+    types: [published]
   schedule:
     # Monthly, day 2 @ 03:30 UTC — staggered per repo so ci-deep runs
     # don't pile up on the shared self-hosted runners.
