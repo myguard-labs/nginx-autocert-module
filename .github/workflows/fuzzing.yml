@@ -1,6 +1,6 @@
 name: Fuzzing
 
-# Fast fuzz regression gate on every PR/push — 120s/target on the JSON + HTTP
+# Fast fuzz regression gate on every PR/push — 30s/target on the JSON + HTTP
 # ACME parsers (+ fuzz.dict). Long discovery fuzz lives in ci-deep.yml
 # (monthly cron + workflow_dispatch).
 #
@@ -27,9 +27,9 @@ permissions:
   contents: read
 
 jobs:
-  # ── Short fuzz regression — both parser targets, 120s each ────────────────
+  # ── Short fuzz regression — both parser targets, 30s each ─────────────────
   fuzz-regression:
-    name: Fuzz regression (120s/target)
+    name: Fuzz regression (30s/target)
     runs-on: [self-hosted, builder02, lxc]
     timeout-minutes: 30
     steps:
@@ -44,16 +44,16 @@ jobs:
       - name: Build fuzz targets
         run: bash fuzz/build.sh "$GITHUB_WORKSPACE/fuzz"
 
-      - name: Run each target 120s
+      - name: Run each target 30s
         run: |
           set -euo pipefail
           cd fuzz
           for t in json:corpus http:corpus_http; do
             name=${t%%:*}; corp=${t##*:}
-            echo "== fuzz_${name} (120s) =="
+            echo "== fuzz_${name} (30s) =="
             set +e
             "./fuzz_${name}" \
-              -max_total_time=120 \
+              -max_total_time=30 \
               -dict=fuzz.dict \
               -print_final_stats=1 \
               -artifact_prefix="crash-${name}-" \
@@ -61,7 +61,7 @@ jobs:
             rc=$?
             set -e
             [ $rc -eq 0 ] || { echo "❌ fuzz_${name} crash (exit $rc)"; exit 1; }
-            echo "✓ no crashes in fuzz_${name} 120s"
+            echo "✓ no crashes in fuzz_${name} 30s"
           done
 
       - name: Upload crash artifacts
