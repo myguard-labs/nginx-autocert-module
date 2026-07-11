@@ -21,7 +21,7 @@ HTTP_SO="$NGX_BUILD_DIR/objs/ngx_http_autocert_module.so"
 [ -f "$HTTP_SO" ] || { echo "missing $HTTP_SO"; exit 1; }
 
 PREFIX="${PREFIX:-/tmp/ac-http01}"
-PORT="${AC_TEST_PORT:-8088}"
+PORT="${AC_TEST_PORT:-${AC_PORT_8088:-8088}}"
 TOKEN="evaGxfADs6pSRb2LMJ7rzMrXXX0123456789abcdefg"
 KEYAUTH="$TOKEN.9jg46WB3rR_AHD-EBXdN7cBkH1WOu0tA3M9fm21mqTI"
 

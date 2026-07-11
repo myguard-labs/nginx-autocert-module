@@ -30,9 +30,9 @@ HTTP_SO="$NGX_BUILD_DIR/objs/ngx_http_autocert_module.so"
 
 PREFIX="${PREFIX:-/tmp/ac-slowloris}"
 CA_HOST="mockca.example.com"
-CA_PORT=14021
+CA_PORT="${CA_PORT:-${AC_PORT_14021:-14021}}"
 DNS_NAME="ac-slow-dns-$$"
-DNS_PORT=15473
+DNS_PORT="${DNS_PORT:-${AC_PORT_15473:-15473}}"
 NAME="slow.example.com"
 BUDGET_MS=2000
 
@@ -53,7 +53,7 @@ openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 \
 
 docker network ls >/dev/null
 docker run -d --name "$DNS_NAME" \
-    -p ${DNS_PORT}:53/udp -p ${DNS_PORT}:53/tcp \
+    -p "${DNS_PORT}":53/udp -p "${DNS_PORT}":53/tcp \
     ghcr.io/letsencrypt/pebble-challtestsrv:latest \
     -dnsserver :53 -management :8055 \
     -http01 "" -https01 "" -tlsalpn01 "" -doh "" \
@@ -113,7 +113,7 @@ python3 "$PREFIX/mockca.py" &
 MOCK_PID=$!
 # We can't curl /dir (it never completes), so just wait for the port to listen.
 for i in $(seq 1 30); do
-    if (exec 3<>/dev/tcp/127.0.0.1/${CA_PORT}) 2>/dev/null; then
+    if (exec 3<>/dev/tcp/127.0.0.1/"${CA_PORT}") 2>/dev/null; then
         exec 3>&- 3<&-; break
     fi
     sleep 0.5
@@ -128,14 +128,14 @@ events {}
 http {
     autocert on;
     autocert_contact admin@example.com;
-    autocert_ca https://${CA_HOST}:${CA_PORT}/dir;
+    autocert_ca "https://${CA_HOST}:${CA_PORT}/dir";
     autocert_resolver 127.0.0.1:${DNS_PORT};
     autocert_resolver_timeout 5s;
     autocert_ca_trusted_certificate $PREFIX/ca.pem;
     autocert_store_path $PREFIX/store;
     # High port: the helper aborts on the directory read before any challenge,
     # so :80 is never used — an unprivileged port keeps this job sudo-free.
-    server { listen 18190; server_name ${NAME}; }
+    server { listen ${AC_PORT_18190:-18190}; server_name ${NAME}; }
 }
 EOF
 

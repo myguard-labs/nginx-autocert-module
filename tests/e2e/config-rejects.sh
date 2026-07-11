@@ -27,7 +27,7 @@ mkdir -p "$PREFIX/logs" "$PREFIX/conf" "$PREFIX/store"
 # Port 8443 avoids the privileged-bind failure that would make every `-t` fail
 # regardless of the directive under test (the reason we grep for the SPECIFIC
 # rejection message below, not just a non-zero exit).
-PORT=8443
+PORT="${PORT:-${AC_PORT_8443:-8443}}"
 
 # Asserts `nginx -t` rejects the body AND logs the expected reason substring.
 expect_reject() {

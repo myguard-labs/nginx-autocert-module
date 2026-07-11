@@ -26,9 +26,9 @@ HTTP_SO="$NGX_BUILD_DIR/objs/ngx_http_autocert_module.so"
 
 PREFIX="${PREFIX:-/tmp/ac-certbot}"
 CA_HOST="mockca.example.com"
-CA_PORT=14041
+CA_PORT="${CA_PORT:-${AC_PORT_14041:-14041}}"
 DNS_NAME="ac-cb-dns-$$"
-DNS_PORT=15493
+DNS_PORT="${DNS_PORT:-${AC_PORT_15493:-15493}}"
 NAME="certbot.example.com"
 
 MOCK_PID=""
@@ -59,7 +59,7 @@ cat "$PREFIX/leaf.pem" "$PREFIX/inter.pem" > "$PREFIX/chain.pem"
 
 docker network ls >/dev/null
 docker run -d --name "$DNS_NAME" \
-    -p ${DNS_PORT}:53/udp -p ${DNS_PORT}:53/tcp \
+    -p "${DNS_PORT}":53/udp -p "${DNS_PORT}":53/tcp \
     ghcr.io/letsencrypt/pebble-challtestsrv:latest \
     -dnsserver :53 -management :8055 \
     -http01 "" -https01 "" -tlsalpn01 "" -doh "" \
@@ -184,8 +184,8 @@ echo "== starting mock ACME CA on :$CA_PORT =="
 python3 "$PREFIX/mockca.py" &
 MOCK_PID=$!
 for i in $(seq 1 30); do
-    if curl -ksf --resolve ${CA_HOST}:${CA_PORT}:127.0.0.1 \
-        --cacert "$PREFIX/ca.pem" https://${CA_HOST}:${CA_PORT}/dir >/dev/null 2>&1; then
+    if curl -ksf --resolve "${CA_HOST}:${CA_PORT}:127.0.0.1" \
+        --cacert "$PREFIX/ca.pem" "https://${CA_HOST}:${CA_PORT}/dir" >/dev/null 2>&1; then
         break
     fi
     sleep 0.5
@@ -200,13 +200,13 @@ events {}
 http {
     autocert on;
     autocert_contact admin@example.com;
-    autocert_ca https://${CA_HOST}:${CA_PORT}/dir;
+    autocert_ca "https://${CA_HOST}:${CA_PORT}/dir";
     autocert_resolver 127.0.0.1:${DNS_PORT};
     autocert_resolver_timeout 5s;
     autocert_ca_trusted_certificate $PREFIX/ca.pem;
     autocert_store_path $PREFIX/store;
     autocert_store_layout certbot;
-    server { listen 80; server_name ${NAME}; }
+    server { listen ${AC_PORT_5002:-5002}; server_name ${NAME}; }
 }
 EOF
 

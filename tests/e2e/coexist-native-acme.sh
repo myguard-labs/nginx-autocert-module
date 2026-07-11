@@ -65,7 +65,7 @@ http {
 
     # vhost driven by native acme.
     server {
-        listen 127.0.0.1:8443 ssl;
+        listen 127.0.0.1:${AC_PORT_8443:-8443} ssl;
         server_name native.example.com;
         acme le;
         ssl_certificate $PREFIX/dummy.crt;
@@ -74,7 +74,7 @@ http {
 
     # vhost driven by this module's autocert, alongside native acme.
     server {
-        listen 127.0.0.1:8444 ssl;
+        listen 127.0.0.1:${AC_PORT_8444:-8444} ssl;
         server_name auto.example.com;
         autocert on;
         ssl_certificate $PREFIX/dummy.crt;

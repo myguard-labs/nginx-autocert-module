@@ -23,9 +23,9 @@ HTTP_SO="$NGX_BUILD_DIR/objs/ngx_http_autocert_module.so"
 
 PREFIX="${PREFIX:-/tmp/ac-validate}"
 CA_HOST="mockca.example.com"
-CA_PORT=14081
+CA_PORT="${CA_PORT:-${AC_PORT_14081:-14081}}"
 DNS_NAME="ac-val-dns-$$"
-DNS_PORT=15581
+DNS_PORT="${DNS_PORT:-${AC_PORT_15581:-15581}}"
 CERT_CASE="${CERT_CASE:-key-mismatch}"
 case "$CERT_CASE" in
     key-mismatch|wrong-san|expired|future) ;;
@@ -52,7 +52,7 @@ openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 \
 
 docker network ls >/dev/null
 docker run -d --name "$DNS_NAME" \
-    -p ${DNS_PORT}:53/udp -p ${DNS_PORT}:53/tcp \
+    -p "${DNS_PORT}":53/udp -p "${DNS_PORT}":53/tcp \
     ghcr.io/letsencrypt/pebble-challtestsrv:latest \
     -dnsserver :53 -management :8055 \
     -http01 "" -https01 "" -tlsalpn01 "" -doh "" \
@@ -176,8 +176,8 @@ echo "== starting mock ACME CA on :$CA_PORT =="
 python3 "$PREFIX/mockca.py" &
 MOCK_PID=$!
 for i in $(seq 1 30); do
-    curl -ksf --resolve ${CA_HOST}:${CA_PORT}:127.0.0.1 \
-        --cacert "$PREFIX/ca.pem" https://${CA_HOST}:${CA_PORT}/dir >/dev/null 2>&1 && break
+    curl -ksf --resolve "${CA_HOST}:${CA_PORT}:127.0.0.1" \
+        --cacert "$PREFIX/ca.pem" "https://${CA_HOST}:${CA_PORT}/dir" >/dev/null 2>&1 && break
     sleep 0.5
     [ "$i" = 30 ] && { echo "::error::mock CA did not come up"; exit 1; }
 done
@@ -190,12 +190,12 @@ events {}
 http {
     autocert on;
     autocert_contact admin@example.com;
-    autocert_ca https://${CA_HOST}:${CA_PORT}/dir;
+    autocert_ca "https://${CA_HOST}:${CA_PORT}/dir";
     autocert_resolver 127.0.0.1:${DNS_PORT};
     autocert_resolver_timeout 5s;
     autocert_ca_trusted_certificate $PREFIX/ca.pem;
     autocert_store_path $PREFIX/store;
-    server { listen 80; server_name ${NAME}; }
+    server { listen ${AC_PORT_5002:-5002}; server_name ${NAME}; }
 }
 EOF
 

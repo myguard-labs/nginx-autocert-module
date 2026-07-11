@@ -11,7 +11,7 @@ HTTP_SO="$NGX_BUILD_DIR/objs/ngx_http_autocert_module.so"
 [ -f "$HTTP_SO" ] || { echo "missing $HTTP_SO"; exit 1; }
 
 PREFIX="${PREFIX:-/tmp/ac-ipv6-directory}"
-CA_PORT=14443
+CA_PORT="${CA_PORT:-${AC_PORT_14443:-14443}}"
 HOST_FILE="$PREFIX/host"
 MOCK_PID=""
 
@@ -103,7 +103,7 @@ http {
     autocert_ca https://[::1]:${CA_PORT}/dir;
     autocert_ca_trusted_certificate $PREFIX/ca.pem;
     autocert_store_path $PREFIX/store;
-    server { listen 18089; server_name ipv6.example.com; }
+    server { listen ${AC_PORT_18089:-18089}; server_name ipv6.example.com; }
 }
 EOF
 

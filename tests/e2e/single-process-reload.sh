@@ -37,7 +37,7 @@ HTTP_SO="$NGX_BUILD_DIR/objs/ngx_http_autocert_module.so"
 [ -f "$HTTP_SO" ] || { echo "missing $HTTP_SO"; exit 1; }
 
 PREFIX="${PREFIX:-/tmp/ac-single-reload}"
-PORT="${AC_TEST_PORT:-8463}"
+PORT="${AC_TEST_PORT:-${AC_PORT_8463:-8463}}"
 A="a.example.com"
 B="b.example.com"
 

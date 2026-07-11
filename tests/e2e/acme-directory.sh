@@ -30,7 +30,7 @@ HTTP_SO="$NGX_BUILD_DIR/objs/ngx_http_autocert_module.so"
 PREFIX="${PREFIX:-/tmp/ac-acme-dir}"
 PEBBLE_NAME="ac-pebble-$$"
 DNS_NAME="ac-dns-$$"
-DNS_PORT=15353
+DNS_PORT="${DNS_PORT:-${AC_PORT_15353:-15353}}"
 
 cleanup() {
     "$SERVER_BIN" -p "$PREFIX" -c "$PREFIX/conf/nginx.conf" -s stop 2>/dev/null || true
@@ -42,12 +42,12 @@ rm -rf "$PREFIX"
 mkdir -p "$PREFIX/logs" "$PREFIX/conf"
 
 echo "== starting Pebble =="
-docker run -d --name "$PEBBLE_NAME" -p 14000:14000 -p 15000:15000 \
+docker run -d --name "$PEBBLE_NAME" -p "${AC_PORT_14000:-14000}":14000 -p "${AC_PORT_15000:-15000}":15000 \
     -e PEBBLE_VA_NOSLEEP=1 \
     ghcr.io/letsencrypt/pebble:latest >/dev/null
 
 echo "== starting challtestsrv (resolves 'pebble' -> 127.0.0.1) =="
-docker run -d --name "$DNS_NAME" -p ${DNS_PORT}:53/udp -p ${DNS_PORT}:53/tcp \
+docker run -d --name "$DNS_NAME" -p "${DNS_PORT}":53/udp -p "${DNS_PORT}":53/tcp \
     ghcr.io/letsencrypt/pebble-challtestsrv:latest \
     -dnsserver :53 -management :8055 \
     -http01 "" -https01 "" -tlsalpn01 "" -doh "" \
@@ -55,7 +55,7 @@ docker run -d --name "$DNS_NAME" -p ${DNS_PORT}:53/udp -p ${DNS_PORT}:53/tcp \
 
 # Wait for Pebble's ACME endpoint to answer.
 for i in $(seq 1 30); do
-    if curl -ksf https://127.0.0.1:14000/dir >/dev/null 2>&1; then break; fi
+    if curl -ksf "https://127.0.0.1:${AC_PORT_14000:-14000}/dir" >/dev/null 2>&1; then break; fi
     sleep 1
     [ "$i" = 30 ] && { echo "Pebble did not come up"; docker logs "$PEBBLE_NAME"; exit 1; }
 done
@@ -71,12 +71,12 @@ events {}
 http {
     autocert on;
     autocert_contact admin@example.com;
-    autocert_ca https://pebble:14000/dir;
+    autocert_ca https://pebble:${AC_PORT_14000:-14000}/dir;
     autocert_resolver 127.0.0.1:${DNS_PORT};
     autocert_ca_trusted_certificate $PREFIX/ca.pem;
     autocert_store_path $PREFIX/store;
     server {
-        listen 8080;
+        listen ${AC_PORT_8080:-8080};
         server_name a.example.com;
     }
 }
@@ -115,7 +115,7 @@ fi
 echo "✓ helper registered an ACME account over verified TLS"
 
 # kid must be a Pebble account URL (Location header was captured + carried out).
-if ! grep -q 'ACME account registered, kid "https://pebble:14000/' "$PREFIX/logs/error.log"; then
+if ! grep -q "ACME account registered, kid \"https://pebble:${AC_PORT_14000:-14000}/" "$PREFIX/logs/error.log"; then
     echo "::error::account kid is not a Pebble account URL"
     grep 'account registered' "$PREFIX/logs/error.log" || true
     exit 1
@@ -151,13 +151,13 @@ events {}
 http {
     autocert on;
     autocert_contact admin@example.com;
-    autocert_ca https://pebble:14000/dir;
+    autocert_ca https://pebble:${AC_PORT_14000:-14000}/dir;
     autocert_resolver 127.0.0.1:${DNS_PORT};
     autocert_store_path $PREFIX/store;
     # no autocert_ca_trusted_certificate => system trust store, which does NOT trust
     # Pebble's self-signed CA.
     server {
-        listen 8080;
+        listen ${AC_PORT_8080:-8080};
         server_name a.example.com;
     }
 }
