@@ -67,6 +67,7 @@ SCRIPTS=(
   mock-download-400-retry.sh:sudo
   mock-order-poll-retry.sh:sudo
   mock-freshness-wrong-domain.sh:sudo
+  mock-origin-pin.sh:sudo
   store-certbot.sh:sudo
   store-symlink-swap.sh:sudo
 )

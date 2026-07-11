@@ -31,9 +31,10 @@
  * Atomic two-file commit uses renameat2(RENAME_EXCHANGE) to swap the freshly
  * written per-domain dir with the live one in a single syscall (Linux 3.15+).
  * Called via syscall() so the build does not depend on a glibc renameat2
- * wrapper; an old kernel / unsupporting filesystem returns ENOSYS/EINVAL and we
- * fall back to the sequential rename. RENAME_EXCHANGE may be absent from old
- * UAPI headers, so define it if needed.
+ * wrapper; an old kernel / unsupporting filesystem returns ENOSYS/EINVAL, which
+ * we surface as NGX_DECLINED so the caller defers renewal and leaves the live
+ * cert untouched (never a non-atomic sequential rename). RENAME_EXCHANGE may be
+ * absent from old UAPI headers, so define it if needed.
  */
 #if defined(__linux__)
 #include <sys/syscall.h>
@@ -2334,7 +2335,6 @@ ngx_autocert_order_store(ngx_autocert_order_t *order)
         NGX_AUTOCERT_STORE_FAIL();
     }
     (void) close(sfd);
-    sfd = -1;
 
 #undef NGX_AUTOCERT_STORE_FAIL
 
@@ -2606,7 +2606,7 @@ ngx_autocert_order_swap_dirs_at(ngx_autocert_order_t *order, int cfd,
     if (rc == NGX_DECLINED) {
         ngx_log_debug0(NGX_LOG_DEBUG_CORE, order->log, 0,
                        "autocert: RENAME_EXCHANGE unsupported, "
-                       "falling back to sequential rename");
+                       "deferring renewal (live cert kept)");
         return NGX_DECLINED;
     }
     if (rc == NGX_ERROR) {
