@@ -138,6 +138,7 @@ echo "== starting Pebble A (:14000, no EAB) and Pebble B (:14001, EAB) =="
 docker run -d --name "$PEBBLE_A" --network "$NET_NAME" \
     -p "${AC_PORT_14000:-14000}":14000 -p "${AC_PORT_15000:-15000}":15000 \
     -e PEBBLE_VA_NOSLEEP=1 \
+    -e PEBBLE_WFE_NONCEREJECT=0 \
     -v "$PREFIX/pebbleA.json:/test/config/pebble-config.json:ro" \
     ghcr.io/letsencrypt/pebble:latest \
     -config /test/config/pebble-config.json \
@@ -146,6 +147,7 @@ docker run -d --name "$PEBBLE_A" --network "$NET_NAME" \
 docker run -d --name "$PEBBLE_B" --network "$NET_NAME" \
     -p "${AC_PORT_14001:-14001}":14001 -p "${AC_PORT_15001:-15001}":15001 \
     -e PEBBLE_VA_NOSLEEP=1 \
+    -e PEBBLE_WFE_NONCEREJECT=0 \
     -v "$PREFIX/pebbleB.json:/test/config/pebble-config.json:ro" \
     ghcr.io/letsencrypt/pebble:latest \
     -config /test/config/pebble-config.json \

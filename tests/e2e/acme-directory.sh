@@ -44,6 +44,7 @@ mkdir -p "$PREFIX/logs" "$PREFIX/conf"
 echo "== starting Pebble =="
 docker run -d --name "$PEBBLE_NAME" -p "${AC_PORT_14000:-14000}":14000 -p "${AC_PORT_15000:-15000}":15000 \
     -e PEBBLE_VA_NOSLEEP=1 \
+    -e PEBBLE_WFE_NONCEREJECT=0 \
     ghcr.io/letsencrypt/pebble:latest >/dev/null
 
 echo "== starting challtestsrv (resolves 'pebble' -> 127.0.0.1) =="

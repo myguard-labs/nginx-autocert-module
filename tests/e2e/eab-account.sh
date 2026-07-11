@@ -64,6 +64,7 @@ EOF
 echo "== starting Pebble (EAB required) =="
 docker run -d --name "$PEBBLE_NAME" -p "${AC_PORT_14000:-14000}":14000 -p "${AC_PORT_15000:-15000}":15000 \
     -e PEBBLE_VA_NOSLEEP=1 \
+    -e PEBBLE_WFE_NONCEREJECT=0 \
     -v "$PREFIX/conf/pebble-config.json:/test/config/pebble-config.json:ro" \
     ghcr.io/letsencrypt/pebble:latest >/dev/null
 

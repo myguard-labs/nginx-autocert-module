@@ -86,6 +86,7 @@ echo "== Pebble (validates dns-01 via challtestsrv) =="
 docker run -d --name "$PEBBLE_NAME" --network "$NET_NAME" \
     -p "${AC_PORT_14000:-14000}":14000 -p "${AC_PORT_15000:-15000}":15000 \
     -e PEBBLE_VA_NOSLEEP=1 \
+    -e PEBBLE_WFE_NONCEREJECT=0 \
     -v "$PREFIX/pebble-config.json:/test/config/pebble-config.json:ro" \
     ghcr.io/letsencrypt/pebble:latest \
     -config /test/config/pebble-config.json \
