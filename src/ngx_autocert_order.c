@@ -388,20 +388,44 @@ ngx_autocert_order_new_order(ngx_autocert_order_t *order)
     ngx_str_t  payload;
     u_char    *p;
     size_t     size;
+    ngx_str_t  type;
 
-    /* {"identifiers":[{"type":"dns","value":"<domain>"}]} */
-    size = sizeof("{\"identifiers\":[{\"type\":\"dns\",\"value\":\"\"}]}") - 1
-           + order->domain.len;
+    /* An IP-address identifier (LE IP certs, RFC 8738) uses type "ip"; a dns
+     * name uses "dns". The value is the literal in both cases. */
+    if (ngx_autocert_str_is_ip(&order->domain, NULL) != 0) {
+        ngx_str_set(&type, "ip");
+    } else {
+        ngx_str_set(&type, "dns");
+    }
+
+    /*
+     * {"profile":"<p>",}{"identifiers":[{"type":"<type>","value":"<domain>"}]}
+     * The optional profile member (ACME Profiles draft) is emitted only when
+     * autocert_profile is set — LE requires "shortlived" for IP certs. The
+     * profile value is a CA-defined token (letters/digits/'-'), no JSON-special
+     * chars, so it needs no escaping. It is placed FIRST inside the object.
+     */
+    size = sizeof("{\"identifiers\":[{\"type\":\"\",\"value\":\"\"}]}") - 1
+           + type.len + order->domain.len;
+    if (order->profile.len) {
+        size += sizeof("\"profile\":\"\",") - 1 + order->profile.len;
+    }
 
     payload.data = ngx_pnalloc(order->pool, size);
     if (payload.data == NULL) {
         return NGX_ERROR;
     }
 
-    p = ngx_cpymem(payload.data,
-                   "{\"identifiers\":[{\"type\":\"dns\",\"value\":\"",
-                   sizeof("{\"identifiers\":[{\"type\":\"dns\",\"value\":\"")
-                       - 1);
+    p = ngx_cpymem(payload.data, "{", 1);
+    if (order->profile.len) {
+        p = ngx_cpymem(p, "\"profile\":\"", sizeof("\"profile\":\"") - 1);
+        p = ngx_cpymem(p, order->profile.data, order->profile.len);
+        p = ngx_cpymem(p, "\",", sizeof("\",") - 1);
+    }
+    p = ngx_cpymem(p, "\"identifiers\":[{\"type\":\"",
+                   sizeof("\"identifiers\":[{\"type\":\"") - 1);
+    p = ngx_cpymem(p, type.data, type.len);
+    p = ngx_cpymem(p, "\",\"value\":\"", sizeof("\",\"value\":\"") - 1);
     p = ngx_cpymem(p, order->domain.data, order->domain.len);
     p = ngx_cpymem(p, "\"}]}", sizeof("\"}]}") - 1);
     payload.len = p - payload.data;
@@ -1748,7 +1772,9 @@ ngx_autocert_order_validate_cert(ngx_autocert_order_t *order)
         verify.data = verify_buf;       /* '*' -> 'x', same length */
     }
 
-    if (X509_check_host(leaf, (char *) verify.data, verify.len, 0, NULL) != 1) {
+    /* An IP identifier is verified against the leaf's iPAddress SAN;
+     * ngx_autocert_cert_covers dispatches by identifier type. */
+    if (!ngx_autocert_cert_covers(leaf, &verify)) {
         ngx_log_error(NGX_LOG_ERR, order->log, 0,
                       "autocert: downloaded leaf does not cover \"%V\"",
                       &order->domain);
@@ -1894,6 +1920,18 @@ ngx_autocert_order_domain_identifier_safe(ngx_str_t *domain)
 
     if (domain->len == 0 || domain->len > 253) {
         return NGX_ERROR;
+    }
+
+    /*
+     * An IP-address identifier (RFC 8738) is a legal ACME identifier but is not
+     * a DNS name — the DNS charset check below rejects ':' (IPv6) and would also
+     * reject an uppercase form. A validated IP literal can never escape the
+     * store: an IPv4 literal is digits and dots only (no '/', no "."/".." path
+     * segment — it is a real dotted-quad), and an IPv6 literal is mapped to the
+     * safe "_ip6_..." segment by ngx_autocert_fs_segment before it reaches disk.
+     */
+    if (ngx_autocert_str_is_ip(domain, NULL) != 0) {
+        return NGX_OK;
     }
 
     /*

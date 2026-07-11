@@ -321,8 +321,10 @@ jobs:
           INC="-I$NGX/src/core -I$NGX/src/event -I$NGX/src/os/unix -I$NGX/objs"
           OBJS="$NGX/objs/src/core/ngx_palloc.o $NGX/objs/src/core/ngx_string.o \
                 $NGX/objs/src/os/unix/ngx_time.o $NGX/objs/src/core/ngx_times.o \
-                $NGX/objs/src/os/unix/ngx_alloc.o"
+                $NGX/objs/src/core/ngx_inet.o $NGX/objs/src/os/unix/ngx_alloc.o"
           # INC and OBJS are flag/object lists that must word-split.
+          # ngx_inet.o: crypto.c now pulls ngx_autocert_str_is_ip (IP-cert arc),
+          # which references ngx_inet_addr / ngx_inet6_addr.
           # shellcheck disable=SC2086
           gcc -Wall -Wextra -Werror $INC -o test_crypto \
             "$GITHUB_WORKSPACE/tests/unit/test_crypto.c" \
@@ -365,6 +367,42 @@ jobs:
             "$GITHUB_WORKSPACE/src/ngx_autocert_json.c" \
             $OBJS
           ./test_json
+
+  ipident-unit:
+    name: IP-identifier helper unit tests (I1)
+    needs: [resolve, build-nginx]
+    runs-on: [self-hosted, builder02, lxc]
+    timeout-minutes: 10
+    steps:
+      - name: Checkout module
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+
+      - name: Setup build deps
+        uses: ./.github/actions/setup
+        with:
+          packages: build-essential libssl-dev
+
+      - name: Download nginx build
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: build-nginx
+          path: ${{ needs.resolve.outputs.nginx_dir }}
+
+      - name: Build + run IP-identifier unit tests
+        run: |
+          set -euo pipefail
+          NGX="$GITHUB_WORKSPACE/${{ needs.resolve.outputs.nginx_dir }}"
+          INC="-I$NGX/src/core -I$NGX/src/event -I$NGX/src/event/modules \
+               -I$NGX/src/event/quic -I$NGX/src/os/unix -I$NGX/objs \
+               -I$NGX/src/http -I$NGX/src/http/modules"
+          OBJS="$NGX/objs/src/core/ngx_string.o $NGX/objs/src/core/ngx_inet.o \
+                $NGX/objs/src/core/ngx_palloc.o $NGX/objs/src/os/unix/ngx_alloc.o"
+          # INC and OBJS are flag/object lists that must word-split.
+          # shellcheck disable=SC2086
+          gcc -Wall -Wextra -Werror $INC -o test_ipident \
+            "$GITHUB_WORKSPACE/tests/unit/test_ipident.c" \
+            $OBJS -lssl -lcrypto
+          ./test_ipident
 
   http-unit:
     name: HTTP parser unit tests (M4b)
@@ -503,7 +541,9 @@ jobs:
           INC="-I$NGX/src/core -I$NGX/src/event -I$NGX/src/os/unix -I$NGX/objs"
           OBJS="$NGX/objs/src/core/ngx_palloc.o $NGX/objs/src/core/ngx_string.o \
                 $NGX/objs/src/os/unix/ngx_time.o $NGX/objs/src/core/ngx_times.o \
-                $NGX/objs/src/os/unix/ngx_alloc.o"
+                $NGX/objs/src/core/ngx_inet.o $NGX/objs/src/os/unix/ngx_alloc.o"
+          # ngx_inet.o: crypto.c (include-shimmed here) now pulls
+          # ngx_autocert_str_is_ip, which references ngx_inet_addr/ngx_inet6_addr.
           # _GNU_SOURCE: the test cross-checks ngx_autocert_timegm against libc
           # timegm(3). The test include-shims the crypto .c to reach the static
           # ngx_autocert_timegm, so run it from the repo root (relative fixture

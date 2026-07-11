@@ -5,6 +5,7 @@
 
 #include "ngx_http_autocert_crypto.h"
 #include "ngx_autocert_shared.h"
+#include "ngx_autocert_ident.h"         /* ngx_autocert_str_is_ip, _cert_covers */
 
 #include <limits.h>
 #include <errno.h>
@@ -741,6 +742,7 @@ ngx_http_autocert_csr_der(ngx_pool_t *pool, EVP_PKEY *pkey, ngx_str_t *domain,
 {
     ngx_int_t                          rc = NGX_ERROR;
     int                                der_len;
+    int                                family;
     u_char                            *der = NULL;
     X509_REQ                          *req = NULL;
     STACK_OF(X509_EXTENSION)          *exts = NULL;
@@ -748,6 +750,8 @@ ngx_http_autocert_csr_der(ngx_pool_t *pool, EVP_PKEY *pkey, ngx_str_t *domain,
     GENERAL_NAME                      *gn = NULL;
     GENERAL_NAMES                     *gns = NULL;
     ASN1_IA5STRING                    *ia5 = NULL;
+    ASN1_OCTET_STRING                 *oct = NULL;
+    struct in6_addr                    v6;
     const EVP_MD                      *md;
 
     md = ngx_http_autocert_sign_md(pkey);
@@ -765,21 +769,56 @@ ngx_http_autocert_csr_der(ngx_pool_t *pool, EVP_PKEY *pkey, ngx_str_t *domain,
         goto done;
     }
 
-    /* subjectAltName = DNS:<domain>, built by hand to bound the name length
-     * (no NUL-terminated input assumed). */
+    /* subjectAltName, built by hand to bound the name length (no NUL-terminated
+     * input assumed). An IP identifier (RFC 8738) becomes an iPAddress SAN
+     * carrying the packed 4- or 16-byte address; a name becomes DNS:<domain>.
+     * The CSR subject stays empty either way (ACME ignores it; the CN-with-IP
+     * ambiguity never arises). */
     gns = GENERAL_NAMES_new();
     gn = GENERAL_NAME_new();
-    ia5 = ASN1_IA5STRING_new();
-    if (gns == NULL || gn == NULL || ia5 == NULL) {
+    if (gns == NULL || gn == NULL) {
         goto done;
     }
-    if (domain->len > INT_MAX
-        || ASN1_STRING_set(ia5, domain->data, (int) domain->len) != 1)
-    {
-        goto done;
+
+    family = ngx_autocert_str_is_ip(domain, &v6);
+
+    if (family != 0) {
+        u_char  *addr;
+        size_t   addr_len;
+        in_addr_t v4;
+
+        oct = ASN1_OCTET_STRING_new();
+        if (oct == NULL) {
+            goto done;
+        }
+        if (family == AF_INET6) {
+            addr = v6.s6_addr;
+            addr_len = 16;
+        } else {
+            v4 = ngx_inet_addr(domain->data, domain->len);   /* network order */
+            addr = (u_char *) &v4;
+            addr_len = 4;
+        }
+        if (ASN1_OCTET_STRING_set(oct, addr, (int) addr_len) != 1) {
+            goto done;
+        }
+        GENERAL_NAME_set0_value(gn, GEN_IPADD, oct);
+        oct = NULL;                                  /* owned by gn now */
+
+    } else {
+        ia5 = ASN1_IA5STRING_new();
+        if (ia5 == NULL) {
+            goto done;
+        }
+        if (domain->len > INT_MAX
+            || ASN1_STRING_set(ia5, domain->data, (int) domain->len) != 1)
+        {
+            goto done;
+        }
+        GENERAL_NAME_set0_value(gn, GEN_DNS, ia5);
+        ia5 = NULL;                                  /* owned by gn now */
     }
-    GENERAL_NAME_set0_value(gn, GEN_DNS, ia5);
-    ia5 = NULL;                                      /* owned by gn now */
+
     if (sk_GENERAL_NAME_push(gns, gn) <= 0) {
         goto done;
     }
@@ -822,6 +861,9 @@ done:
     }
     if (ia5 != NULL) {
         ASN1_STRING_free(ia5);
+    }
+    if (oct != NULL) {
+        ASN1_OCTET_STRING_free(oct);
     }
     if (gn != NULL) {
         GENERAL_NAME_free(gn);
@@ -925,6 +967,9 @@ ngx_http_autocert_acme_tls_cert(EVP_PKEY *pkey, ngx_str_t *domain,
     GENERAL_NAMES      *gns = NULL;
     GENERAL_NAME       *gn = NULL;
     ASN1_IA5STRING     *ia5 = NULL;
+    ASN1_OCTET_STRING  *oct = NULL;
+    struct in6_addr     v6;
+    int                 family;
     X509_EXTENSION     *san = NULL;
     X509_EXTENSION     *acmeid = NULL;
     ASN1_OBJECT        *obj = NULL;
@@ -977,20 +1022,54 @@ ngx_http_autocert_acme_tls_cert(EVP_PKEY *pkey, ngx_str_t *domain,
         goto failed;
     }
 
-    /* subjectAltName = DNS:<domain>, length-bounded (no NUL assumed). */
+    /* subjectAltName, length-bounded (no NUL assumed). An IP identifier gets an
+     * iPAddress SAN with the packed address (RFC 8738/8737); a name gets
+     * DNS:<domain>. The validated identity must match the ordered identifier. */
     gns = GENERAL_NAMES_new();
     gn = GENERAL_NAME_new();
-    ia5 = ASN1_IA5STRING_new();
-    if (gns == NULL || gn == NULL || ia5 == NULL) {
+    if (gns == NULL || gn == NULL) {
         goto failed;
     }
-    if (domain->len > INT_MAX
-        || ASN1_STRING_set(ia5, domain->data, (int) domain->len) != 1)
-    {
-        goto failed;
+
+    family = ngx_autocert_str_is_ip(domain, &v6);
+
+    if (family != 0) {
+        u_char    *addr;
+        size_t     addr_len;
+        in_addr_t  v4;
+
+        oct = ASN1_OCTET_STRING_new();
+        if (oct == NULL) {
+            goto failed;
+        }
+        if (family == AF_INET6) {
+            addr = v6.s6_addr;
+            addr_len = 16;
+        } else {
+            v4 = ngx_inet_addr(domain->data, domain->len);   /* network order */
+            addr = (u_char *) &v4;
+            addr_len = 4;
+        }
+        if (ASN1_OCTET_STRING_set(oct, addr, (int) addr_len) != 1) {
+            goto failed;
+        }
+        GENERAL_NAME_set0_value(gn, GEN_IPADD, oct);
+        oct = NULL;                                   /* owned by gn now */
+
+    } else {
+        ia5 = ASN1_IA5STRING_new();
+        if (ia5 == NULL) {
+            goto failed;
+        }
+        if (domain->len > INT_MAX
+            || ASN1_STRING_set(ia5, domain->data, (int) domain->len) != 1)
+        {
+            goto failed;
+        }
+        GENERAL_NAME_set0_value(gn, GEN_DNS, ia5);
+        ia5 = NULL;                                   /* owned by gn now */
     }
-    GENERAL_NAME_set0_value(gn, GEN_DNS, ia5);
-    ia5 = NULL;                                       /* owned by gn now */
+
     if (sk_GENERAL_NAME_push(gns, gn) <= 0) {
         goto failed;
     }
@@ -1050,6 +1129,7 @@ failed:
     if (san != NULL)    { X509_EXTENSION_free(san); }
     if (acmeid != NULL) { X509_EXTENSION_free(acmeid); }
     if (ia5 != NULL)    { ASN1_STRING_free(ia5); }
+    if (oct != NULL)    { ASN1_OCTET_STRING_free(oct); }
     if (gn != NULL)     { GENERAL_NAME_free(gn); }
     if (gns != NULL)    { GENERAL_NAMES_free(gns); }
     if (serial != NULL) { ASN1_INTEGER_free(serial); }
@@ -1158,11 +1238,11 @@ ngx_http_autocert_cert_not_after(const char *path, time_t *out, int *key_id,
      * reported as NGX_ABORT so the caller reissues (distinct from "no cert" so it
      * can be logged accurately). For a wildcard name the caller passes a concrete
      * probe label under the wildcard, so default X509_check_host wildcard
-     * matching answers "does this leaf cover the wildcard".
+     * matching answers "does this leaf cover the wildcard". An IP verify_name
+     * is checked against the leaf's iPAddress SAN via ngx_autocert_cert_covers.
      */
     if (verify_name != NULL && verify_name->len != 0
-        && X509_check_host(leaf, (char *) verify_name->data, verify_name->len,
-                           0, NULL) != 1)
+        && !ngx_autocert_cert_covers(leaf, verify_name))
     {
         X509_free(leaf);
         return NGX_ABORT;

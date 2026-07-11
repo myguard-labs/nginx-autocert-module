@@ -9,7 +9,7 @@
 
 **Automatic TLS certificates for NGINX — built into the server.**
 
-Features: wildcard, TLS-ALPN01 (skip port 80), dual-cert.
+Features: wildcard, IP-address certs, TLS-ALPN01 (skip port 80), dual-cert.
 
 `nginx-autocert-module` is an [ACME](https://datatracker.ietf.org/doc/html/rfc8555)
 client that lives *inside* NGINX. Add `autocert on;` to a vhost and NGINX itself
@@ -236,6 +236,7 @@ set an instance-wide default in `http{}` that each `server{}` may override.
 | `autocert_key_type <type> [type …]` | http | `p384` | Key type(s) for issued leaf certs. Accepts `p384`, `p256`, `rsa2048`, `rsa3072` (alias `rsa`), `rsa4096` — case-insensitive, with the OpenSSL/long aliases (`secp384r1`, `prime256v1`/`secp256r1`, `ecdsa-p384`/`ecdsa-p256`, `rsa-2048`, …) also accepted. List up to **one EC + one RSA** type (max 2 effective; ≥3 args or two of the same family is rejected) to issue and serve a **dual** EC+RSA pair per vhost — OpenSSL then picks the cert each client's handshake supports. The ACME account key stays ECDSA P-384 regardless. |
 | `autocert_challenge http-01\|tls-alpn-01\|dns-01` | http | `http-01` | ACME challenge type. `dns-01` is required for wildcards and requires both DNS hooks. |
 | `autocert_renew_before <time>` | http | `7d` | Renew this long before a cert's `notAfter`. Must be `> 0` and `≤ 89d` — a larger value would push the renew point before issuance and reissue every sweep (self-DoS / CA rate-limit), so it is rejected at config load. |
+| `autocert_profile <name>` | http | (none) | ACME issuance profile requested in the order (ACME Profiles draft). Let's Encrypt requires `shortlived` to issue an IP-address certificate. Omitted when unset (CA default profile). Restricted to `A-Z a-z 0-9 . _ -`. |
 | `autocert_resolver <addr> [addr…]` | http | falls back to core `resolver` | DNS resolver(s) used to reach the CA host. Same `address[:port] valid= ipv6=` syntax as core `resolver`. |
 | `autocert_resolver_timeout <time>` | http | `30s` | Timeout for that DNS resolution. |
 | `autocert_dns_hook_add <path>` | http | (none) | Absolute path to the executable that **publishes** the dns-01 TXT record. Required when challenge is `dns-01`. |
@@ -328,11 +329,58 @@ The matching remove-hook is identical with `update delete $1 IN TXT "$2"`.
 
 ---
 
+## IP-address certificates
+
+If a vhost's `server_name` is an IP-address literal (IPv4 or IPv6), autocert
+issues a certificate for that **address** rather than a hostname (RFC 8738) —
+the SAN is an `iPAddress`, not a `dNSName`. Everything else is automatic; the
+address in `server_name` *is* the identifier.
+
+```nginx
+http {
+    autocert_challenge tls-alpn-01;   # or http-01 — see below
+    autocert_profile   shortlived;    # required by Let's Encrypt for IP certs
+    autocert_renew_before 2d;         # IP certs are short-lived (~6 days)
+
+    server {
+        listen 443 ssl;
+        server_name 192.0.2.10;       # IPv4 literal
+        autocert on;
+    }
+    server {
+        listen [2001:db8::10]:443 ssl;
+        server_name 2001:db8::10;      # IPv6 literal (unbracketed)
+        autocert on;
+    }
+}
+```
+
+Constraints, all enforced at config load or issuance:
+
+- **Challenge:** `http-01` or `tls-alpn-01` only. `dns-01` is meaningless for an
+  address (no zone, no CAA) and is **rejected at config load** for an IP
+  `server_name`. This is also why an IP cannot be a wildcard.
+- **Profile:** Let's Encrypt only issues IP certs under its `shortlived`
+  profile, so set `autocert_profile shortlived;`. The profile is sent in the
+  ACME `newOrder` (ACME Profiles draft); leave it unset for CAs that don't
+  require one.
+- **Short validity:** LE IP certs live ~6 days, so set `autocert_renew_before`
+  well under that (e.g. `2d`). The default `7d` exceeds a 6-day lifetime and
+  would reissue every sweep — the renewal sweep runs at `min(12h,
+  renew_before/2)`, so a `2d` window renews with plenty of margin.
+
+On disk an IPv6 address is stored under a normalized, filesystem-safe segment
+(`2001:db8::10` → `_ip6_2001-0db8-0000-0000-0000-0000-0000-0010`); IPv4 is
+stored verbatim.
+
+---
+
 ## Store layout
 
 The store root is `autocert_store_path` (default `autocert`, resolved against the nginx
 prefix). On disk a domain maps to a segment: literal names use themselves; a
-wildcard `*.rest` is stored under `_wildcard_.rest`. Certificates are committed
+wildcard `*.rest` is stored under `_wildcard_.rest`; an IPv6 address under
+`_ip6_<normalized-hex>` (IPv4 verbatim). Certificates are committed
 atomically via `renameat2` on Linux ≥ 3.15; on a filesystem lacking
 `RENAME_EXCHANGE` / `RENAME_NOREPLACE` the commit is deferred (the existing cert is
 kept and renewal retries) rather than risking a mismatched pair, so a half-written

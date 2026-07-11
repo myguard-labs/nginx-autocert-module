@@ -58,6 +58,10 @@ struct ngx_autocert_order_s {
     ngx_str_t                        store_path;     /* cert store dir (M6b) */
     ngx_uint_t                       store;          /* ngx_http_autocert_store_e */
 
+    /* ACME Profiles: CA issuance profile emitted in newOrder ("shortlived" for
+     * LE IP certs). "" = omit the field. */
+    ngx_str_t                        profile;
+
     /* M10c challenge selection: NGX_AUTOCERT_CHALLENGE_* (0 = http-01 default).
      * tls-alpn-01 publishes a challenge cert into alpn_zone instead of a token
      * into challenge_zone. */

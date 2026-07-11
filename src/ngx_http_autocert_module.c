@@ -199,6 +199,13 @@ static ngx_command_t  ngx_http_autocert_commands[] = {
       0,
       NULL },
 
+    { ngx_string("autocert_profile"),
+      NGX_HTTP_MAIN_CONF|NGX_CONF_TAKE1,
+      ngx_conf_set_str_slot,
+      NGX_HTTP_MAIN_CONF_OFFSET,
+      offsetof(ngx_http_autocert_main_conf_t, profile),
+      NULL },
+
     /* M4b: outbound ACME client transport knobs (http{}-global). */
 
     { ngx_string("autocert_resolver"),
@@ -457,6 +464,32 @@ ngx_http_autocert_init_main_conf(ngx_conf_t *cf, void *conf)
         ngx_log_error(NGX_LOG_EMERG, cf->log, 0,
                       "autocert_renew_before must be > 0 and <= 89d");
         return NGX_CONF_ERROR;
+    }
+
+    /*
+     * autocert_profile is emitted verbatim into the newOrder JSON, so restrict
+     * it to the safe token charset [A-Za-z0-9._-] at config load. This both
+     * guarantees no JSON-injection into the order payload and matches the shape
+     * of CA-defined profile names (e.g. Let's Encrypt "shortlived", "classic").
+     * "" (unset) is fine: the field is then omitted entirely.
+     */
+    if (amcf->profile.len) {
+        ngx_uint_t  i;
+        u_char      ch;
+
+        for (i = 0; i < amcf->profile.len; i++) {
+            ch = amcf->profile.data[i];
+            if (!((ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z')
+                  || (ch >= '0' && ch <= '9')
+                  || ch == '.' || ch == '_' || ch == '-'))
+            {
+                ngx_log_error(NGX_LOG_EMERG, cf->log, 0,
+                              "autocert_profile \"%V\" contains an invalid "
+                              "character (allowed: A-Z a-z 0-9 . _ -)",
+                              &amcf->profile);
+                return NGX_CONF_ERROR;
+            }
+        }
     }
 
     if (amcf->key_types == NGX_CONF_UNSET_PTR) {
@@ -1270,6 +1303,20 @@ ngx_http_autocert_postconfig(ngx_conf_t *cf)
                 {
                     continue;
                 }
+            }
+
+            /* IP-address identifier (LE IP certs, RFC 8738). Only HTTP-01 and
+             * TLS-ALPN-01 can validate an IP — DNS-01 is meaningless for an
+             * address (no name to place a TXT record under, no CAA), and the CA
+             * rejects it. Fail the config explicitly rather than order an
+             * identifier the CA will refuse. */
+            if (ngx_autocert_str_is_ip(&name, NULL) != 0
+                && amcf->challenge == NGX_HTTP_AUTOCERT_CHALLENGE_DNS_01)
+            {
+                ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                    "autocert cannot issue a certificate for IP address "
+                    "\"%V\" over dns-01 (use http-01 or tls-alpn-01)", &name);
+                return NGX_ERROR;
             }
 
             /* D5: a concrete subdomain covered by one of this vhost's

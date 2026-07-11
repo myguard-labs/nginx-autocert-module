@@ -19,6 +19,12 @@
 #include <ngx_core.h>
 #include <ngx_http.h>
 
+/* http-free identifier + store-segment helpers (ngx_autocert_str_is_ip,
+ * ngx_autocert_cert_covers, ngx_autocert_fs_segment) and their constants.
+ * Split out so the crypto/cert-expiry unit builds can reach them without
+ * pulling <ngx_http.h>. */
+#include "ngx_autocert_ident.h"
+
 
 typedef enum {
     NGX_HTTP_AUTOCERT_KEY_P256 = 0,
@@ -124,6 +130,11 @@ typedef struct {
     ngx_str_t    path;              /* cert store directory */
     ngx_uint_t   challenge;         /* ngx_http_autocert_challenge_e */
 
+    /* ACME Profiles (draft-aaron-acme-profiles): the CA-defined issuance
+     * profile requested in newOrder. Let's Encrypt requires the "shortlived"
+     * profile for IP-address certs. "" = omit the field (CA default profile). */
+    ngx_str_t    profile;
+
     /* M4b outbound-client knobs, read by the helper process. */
     ngx_resolver_t  *resolver;      /* built at config time, NULL if unset */
     time_t       resolver_timeout;  /* seconds */
@@ -169,50 +180,6 @@ typedef struct {
 
 /* The HTTP module instance, referenced by the accessor for its ctx_index. */
 extern ngx_module_t  ngx_http_autocert_module;
-
-
-/*
- * D4 wildcard (#16): map an issuable name to its on-disk store segment. A
- * wildcard name "*.example.com" is not a legal path segment (the leading "*"),
- * so it is stored under "_wildcard_.example.com"; every other name maps to
- * itself. Writes into buf (cap bytes incl. no NUL) and returns the written
- * length, or 0 if it would not fit. Shared by the driver freshness check, the
- * order store writer, and the serve cache key so all three agree on the dir.
- *
- * static ngx_inline in the shared header: each TU that uses it gets its own
- * copy, and TUs that include the header without using it don't warn under
- * -Werror (inline suppresses the unused-function diagnostic).
- */
-#define NGX_AUTOCERT_WILDCARD_SEG  "_wildcard_."
-
-/* Upper bound for a mapped store segment: a 253-char name minus "*." plus the
- * "_wildcard_." prefix, rounded up. Sizes the stack buffers callers pass in. */
-#define NGX_AUTOCERT_DOMAIN_SEG_MAX  288
-
-static ngx_inline size_t
-ngx_autocert_fs_segment(u_char *buf, size_t cap, ngx_str_t *name)
-{
-    u_char  *p;
-    size_t   rest, need;
-
-    if (name->len >= 2 && name->data[0] == '*' && name->data[1] == '.') {
-        rest = name->len - 2;                         /* after the "*." */
-        need = sizeof(NGX_AUTOCERT_WILDCARD_SEG) - 1 + rest;
-        if (need > cap) {
-            return 0;
-        }
-        p = ngx_cpymem(buf, NGX_AUTOCERT_WILDCARD_SEG,
-                       sizeof(NGX_AUTOCERT_WILDCARD_SEG) - 1);
-        ngx_memcpy(p, name->data + 2, rest);
-        return need;
-    }
-
-    if (name->len > cap) {
-        return 0;
-    }
-    ngx_memcpy(buf, name->data, name->len);
-    return name->len;
-}
 
 
 #endif /* _NGX_HTTP_AUTOCERT_CONF_H_INCLUDED_ */
