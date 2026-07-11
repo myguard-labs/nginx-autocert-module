@@ -31,7 +31,7 @@ FLAVOR="${FLAVOR:-$(basename "$SERVER_BIN")}"
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-if [ -z "${AC_PORT_OFFSET+x}" ]; then
+if [ -z "${AC_PORT_OFFSET:-}" ]; then
     case "$FLAVOR" in
         angie) AC_PORT_OFFSET=1000 ;;
         *)     AC_PORT_OFFSET=0 ;;
@@ -56,6 +56,8 @@ do
     set_port "$base"
 done
 export AC_PORT_OFFSET
+
+echo "e2e ${FLAVOR}: AC_PORT_OFFSET=${AC_PORT_OFFSET} AC_PORT_14000=${AC_PORT_14000} AC_PORT_15000=${AC_PORT_15000}"
 
 # The Pebble e2e suite, in a sensible order (cheap config/lint first, heavy
 # issuance later). Keep in sync with build-test.yml's e2e set: a script here but
