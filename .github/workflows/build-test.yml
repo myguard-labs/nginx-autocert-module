@@ -573,12 +573,20 @@ jobs:
   # Batched Pebble e2e: the whole tests/e2e suite for one flavor runs in a
   # SINGLE job via tests/e2e/run-all.sh, so the build artifact is downloaded
   # once and every script runs sequentially against it. Two jobs (nginx +
-  # angie) then run in parallel on the two self-hosted lanes. This replaced ~33
+  # angie) then run SEQUENTIALLY (max-parallel: 1). This replaced ~33
   # per-script × 2-flavor matrix jobs (66 total), each of which had re-paid the
   # checkout + download-artifact + apt boilerplate before a single ~90s test —
   # with only ~2 runner lanes that serialized into a very long queue. run-all.sh
   # carries the per-script sudo policy + the cert-validate-reject case fan-out
   # and fails the job if ANY script fails (fail-fast off, summary at the end).
+  #
+  # max-parallel: 1 is REQUIRED, not an optimization: the per-flavor jobs land on
+  # the same self-hosted host (builder02) and every Pebble e2e script publishes
+  # the CA on host port 14000 (and challtestsrv on 15000/8055). Running both
+  # flavors concurrently races for those host ports — the second job's Pebble
+  # container fails with "Bind for 0.0.0.0:14000 failed: port is already
+  # allocated" and every network-CA test in it dies (exit 125). Serializing the
+  # flavors removes the race without giving each of 13 scripts a per-flavor port.
   e2e:
     name: e2e suite (Pebble) [${{ matrix.flavor }}]
     needs: [resolve, build-nginx, build-angie]
@@ -586,6 +594,7 @@ jobs:
     timeout-minutes: 60
     strategy:
       fail-fast: false
+      max-parallel: 1
       matrix:
         include:
           - flavor: nginx
