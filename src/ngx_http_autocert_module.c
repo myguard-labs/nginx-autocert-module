@@ -23,6 +23,7 @@
 #include "ngx_http_autocert_conf.h"
 #include "ngx_autocert_challenge.h"
 #include "ngx_autocert_alpn.h"
+#include "ngx_autocert_requests.h"
 #include "ngx_autocert_serve.h"
 #include "ngx_autocert_driver.h"
 
@@ -44,6 +45,10 @@
 
 /* Default zone size: enough for a few thousand names; admin-tunable later. */
 #define NGX_HTTP_AUTOCERT_ZONE_SIZE  (256 * 1024)
+
+/* autolabel A1 runtime-request registry: capped at NGX_AUTOCERT_REQUESTS_MAX (64)
+ * short host strings + rbtree nodes; a small zone with slab headroom is plenty. */
+#define NGX_HTTP_AUTOCERT_REQUESTS_ZONE_SIZE  NGX_AUTOCERT_REQUESTS_ZONE_SIZE
 
 
 /* Config struct + enum defs are shared via ngx_http_autocert_conf.h so the
@@ -1354,6 +1359,34 @@ ngx_http_autocert_postconfig(ngx_conf_t *cf)
     ngx_log_error(NGX_LOG_NOTICE, cf->log, 0,
                   "autocert: %ui name(s) enabled for issuance across %ui CA(s)",
                   amcf->names->nelts, amcf->ca_list->nelts);
+
+    /*
+     * autolabel A1: the runtime cert-request registry, shared BY NAME with a
+     * consumer module. Added whenever autocert has issuable names (i.e. is
+     * enabled) so a consumer can attach it and read the stamped api_version.
+     * autocert is the owner => init stamps NGX_AUTOCERT_API_VERSION (data
+     * non-NULL). Reuses its tree across reload (noreuse off) so pending runtime
+     * requests survive a reconfigure. A3 (driver pump) consumes REQUESTED nodes.
+     */
+    if (amcf->names->nelts != 0) {
+        ngx_str_set(&name, NGX_AUTOCERT_REQUESTS_ZONE);
+
+        /* Tag = NULL, NOT a per-module address: this zone is shared by NAME
+         * across two separately-dlopen()ed .so files, and each .so has its own
+         * &ngx_autocert_requests_zone_tag address, so a non-NULL tag would make
+         * ngx_shared_memory_add() reject the second module's attach as a
+         * different use of the same name. Both sides pass NULL; the on-shm
+         * api_version stamp (checked in every helper) is the real compat gate. */
+        amcf->requests_zone = ngx_shared_memory_add(cf, &name,
+                                  NGX_HTTP_AUTOCERT_REQUESTS_ZONE_SIZE, NULL);
+        if (amcf->requests_zone == NULL) {
+            return NGX_ERROR;
+        }
+        /* OWNER init: stamps NGX_AUTOCERT_API_VERSION (consumer registers the
+         * _consumer variant which stamps 0). Owner/consumer is decided by WHICH
+         * init callback runs, never by the callback's `data` arg (unreliable). */
+        amcf->requests_zone->init = ngx_autocert_requests_init_zone;
+    }
 
     /*
      * M10b: when tls-alpn-01 is the configured challenge (or a test seed is
