@@ -169,6 +169,12 @@ typedef struct {
      * by the helper, read by the worker handshake (cert_cb). */
     ngx_shm_zone_t  *alpn_zone;
 
+    /* autolabel A1: runtime cert-request registry shared with a consumer module
+     * (nginx-label-autoconf) by NAME. autocert owns it (stamps api_version); the
+     * consumer attaches the same-named zone and walks it. NULL until postconfig
+     * adds it (only when autocert is enabled). Layout: ngx_autocert_requests.h. */
+    ngx_shm_zone_t  *requests_zone;
+
     /* M10b test-only seed: autocert_test_alpn <domain> <keyauth>; the helper
      * builds the challenge cert at startup and inserts it into alpn_zone so the
      * ALPN serve path can be exercised without a full order flow. domain.len ==
