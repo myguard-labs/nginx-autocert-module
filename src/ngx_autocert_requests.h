@@ -12,15 +12,28 @@
  * versioned on-shm layout that both sides agree on — exactly this header.
  *
  * Contract:
- *   - Zone name = NGX_AUTOCERT_REQUESTS_ZONE, tag = &ngx_autocert_requests_zone_tag.
+ *   - Zone name = NGX_AUTOCERT_REQUESTS_ZONE, size = NGX_AUTOCERT_REQUESTS_ZONE_SIZE,
+ *     tag = NULL. The tag MUST be NULL on both sides: each .so has its own address
+ *     for any global, so a per-module tag pointer would make ngx_shared_memory_add()
+ *     reject the second module's attach as a different use of the same name. Both
+ *     modules must also pass the SAME size (this macro) or nginx errors on mismatch.
  *   - Whichever module's postconfig runs first ngx_shared_memory_add()s it; the
- *     other attaches the same name (nginx dedups). autocert's init stamps
- *     `api_version` in the zone header; a consumer reads it (0/absent => autocert
- *     is not managing this zone => feature off, graceful degrade).
+ *     other attaches the same name (nginx dedups on name+tag). autocert registers
+ *     ngx_autocert_requests_init_zone (stamps `api_version`); a consumer that may
+ *     create the zone first registers ngx_autocert_requests_init_zone_consumer
+ *     (stamps 0). Owner/consumer is decided by WHICH init callback runs, never by
+ *     the callback's `data` arg (nginx passes the old cycle's data there, NULL on a
+ *     fresh start, so it cannot identify the owner). A consumer reads the stamped
+ *     `api_version` (0/absent => autocert not managing this zone => feature off).
  *   - The consumer inserts REQUESTED nodes itself via ngx_autocert_requests_ensure()
  *     (a shared helper compiled into both modules, operating on the same slab under
  *     the slab mutex). autocert's worker-0 driver polls REQUESTED nodes, orders,
  *     and flips state to PENDING/ISSUED/FAILED.
+ *   - LOCKING: every access to the rbtree — including a consumer walking it
+ *     directly — MUST hold ((ngx_slab_pool_t *) zone->shm.addr)->mutex for the
+ *     whole traversal. Nodes are inserted/rotated under that mutex, so an unlocked
+ *     walk can observe a relinked tree. The ensure/state/set_state helpers below
+ *     take the mutex themselves; a consumer doing its own walk must lock too.
  *
  * All state values are ABI: the consumer compiles against these enum ints, so a
  * layout/enum change MUST bump NGX_AUTOCERT_API_VERSION.
@@ -41,6 +54,11 @@
 
 /* The shared zone's name. Both modules add/attach by this exact string. */
 #define NGX_AUTOCERT_REQUESTS_ZONE  "autocert_requests"
+
+/* The shared zone's size — part of the ABI: both modules MUST pass this to
+ * ngx_shared_memory_add() or nginx rejects the mismatch. Holds the header plus up
+ * to NGX_AUTOCERT_REQUESTS_MAX inline-host nodes with slab overhead. */
+#define NGX_AUTOCERT_REQUESTS_ZONE_SIZE  (128 * 1024)
 
 /* Defensive caps. A DNS name is <= 253 chars (RFC 1035); the label producer is
  * hostile input, so bound everything. host_len is stored u_short, guarded below. */
@@ -87,24 +105,26 @@ typedef struct {
 } ngx_autocert_requests_sh_t;
 
 
-/* Zone tag: a stable address both modules reference so ngx_shared_memory_add
- * matches the same zone. Defined once (ngx_autocert_requests.c), extern here. */
-extern ngx_uint_t  ngx_autocert_requests_zone_tag;
+/*
+ * OWNER zone init callback (autocert side). Sets up the rbtree and stamps
+ * `api_version = NGX_AUTOCERT_API_VERSION`. autocert registers this as
+ * shm_zone->init. On reload the old cycle's tree (and its stamp) is inherited.
+ * The `data` argument is IGNORED — nginx passes the old cycle's zone data there
+ * (NULL on a fresh start), so it cannot indicate owner vs consumer; that is why
+ * there are two distinct init callbacks rather than one branching on `data`.
+ */
+ngx_int_t ngx_autocert_requests_init_zone(ngx_shm_zone_t *shm_zone, void *data);
 
 
 /*
- * Zone init callback for ngx_shared_memory_add(). Sets up the rbtree and stamps
- * `api_version = NGX_AUTOCERT_API_VERSION`. Pass as shm_zone->init on the
- * autocert side ONLY (the owner stamps the version); a consumer that attaches
- * an already-created zone inherits it. If the CONSUMER creates the zone first
- * (autocert absent or later in load order), it must pass this same init so the
- * layout exists — but api_version is stamped to 0 there (see the .c) so the
- * consumer can still tell "autocert never populated this" apart from "present".
- *
- * `data` selects the stamp: non-NULL => owner (stamp version), NULL => attach-only
- * (stamp 0). autocert passes &ngx_autocert_requests_zone_tag; consumer passes NULL.
+ * CONSUMER zone init callback. A consumer that may create the zone BEFORE autocert
+ * attaches (autocert absent or later in load order) registers this instead; it
+ * builds the same layout but stamps `api_version = 0`, so the version check reports
+ * "not managed" and the consumer degrades gracefully. If autocert is present it
+ * creates the zone first and this is never invoked. `data` ignored (see above).
  */
-ngx_int_t ngx_autocert_requests_init_zone(ngx_shm_zone_t *shm_zone, void *data);
+ngx_int_t ngx_autocert_requests_init_zone_consumer(ngx_shm_zone_t *shm_zone,
+    void *data);
 
 
 /*

@@ -369,9 +369,9 @@ jobs:
           gcc -o test_challenge test_challenge_tu.o challenge.o $STORE_OBJS
           ./test_challenge
 
-          # autolabel A1: runtime cert-request registry. The requests TU's
-          # init-zone `data` param IS used (owner/attach select), so it builds
-          # clean under -Wextra -Werror; keep it on the TU too.
+          # autolabel A1: runtime cert-request registry. Owner/consumer is
+          # selected by which init callback runs (not the `data` param, which is
+          # (void)-cast), so the TU builds clean under -Wextra -Werror.
           # shellcheck disable=SC2086
           gcc -Wall -Wextra -Werror $CORE_INC -c \
             "$GITHUB_WORKSPACE/src/ngx_autocert_requests.c" -o requests.o

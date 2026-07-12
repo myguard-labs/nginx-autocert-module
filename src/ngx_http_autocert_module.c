@@ -48,7 +48,7 @@
 
 /* autolabel A1 runtime-request registry: capped at NGX_AUTOCERT_REQUESTS_MAX (64)
  * short host strings + rbtree nodes; a small zone with slab headroom is plenty. */
-#define NGX_HTTP_AUTOCERT_REQUESTS_ZONE_SIZE  (128 * 1024)
+#define NGX_HTTP_AUTOCERT_REQUESTS_ZONE_SIZE  NGX_AUTOCERT_REQUESTS_ZONE_SIZE
 
 
 /* Config struct + enum defs are shared via ngx_http_autocert_conf.h so the
@@ -1371,15 +1371,21 @@ ngx_http_autocert_postconfig(ngx_conf_t *cf)
     if (amcf->names->nelts != 0) {
         ngx_str_set(&name, NGX_AUTOCERT_REQUESTS_ZONE);
 
+        /* Tag = NULL, NOT a per-module address: this zone is shared by NAME
+         * across two separately-dlopen()ed .so files, and each .so has its own
+         * &ngx_autocert_requests_zone_tag address, so a non-NULL tag would make
+         * ngx_shared_memory_add() reject the second module's attach as a
+         * different use of the same name. Both sides pass NULL; the on-shm
+         * api_version stamp (checked in every helper) is the real compat gate. */
         amcf->requests_zone = ngx_shared_memory_add(cf, &name,
-                                  NGX_HTTP_AUTOCERT_REQUESTS_ZONE_SIZE,
-                                  &ngx_autocert_requests_zone_tag);
+                                  NGX_HTTP_AUTOCERT_REQUESTS_ZONE_SIZE, NULL);
         if (amcf->requests_zone == NULL) {
             return NGX_ERROR;
         }
+        /* OWNER init: stamps NGX_AUTOCERT_API_VERSION (consumer registers the
+         * _consumer variant which stamps 0). Owner/consumer is decided by WHICH
+         * init callback runs, never by the callback's `data` arg (unreliable). */
         amcf->requests_zone->init = ngx_autocert_requests_init_zone;
-        /* data non-NULL marks us the OWNER: init stamps the real api_version. */
-        amcf->requests_zone->data = &ngx_autocert_requests_zone_tag;
     }
 
     /*

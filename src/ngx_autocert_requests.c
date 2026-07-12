@@ -9,10 +9,6 @@
 #include "ngx_autocert_requests.h"
 
 
-/* Its own address is the zone tag; the value is never read. */
-ngx_uint_t  ngx_autocert_requests_zone_tag;
-
-
 /* Retry backoff: base doubled per failure, clamped. Used by set_state(FAILED)
  * only when the caller passes next_eligible == 0 (0 => "compute it for me"). */
 #define NGX_AUTOCERT_REQ_BACKOFF_BASE   300      /* 5 min */
@@ -86,6 +82,12 @@ ngx_autocert_requests_normalize(ngx_str_t *host, u_char *buf)
         return 0;
     }
 
+    /* the final label cannot end in a hyphen either (the in-loop check only
+     * fires at a dot boundary, so a trailing "-" reaches here unvalidated) */
+    if (buf[host->len - 1] == '-') {
+        return 0;
+    }
+
     return host->len;
 }
 
@@ -127,8 +129,20 @@ ngx_autocert_requests_insert_value(ngx_rbtree_node_t *temp,
 }
 
 
-ngx_int_t
-ngx_autocert_requests_init_zone(ngx_shm_zone_t *shm_zone, void *data)
+/*
+ * Shared init body. `api_version` selects the stamp: the OWNER (autocert) passes
+ * NGX_AUTOCERT_API_VERSION, a CONSUMER-first creation passes 0 ("layout exists but
+ * autocert is not managing it"). We do NOT derive owner/consumer from the callback
+ * `data` argument: nginx passes the OLD cycle's zone data there (NULL on a fresh
+ * start), so `data` never reliably identifies the owner. The two sides therefore
+ * register two distinct init callbacks (owner_init / consumer_init) instead.
+ *
+ * On reload (shm.exists) the old incarnation's tree — including its stamped
+ * api_version — is inherited untouched, so a consumer-first-then-autocert-attach
+ * across a reconfigure keeps whatever the first owner stamped.
+ */
+static ngx_int_t
+ngx_autocert_requests_init_body(ngx_shm_zone_t *shm_zone, ngx_uint_t api_version)
 {
     ngx_slab_pool_t             *shpool;
     ngx_autocert_requests_sh_t  *sh;
@@ -149,11 +163,7 @@ ngx_autocert_requests_init_zone(ngx_shm_zone_t *shm_zone, void *data)
 
     shpool->data = sh;
 
-    /* data != NULL => the OWNER (autocert) is initializing: stamp the real
-     * version. data == NULL => a consumer created the zone before autocert
-     * attached (autocert absent or later in load order): stamp 0 so the version
-     * check reports "not managed" and the feature stays off. */
-    sh->api_version = (data != NULL) ? NGX_AUTOCERT_API_VERSION : 0;
+    sh->api_version = api_version;
     sh->count = 0;
 
     ngx_rbtree_init(&sh->rbtree, &sh->sentinel,
@@ -164,6 +174,22 @@ ngx_autocert_requests_init_zone(ngx_shm_zone_t *shm_zone, void *data)
                    sh->api_version);
 
     return NGX_OK;
+}
+
+
+ngx_int_t
+ngx_autocert_requests_init_zone(ngx_shm_zone_t *shm_zone, void *data)
+{
+    (void) data;   /* see ngx_autocert_requests_init_body — `data` is unreliable */
+    return ngx_autocert_requests_init_body(shm_zone, NGX_AUTOCERT_API_VERSION);
+}
+
+
+ngx_int_t
+ngx_autocert_requests_init_zone_consumer(ngx_shm_zone_t *shm_zone, void *data)
+{
+    (void) data;
+    return ngx_autocert_requests_init_body(shm_zone, 0);
 }
 
 
@@ -229,6 +255,14 @@ ngx_autocert_requests_ensure(ngx_shm_zone_t *shm_zone, ngx_str_t *host)
 
     shpool = (ngx_slab_pool_t *) shm_zone->shm.addr;
     sh = shpool->data;
+
+    /* Fail safe: never mutate a zone whose header is absent (init not yet run)
+     * or a foreign/older layout. A mismatched api_version means the on-shm
+     * struct is not the one we compile against, so we must not parse it. */
+    if (sh == NULL || sh->api_version != NGX_AUTOCERT_API_VERSION) {
+        return NGX_AUTOCERT_REQ_UNKNOWN;
+    }
+
     hash = ngx_crc32_long(norm.data, norm.len);
 
     ngx_shmtx_lock(&shpool->mutex);
@@ -301,6 +335,11 @@ ngx_autocert_requests_state(ngx_shm_zone_t *shm_zone, ngx_str_t *host)
 
     shpool = (ngx_slab_pool_t *) shm_zone->shm.addr;
     sh = shpool->data;
+
+    if (sh == NULL || sh->api_version != NGX_AUTOCERT_API_VERSION) {
+        return NGX_AUTOCERT_REQ_UNKNOWN;
+    }
+
     hash = ngx_crc32_long(norm.data, norm.len);
 
     ngx_shmtx_lock(&shpool->mutex);
@@ -324,7 +363,11 @@ ngx_autocert_requests_set_state(ngx_shm_zone_t *shm_zone, ngx_str_t *host,
     uint32_t                     hash;
     time_t                       backoff;
 
+    /* UNKNOWN (0) is the "no node" sentinel and is never stored; storing it
+     * would leave a live node that reads as absent yet still consumes the cap.
+     * Reject it along with out-of-range states. */
     if (shm_zone == NULL || shm_zone->shm.addr == NULL
+        || state <= NGX_AUTOCERT_REQ_UNKNOWN
         || state > NGX_AUTOCERT_REQ_DENIED)
     {
         return NGX_ERROR;
@@ -338,6 +381,11 @@ ngx_autocert_requests_set_state(ngx_shm_zone_t *shm_zone, ngx_str_t *host,
 
     shpool = (ngx_slab_pool_t *) shm_zone->shm.addr;
     sh = shpool->data;
+
+    if (sh == NULL || sh->api_version != NGX_AUTOCERT_API_VERSION) {
+        return NGX_ERROR;
+    }
+
     hash = ngx_crc32_long(norm.data, norm.len);
 
     ngx_shmtx_lock(&shpool->mutex);

@@ -66,11 +66,10 @@ test_version_stamp(void)
     ngx_slab_pool_t             *shpool;
     ngx_autocert_requests_sh_t  *sh;
 
-    /* owner init (data != NULL) stamps the real version */
+    /* owner init callback stamps the real version (data arg ignored) */
     owner = ngx_autocert_test_zone_create();
     CHECK(owner != NULL, "owner zone create");
-    CHECK(ngx_autocert_requests_init_zone(owner,
-              &ngx_autocert_requests_zone_tag) == NGX_OK,
+    CHECK(ngx_autocert_requests_init_zone(owner, NULL) == NGX_OK,
           "owner init zone");
     shpool = (ngx_slab_pool_t *) owner->shm.addr;
     sh = shpool->data;
@@ -79,11 +78,11 @@ test_version_stamp(void)
     CHECK(sh->count == 0, "owner init count 0");
     ngx_autocert_test_zone_destroy();
 
-    /* attach init (data == NULL) stamps 0 — consumer-created, autocert absent */
+    /* consumer init callback stamps 0 — consumer-created, autocert absent */
     attach = ngx_autocert_test_zone_create();
     CHECK(attach != NULL, "attach zone create");
-    CHECK(ngx_autocert_requests_init_zone(attach, NULL) == NGX_OK,
-          "attach init zone");
+    CHECK(ngx_autocert_requests_init_zone_consumer(attach, NULL) == NGX_OK,
+          "consumer init zone");
     shpool = (ngx_slab_pool_t *) attach->shm.addr;
     sh = shpool->data;
     CHECK(sh->api_version == 0,
@@ -144,6 +143,8 @@ test_reject_charset(ngx_shm_zone_t *zone)
     ngx_str_t  under     = S("a_b.example.com");
     ngx_str_t  lead_hy   = S("-bad.example.com");
     ngx_str_t  trail_hy  = S("bad-.example.com");
+    ngx_str_t  final_hy  = S("example.com-");   /* trailing hyphen, final label */
+    ngx_str_t  bare_hy   = S("foo-");           /* single label ending in hyphen */
     ngx_str_t  space     = S("a b.example.com");
     u_char     big[NGX_AUTOCERT_REQUEST_NAME_MAX + 8];
     ngx_str_t  over;
@@ -164,6 +165,10 @@ test_reject_charset(ngx_shm_zone_t *zone)
           "reject leading hyphen in label");
     CHECK(ngx_autocert_requests_ensure(zone, &trail_hy) == NGX_AUTOCERT_REQ_DENIED,
           "reject trailing hyphen in label");
+    CHECK(ngx_autocert_requests_ensure(zone, &final_hy) == NGX_AUTOCERT_REQ_DENIED,
+          "reject trailing hyphen in final label");
+    CHECK(ngx_autocert_requests_ensure(zone, &bare_hy) == NGX_AUTOCERT_REQ_DENIED,
+          "reject single label ending in hyphen");
     CHECK(ngx_autocert_requests_ensure(zone, &space) == NGX_AUTOCERT_REQ_DENIED,
           "reject space");
 
@@ -194,7 +199,7 @@ test_cap(void)
     /* fresh zone so the cap count starts at 0 */
     zone = ngx_autocert_test_zone_create();
     if (zone == NULL || ngx_autocert_requests_init_zone(zone,
-            &ngx_autocert_requests_zone_tag) != NGX_OK) {
+            NULL) != NGX_OK) {
         CHECK(0, "cap: fresh zone");
         return;
     }
@@ -269,6 +274,14 @@ test_set_state(ngx_shm_zone_t *zone)
     CHECK(ngx_autocert_requests_set_state(zone, &h,
               NGX_AUTOCERT_REQ_DENIED + 1, 0) == NGX_ERROR,
           "set_state rejects out-of-range state");
+
+    /* UNKNOWN (0) is the "no node" sentinel and must be rejected — storing it
+     * would leave a live node that reads as absent yet consumes the cap */
+    CHECK(ngx_autocert_requests_set_state(zone, &h,
+              NGX_AUTOCERT_REQ_UNKNOWN, 0) == NGX_ERROR,
+          "set_state rejects UNKNOWN (0)");
+    CHECK(ngx_autocert_requests_state(zone, &h) != NGX_AUTOCERT_REQ_UNKNOWN,
+          "set_state(UNKNOWN) did not clobber the existing node to sentinel");
 }
 
 
@@ -299,7 +312,7 @@ test_collision(void)
      * crc32, both retrievable — the rbtree keys on crc32 then full host cmp. */
     zone = ngx_autocert_test_zone_create();
     if (zone == NULL || ngx_autocert_requests_init_zone(zone,
-            &ngx_autocert_requests_zone_tag) != NGX_OK) {
+            NULL) != NGX_OK) {
         CHECK(0, "collision: fresh zone");
         return;
     }
@@ -315,6 +328,44 @@ test_collision(void)
     CHECK(b_ok, "distinct hosts: B state independent");
 
     (void) i;
+    ngx_autocert_test_zone_destroy();
+}
+
+
+/*
+ * Fail-safe: a zone whose header stamps a foreign api_version (e.g. a consumer
+ * created it first, or a layout upgrade) must NOT be mutated/parsed. ensure/state
+ * return UNKNOWN, set_state returns ERROR — never touch the tree.
+ */
+static void
+test_version_mismatch_failsafe(void)
+{
+    ngx_shm_zone_t              *zone;
+    ngx_slab_pool_t             *shpool;
+    ngx_autocert_requests_sh_t  *sh;
+    ngx_str_t                    h = S("app.example.com");
+
+    zone = ngx_autocert_test_zone_create();
+    if (zone == NULL
+        || ngx_autocert_requests_init_zone(zone, NULL) != NGX_OK)
+    {
+        CHECK(0, "version-mismatch: fresh zone");
+        return;
+    }
+
+    shpool = (ngx_slab_pool_t *) zone->shm.addr;
+    sh = shpool->data;
+    sh->api_version = NGX_AUTOCERT_API_VERSION + 1;   /* forge a foreign layout */
+
+    CHECK(ngx_autocert_requests_ensure(zone, &h) == NGX_AUTOCERT_REQ_UNKNOWN,
+          "ensure fail-safes on api_version mismatch (no insert)");
+    CHECK(sh->count == 0, "mismatch: ensure did not insert");
+    CHECK(ngx_autocert_requests_state(zone, &h) == NGX_AUTOCERT_REQ_UNKNOWN,
+          "state fail-safes on api_version mismatch");
+    CHECK(ngx_autocert_requests_set_state(zone, &h,
+              NGX_AUTOCERT_REQ_ISSUED, 0) == NGX_ERROR,
+          "set_state fail-safes on api_version mismatch");
+
     ngx_autocert_test_zone_destroy();
 }
 
@@ -338,7 +389,7 @@ main(void)
     zone = ngx_autocert_test_zone_create();
     if (zone == NULL
         || ngx_autocert_requests_init_zone(zone,
-               &ngx_autocert_requests_zone_tag) != NGX_OK)
+               NULL) != NGX_OK)
     {
         fprintf(stderr, "FAIL: requests init zone\n");
         return 2;
@@ -355,6 +406,7 @@ main(void)
     /* suites that need a fresh (empty) zone */
     test_cap();
     test_collision();
+    test_version_mismatch_failsafe();
 
     if (failures) {
         fprintf(stderr, "\n%d test(s) FAILED\n", failures);
