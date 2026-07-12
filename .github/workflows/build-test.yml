@@ -30,9 +30,9 @@ env:
 
 on:
   push:
-    branches: [master]
+    branches: [master, autolabel]
   pull_request:
-    branches: [master]
+    branches: [master, autolabel]
   workflow_dispatch: {}
 
 concurrency:
