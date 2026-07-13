@@ -82,6 +82,7 @@ SCRIPTS=(
   acme-directory.sh
   eab-account.sh
   ipv4-directory.sh
+  ipv4-issue.sh
   ipv6-directory.sh
   account-migration.sh
   dns01-order.sh
