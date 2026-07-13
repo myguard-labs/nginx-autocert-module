@@ -7,6 +7,7 @@
 #include "ngx_autocert_alpn.h"
 #include "ngx_http_autocert_crypto.h"
 #include "ngx_autocert_shared.h"
+#include "ngx_autocert_requests.h"
 
 #include <ngx_http_ssl_module.h>
 #if (NGX_HTTP_V2)
@@ -89,6 +90,7 @@ typedef struct {
     ngx_uint_t          store;       /* ngx_http_autocert_store_e */
     ngx_array_t        *names;       /* ngx_str_t: the issuable name set */
     ngx_shm_zone_t     *alpn_zone;   /* M10b tls-alpn-01 cert store; NULL=off */
+    ngx_shm_zone_t     *requests_zone; /* A4: runtime-issued names; NULL=off */
     ngx_uint_t          slot_mask;   /* bit s set => slot s (EC/RSA) is config-
                                       * enabled; only enabled slots are reloaded
                                       * + installed, so a stale opposite-keytype
@@ -223,6 +225,7 @@ ngx_http_autocert_serve_init(ngx_conf_t *cf,
     sctx->store = amcf->store;
     sctx->names = amcf->names;       /* bounds the per-worker cache */
     sctx->alpn_zone = amcf->alpn_zone;  /* M10b: NULL unless tls-alpn-01 wired */
+    sctx->requests_zone = amcf->requests_zone; /* A4: NULL unless autolabel wired */
 
     /*
      * Build the enabled-slot mask from the configured key_type list so serving
@@ -765,6 +768,20 @@ ngx_http_autocert_cert_cb(SSL *ssl_conn, void *arg)
                     }
                 }
             }
+        }
+
+        /*
+         * A4 runtime fallback: not a configured (or wildcard-configured) name,
+         * but label-autoconf may have gotten it ISSUED via the requests_zone
+         * (see ngx_autocert_requests.h). Runtime certs are stored under the
+         * concrete host (no wildcard cover — driver.c A3.5 comment), so on a
+         * hit `store`/`store_hash` stay the plain SNI (already set above).
+         */
+        if (!matched && sctx->requests_zone != NULL
+            && ngx_autocert_requests_state(sctx->requests_zone, &host)
+               == NGX_AUTOCERT_REQ_ISSUED)
+        {
+            matched = 1;
         }
 
         if (!matched) {
