@@ -23,6 +23,7 @@
 #include "ngx_http_autocert_conf.h"
 #include "ngx_autocert_challenge.h"
 #include "ngx_autocert_alpn.h"
+#include "ngx_autocert_requests.h"
 #include "ngx_autocert_serve.h"
 #include "ngx_autocert_driver.h"
 
@@ -44,6 +45,10 @@
 
 /* Default zone size: enough for a few thousand names; admin-tunable later. */
 #define NGX_HTTP_AUTOCERT_ZONE_SIZE  (256 * 1024)
+
+/* autolabel A1 runtime-request registry: capped at NGX_AUTOCERT_REQUESTS_MAX (64)
+ * short host strings + rbtree nodes; a small zone with slab headroom is plenty. */
+#define NGX_HTTP_AUTOCERT_REQUESTS_ZONE_SIZE  NGX_AUTOCERT_REQUESTS_ZONE_SIZE
 
 
 /* Config struct + enum defs are shared via ngx_http_autocert_conf.h so the
@@ -70,6 +75,8 @@ static ngx_int_t ngx_http_autocert_challenge_handler(ngx_http_request_t *r);
 static char *ngx_http_autocert_test_challenge(ngx_conf_t *cf,
     ngx_command_t *cmd, void *conf);
 static char *ngx_http_autocert_test_alpn(ngx_conf_t *cf,
+    ngx_command_t *cmd, void *conf);
+static char *ngx_http_autocert_test_runtime_request(ngx_conf_t *cf,
     ngx_command_t *cmd, void *conf);
 #endif
 
@@ -298,6 +305,18 @@ static ngx_command_t  ngx_http_autocert_commands[] = {
     { ngx_string("autocert_test_alpn"),
       NGX_HTTP_MAIN_CONF|NGX_CONF_TAKE2,
       ngx_http_autocert_test_alpn,
+      NGX_HTTP_MAIN_CONF_OFFSET,
+      0,
+      NULL },
+
+    /* TEST-ONLY (autolabel C): seed a single host into the requests_zone as
+     * REQUESTED at startup, exercising the SAME insertion path a real
+     * consumer module (label-autoconf) would use, so the Pebble e2e can drive
+     * the full runtime-issuance lifecycle (A3 drain/order -> A4 serve ->
+     * A6 persist) end to end. Compiled in ONLY under -DNGX_AUTOCERT_TEST. */
+    { ngx_string("autocert_test_runtime_request"),
+      NGX_HTTP_MAIN_CONF|NGX_CONF_TAKE1,
+      ngx_http_autocert_test_runtime_request,
       NGX_HTTP_MAIN_CONF_OFFSET,
       0,
       NULL },
@@ -1356,6 +1375,34 @@ ngx_http_autocert_postconfig(ngx_conf_t *cf)
                   amcf->names->nelts, amcf->ca_list->nelts);
 
     /*
+     * autolabel A1: the runtime cert-request registry, shared BY NAME with a
+     * consumer module. Added whenever autocert has issuable names (i.e. is
+     * enabled) so a consumer can attach it and read the stamped api_version.
+     * autocert is the owner => init stamps NGX_AUTOCERT_API_VERSION (data
+     * non-NULL). Reuses its tree across reload (noreuse off) so pending runtime
+     * requests survive a reconfigure. A3 (driver pump) consumes REQUESTED nodes.
+     */
+    if (amcf->names->nelts != 0) {
+        ngx_str_set(&name, NGX_AUTOCERT_REQUESTS_ZONE);
+
+        /* Tag = NULL, NOT a per-module address: this zone is shared by NAME
+         * across two separately-dlopen()ed .so files, and each .so has its own
+         * &ngx_autocert_requests_zone_tag address, so a non-NULL tag would make
+         * ngx_shared_memory_add() reject the second module's attach as a
+         * different use of the same name. Both sides pass NULL; the on-shm
+         * api_version stamp (checked in every helper) is the real compat gate. */
+        amcf->requests_zone = ngx_shared_memory_add(cf, &name,
+                                  NGX_HTTP_AUTOCERT_REQUESTS_ZONE_SIZE, NULL);
+        if (amcf->requests_zone == NULL) {
+            return NGX_ERROR;
+        }
+        /* OWNER init: stamps NGX_AUTOCERT_API_VERSION (consumer registers the
+         * _consumer variant which stamps 0). Owner/consumer is decided by WHICH
+         * init callback runs, never by the callback's `data` arg (unreliable). */
+        amcf->requests_zone->init = ngx_autocert_requests_init_zone;
+    }
+
+    /*
      * M10b: when tls-alpn-01 is the configured challenge (or a test seed is
      * present), set up the challenge-cert store the helper writes and the
      * cert_cb reads. Created BEFORE serve_init so the latter sees amcf->alpn_zone
@@ -2044,6 +2091,46 @@ ngx_http_autocert_test_alpn(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
     ngx_conf_log_error(NGX_LOG_WARN, cf, 0,
                        "\"autocert_test_alpn\" is test-only and should "
                        "not be used in production configs");
+
+    return NGX_CONF_OK;
+}
+
+
+/*
+ * autocert_test_runtime_request <host>;  (TEST-ONLY)
+ *
+ * Records a single host in the main conf; the driver's kick handler inserts
+ * it into requests_zone as REQUESTED once, via ngx_autocert_requests_ensure()
+ * -- the SAME path a real consumer module (label-autoconf) would use. This
+ * host is deliberately NOT added to amcf->names, so it dedupes as genuinely
+ * runtime (not a config name) and exercises the full A3 drain/order -> A4
+ * serve -> A6 persist lifecycle end to end (autolabel C). Bounded to the same
+ * length cap the requests_zone insert enforces; the LDH/charset gate itself
+ * lives in ngx_autocert_requests_ensure() and is applied at seed time.
+ */
+static char *
+ngx_http_autocert_test_runtime_request(ngx_conf_t *cf, ngx_command_t *cmd,
+    void *conf)
+{
+    ngx_http_autocert_main_conf_t  *amcf = conf;
+    ngx_str_t                      *value = cf->args->elts;
+
+    if (amcf->test_runtime_host.len != 0) {
+        return "is duplicate";
+    }
+
+    if (value[1].len == 0 || value[1].len > NGX_AUTOCERT_REQUEST_NAME_MAX) {
+        ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                           "invalid host length in "
+                           "\"autocert_test_runtime_request\"");
+        return NGX_CONF_ERROR;
+    }
+
+    amcf->test_runtime_host = value[1];
+
+    ngx_conf_log_error(NGX_LOG_WARN, cf, 0,
+                       "\"autocert_test_runtime_request\" is test-only and "
+                       "should not be used in production configs");
 
     return NGX_CONF_OK;
 }

@@ -31,6 +31,7 @@ AUTOCERT_SRCS="$ngx_addon_dir/src/ngx_http_autocert_module.c \
                $ngx_addon_dir/src/ngx_autocert_challenge.c \
                $ngx_addon_dir/src/ngx_autocert_alpn.c \
                $ngx_addon_dir/src/ngx_autocert_serve.c \
+               $ngx_addon_dir/src/ngx_autocert_requests.c \
                $ngx_addon_dir/src/ngx_http_autocert_crypto.c \
                $ngx_addon_dir/src/ngx_autocert_conf.c"
 
@@ -42,6 +43,7 @@ AUTOCERT_DEPS="$ngx_addon_dir/src/ngx_autocert_driver.h \
                $ngx_addon_dir/src/ngx_autocert_challenge.h \
                $ngx_addon_dir/src/ngx_autocert_alpn.h \
                $ngx_addon_dir/src/ngx_autocert_serve.h \
+               $ngx_addon_dir/src/ngx_autocert_requests.h \
                $ngx_addon_dir/src/ngx_http_autocert_crypto.h \
                $ngx_addon_dir/src/ngx_autocert_shared.h \
                $ngx_addon_dir/src/ngx_http_autocert_conf.h"
