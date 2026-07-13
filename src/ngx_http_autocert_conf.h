@@ -181,6 +181,13 @@ typedef struct {
      * 0 when unset. */
     ngx_str_t        test_alpn_domain;
     ngx_str_t        test_alpn_keyauth;
+
+    /* autolabel C test-only seed: autocert_test_runtime_request <host>; the
+     * driver's kick handler inserts it into requests_zone as REQUESTED once,
+     * so the Pebble e2e can exercise the full runtime-issuance lifecycle
+     * (A3 drain/order -> A4 serve -> A6 persist) without a real consumer
+     * module. host.len == 0 when unset. */
+    ngx_str_t        test_runtime_host;
 } ngx_http_autocert_main_conf_t;
 
 
