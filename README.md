@@ -493,6 +493,69 @@ module.
 
 ---
 
+## Runtime cert API (for other modules)
+
+A separate nginx module can ask autocert to obtain and serve a certificate for a
+host it discovers at runtime (e.g. from a Docker label), without either module
+linking the other. nginx dlopens each module's `.so` without `RTLD_GLOBAL`, so
+C symbols never cross-resolve between them — the integration surface is a
+**named shared-memory zone** with a versioned on-shm layout, not an exported
+function API. The full contract (zone name/size, state enum, locking rule,
+helper signatures) is documented in
+[`src/ngx_autocert_requests.h`](src/ngx_autocert_requests.h); summary below.
+A task-oriented consumer walkthrough (attach the zone, enqueue, poll, worked
+code) lives in [`docs/API.md`](docs/API.md).
+
+**Zone**: `autocert_requests`, size `128 KiB`, tag `NULL` (both modules must add
+the zone with a NULL tag and the exact same size, or nginx rejects the mismatch
+on the side that attaches second). Whichever module's postconfig runs first
+creates it; autocert's init callback stamps a zone-header `api_version`
+(currently `1`) — a consumer checks that stamp against its compiled value and
+disables the integration on mismatch (`0`/absent = autocert isn't managing the
+zone, feature off). This never depends on nginx's `init` callback `data`
+argument, which is old-cycle-only and cannot distinguish owner from consumer.
+
+**Request lifecycle** (`ngx_autocert_request_state_e`): `REQUESTED` (consumer
+enqueued) → `PENDING` (autocert's worker-0 driver has an ACME order in flight)
+→ `ISSUED` (cert on disk, servable) or `FAILED` (retry gated by exponential
+backoff) or `DENIED` (rejected — over the 64-name cap, bad charset, wildcard;
+terminal).
+
+**Consumer-side flow**:
+1. **Enqueue** — `ngx_autocert_requests_ensure(shm_zone, &host)` inserts a
+   `REQUESTED` node (idempotent; validates + lowercases the host; returns the
+   current state; over-cap or bad input never allocates).
+2. **Poll** — `ngx_autocert_requests_state(shm_zone, &host)` reads the current
+   state without inserting. `ISSUED` means the cert is on disk *and* served:
+   autocert's cert callback falls back to this zone on any SNI that misses its
+   config-driven name index, so no separate "please serve this" step is needed.
+3. autocert's worker-0 driver owns everything past enqueue: it drains
+   `REQUESTED` nodes (deduping against config-managed names), orders under the
+   configured CA, applies the same global/per-host ACME rate caps as config
+   issuance, flips state on completion, and renews `ISSUED` runtime certs on
+   the normal `autocert_renew_before` schedule. A consumer never touches
+   certs, paths, or PEM data — those stay entirely inside autocert.
+
+**Locking**: every access to the zone's rbtree — including a consumer walking
+it directly instead of using the helpers — must hold the zone's slab-pool
+mutex (`((ngx_slab_pool_t *) zone->shm.addr)->mutex`) for the whole traversal.
+The `ensure`/`state`/`set_state`/`drain`/`list_issued` helpers take the mutex
+internally; only a raw walk needs to do this itself.
+
+**Policy**: a runtime name is issued only via HTTP-01 or TLS-ALPN-01, never
+DNS-01 — ACME domain-control validation *is* the runtime allowlist (a `CNAME`
+pointed elsewhere would let anyone request a cert for an arbitrary name under
+a config-wide `autocert_ca dns-01`, so runtime orders are hard-pinned off
+DNS-01 regardless of the configured challenge mode). Runtime cert state
+survives a hard process restart: a marker file beside each runtime cert lets
+the driver re-seed the zone from disk on `init_process`, so a crashed/restarted
+worker doesn't strand a previously-issued runtime name unserved.
+
+Consumer implementation reference:
+[`nginx-label-autoconf-module`](https://github.com/myguard-labs/nginx-label-autoconf-module).
+
+---
+
 ## Build & test
 
 OpenSSL ≥ 3.0.0 required. Build as a standard dynamic module:
