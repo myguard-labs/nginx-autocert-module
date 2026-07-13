@@ -370,6 +370,95 @@ test_version_mismatch_failsafe(void)
 }
 
 
+/*
+ * A3.3 drain-and-claim: the driver's worker-0 pump claims REQUESTED-eligible
+ * nodes, flipping each to PENDING under the shm lock. Verify:
+ *   - claims REQUESTED nodes whose next_eligible has passed, flips them PENDING
+ *   - skips PENDING/ISSUED nodes (not REQUESTED) and future-backed-off REQUESTED
+ *   - the `max` bound caps a single call; the rest stay REQUESTED
+ *   - a re-drain after a full claim sees only PENDING => returns 0 (idempotent)
+ *   - empty tree => 0
+ */
+static void
+test_drain(void)
+{
+    ngx_shm_zone_t  *zone;
+    ngx_pool_t      *pool;
+    ngx_array_t     *out;
+    ngx_str_t        req1 = S("drain-a.example.com");
+    ngx_str_t        req2 = S("drain-b.example.com");
+    ngx_str_t        req3 = S("drain-c.example.com");
+    ngx_str_t        pend = S("drain-pending.example.com");
+    ngx_str_t        held = S("drain-held.example.com");
+    ngx_int_t        n;
+
+    zone = ngx_autocert_test_zone_create();
+    if (zone == NULL
+        || ngx_autocert_requests_init_zone(zone, NULL) != NGX_OK)
+    {
+        CHECK(0, "drain: fresh zone");
+        return;
+    }
+
+    pool = ngx_create_pool(4096, ngx_cycle->log);
+    if (pool == NULL) {
+        CHECK(0, "drain: pool");
+        ngx_autocert_test_zone_destroy();
+        return;
+    }
+
+    /* empty tree => 0 claimed */
+    out = ngx_array_create(pool, 8, sizeof(ngx_str_t));
+    n = ngx_autocert_requests_drain(zone, pool, out, 0);
+    CHECK(n == 0, "drain: empty tree claims nothing");
+
+    /* seed: 3 REQUESTED-eligible, 1 PENDING (not drainable), 1 REQUESTED but
+     * held in the future (next_eligible ahead => not eligible). */
+    (void) ngx_autocert_requests_ensure(zone, &req1);
+    (void) ngx_autocert_requests_ensure(zone, &req2);
+    (void) ngx_autocert_requests_ensure(zone, &req3);
+    (void) ngx_autocert_requests_ensure(zone, &pend);
+    (void) ngx_autocert_requests_set_state(zone, &pend,
+              NGX_AUTOCERT_REQ_PENDING, 0);
+    (void) ngx_autocert_requests_ensure(zone, &held);
+    /* keep REQUESTED but push eligibility far into the future via set_state?
+     * set_state(REQUESTED, when) stamps next_eligible directly (non-FAILED path). */
+    (void) ngx_autocert_requests_set_state(zone, &held,
+              NGX_AUTOCERT_REQ_REQUESTED, ngx_time() + 3600);
+
+    /* max=2 => only 2 of the 3 eligible claimed this call. */
+    out = ngx_array_create(pool, 8, sizeof(ngx_str_t));
+    n = ngx_autocert_requests_drain(zone, pool, out, 2);
+    CHECK(n == 2, "drain: max bound caps the claim at 2");
+    CHECK((ngx_uint_t) n == out->nelts, "drain: return count == out->nelts");
+
+    /* drain the rest (max=0 unlimited): exactly 1 eligible REQUESTED left. */
+    out = ngx_array_create(pool, 8, sizeof(ngx_str_t));
+    n = ngx_autocert_requests_drain(zone, pool, out, 0);
+    CHECK(n == 1, "drain: remaining eligible REQUESTED claimed (held/pending skipped)");
+
+    /* every drained host must now read PENDING (flipped under the lock). */
+    CHECK(ngx_autocert_requests_state(zone, &req1) == NGX_AUTOCERT_REQ_PENDING
+       && ngx_autocert_requests_state(zone, &req2) == NGX_AUTOCERT_REQ_PENDING
+       && ngx_autocert_requests_state(zone, &req3) == NGX_AUTOCERT_REQ_PENDING,
+          "drain: claimed hosts are now PENDING");
+
+    /* skipped nodes untouched. */
+    CHECK(ngx_autocert_requests_state(zone, &held) == NGX_AUTOCERT_REQ_REQUESTED,
+          "drain: future-held REQUESTED not claimed");
+    CHECK(ngx_autocert_requests_state(zone, &pend) == NGX_AUTOCERT_REQ_PENDING,
+          "drain: pre-existing PENDING untouched");
+
+    /* re-drain now: nothing is REQUESTED-eligible (all PENDING or future-held). */
+    out = ngx_array_create(pool, 8, sizeof(ngx_str_t));
+    n = ngx_autocert_requests_drain(zone, pool, out, 0);
+    CHECK(n == 0, "drain: re-drain sees no REQUESTED-eligible (no double claim)");
+
+    ngx_destroy_pool(pool);
+    ngx_autocert_test_zone_destroy();
+}
+
+
 int
 main(void)
 {
@@ -407,6 +496,7 @@ main(void)
     test_cap();
     test_collision();
     test_version_mismatch_failsafe();
+    test_drain();
 
     if (failures) {
         fprintf(stderr, "\n%d test(s) FAILED\n", failures);

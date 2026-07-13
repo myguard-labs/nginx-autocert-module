@@ -54,6 +54,7 @@
 #include "ngx_autocert_alpn.h"
 #include "ngx_http_autocert_conf.h"    /* store-layout enum */
 #include "ngx_autocert_order.h"
+#include "ngx_autocert_requests.h"      /* A3.3: runtime request drain/set_state */
 #include "ngx_http_autocert_crypto.h"
 
 
@@ -711,6 +712,14 @@ static ngx_uint_t               ngx_autocert_sched_index;  /* next name in that 
 static ngx_uint_t               ngx_autocert_sched_kt;     /* next keytype for that name */
 static ngx_uint_t               ngx_autocert_sched_cur_ca; /* CA index in flight */
 static ngx_uint_t               ngx_autocert_sched_cur;    /* backoff slot in flight */
+/*
+ * A3.3: the order in flight may be for a RUNTIME host (drained from the requests
+ * shm zone) rather than a config name. Runtime outcomes are recorded on the shm
+ * node (set_state ISSUED/FAILED) — its backoff lives there — NOT in a CA's
+ * per-config-name backoff array (which has no slot for it). This flag tells
+ * order_complete which ledger to write.
+ */
+static ngx_uint_t               ngx_autocert_sched_runtime; /* in-flight order is runtime */
 
 static void ngx_autocert_sched_handler(ngx_event_t *ev);
 static void ngx_autocert_sched_pump(ngx_cycle_t *cycle);
@@ -718,7 +727,9 @@ static ngx_int_t ngx_autocert_name_due(ngx_cycle_t *cycle,
     ngx_autocert_conf_t *acf, ngx_str_t *name, ngx_uint_t key_type);
 static ngx_int_t ngx_autocert_start_order_for(ngx_cycle_t *cycle,
     ngx_autocert_conf_t *acf, ngx_autocert_ca_state_t *state, ngx_str_t *name,
-    ngx_uint_t key_type);
+    ngx_uint_t key_type, ngx_uint_t runtime);
+static void ngx_autocert_sched_pump_runtime(ngx_cycle_t *cycle,
+    ngx_autocert_conf_t *acf);
 static ngx_int_t ngx_autocert_ca_backoff_ensure(ngx_cycle_t *cycle,
     ngx_autocert_conf_t *acf, ngx_autocert_ca_state_t *state);
 static void ngx_autocert_backoff_record(ngx_autocert_ca_state_t *state,
@@ -941,7 +952,7 @@ ngx_autocert_sched_pump(ngx_cycle_t *cycle)
                 ngx_autocert_sched_cur = slot;  /* (CA, name, keytype) in flight */
 
                 if (ngx_autocert_start_order_for(cycle, &acf, state, name,
-                                                 key_type) == NGX_OK)
+                                                 key_type, 0) == NGX_OK)
                 {
                     return;             /* order_complete will pump again */
                 }
@@ -954,6 +965,19 @@ ngx_autocert_sched_pump(ngx_cycle_t *cycle)
             ngx_autocert_sched_index++;
             ngx_autocert_sched_kt = 0;
         }
+    }
+
+    /*
+     * A3.3: config names are all up to date this sweep. Now service runtime
+     * requests (label-autoconf et al.) enqueued in the requests shm zone. This
+     * runs only with no order in flight (the config loop above returns the
+     * moment it launches one), so the one-order-at-a-time invariant holds. If a
+     * runtime order launches, pump_runtime has set ngx_autocert_order and we
+     * stop here; order_complete pumps again. Otherwise fall through to rearm.
+     */
+    ngx_autocert_sched_pump_runtime(cycle, &acf);
+    if (ngx_autocert_order != NULL) {
+        return;                         /* runtime order launched; complete re-pumps */
     }
 
 rearm:
@@ -1272,7 +1296,8 @@ ngx_autocert_name_due(ngx_cycle_t *cycle, ngx_autocert_conf_t *acf,
  */
 static ngx_int_t
 ngx_autocert_start_order_for(ngx_cycle_t *cycle, ngx_autocert_conf_t *acf,
-    ngx_autocert_ca_state_t *state, ngx_str_t *name, ngx_uint_t key_type)
+    ngx_autocert_ca_state_t *state, ngx_str_t *name, ngx_uint_t key_type,
+    ngx_uint_t runtime)
 {
     ngx_pool_t            *pool;
     ngx_autocert_order_t  *order;
@@ -1292,12 +1317,21 @@ ngx_autocert_start_order_for(ngx_cycle_t *cycle, ngx_autocert_conf_t *acf,
         return NGX_ERROR;
     }
 
-    /* The domain string aliases the HTTP main-conf pool, which outlives the
-     * order; the order copies what it needs into its own pool internally. */
+    /* Copy the domain into the order pool. A config name aliases the HTTP
+     * main-conf pool (outlives the order), but a runtime host (A3.3) aliases the
+     * caller's short-lived drain pool, freed the moment pump_runtime returns —
+     * before the order completes. Duplicating here makes order->domain valid for
+     * the whole order lifetime regardless of the caller's allocation. */
     order->account = state->account;
     order->log = cycle->log;
     order->directory_url = state->entry->ca_conf.ca;
-    order->domain = *name;
+    order->domain.len = name->len;
+    order->domain.data = ngx_pnalloc(pool, name->len);
+    if (order->domain.data == NULL) {
+        ngx_destroy_pool(pool);
+        return NGX_ERROR;
+    }
+    ngx_memcpy(order->domain.data, name->data, name->len);
     order->challenge_zone = acf->challenge_zone;
     order->challenge = acf->challenge;          /* M10c/M16: http/alpn/dns */
     order->alpn_zone = acf->alpn_zone;          /* M10b store, used when alpn */
@@ -1314,9 +1348,11 @@ ngx_autocert_start_order_for(ngx_cycle_t *cycle, ngx_autocert_conf_t *acf,
 
     ngx_autocert_order = order;
     ngx_autocert_order_pool = pool;
+    ngx_autocert_sched_runtime = runtime;   /* A3.3: which ledger completion writes */
 
     ngx_log_error(NGX_LOG_NOTICE, cycle->log, 0,
-                  "autocert: starting ACME order for \"%V\"", name);
+                  "autocert: starting ACME order for \"%V\"%s", name,
+                  runtime ? " (runtime)" : "");
 
     if (ngx_autocert_order_start(order) != NGX_OK) {
         ngx_log_error(NGX_LOG_ERR, cycle->log, 0,
@@ -1328,6 +1364,163 @@ ngx_autocert_start_order_for(ngx_cycle_t *cycle, ngx_autocert_conf_t *acf,
     }
 
     return NGX_OK;
+}
+
+
+/*
+ * A3.3: is `host` already a configured autocert name (under any CA)? Runtime
+ * requests for names the operator already manages must NOT trigger a second
+ * ACME order — the config sweep covers them. Case-insensitive: config names are
+ * stored as written; drained runtime hosts are lowercased by the shm normalizer.
+ */
+static ngx_uint_t
+ngx_autocert_name_is_config(ngx_str_t *host)
+{
+    ngx_uint_t                c, i;
+    ngx_autocert_ca_state_t  *state;
+    ngx_str_t                *names;
+
+    for (c = 0; c < ngx_autocert_ca_states_n; c++) {
+        state = &ngx_autocert_ca_states[c];
+        if (state->entry->names == NULL) {
+            continue;
+        }
+        names = state->entry->names->elts;
+        for (i = 0; i < state->entry->names->nelts; i++) {
+            if (names[i].len == host->len
+                && ngx_strncasecmp(names[i].data, host->data, host->len) == 0)
+            {
+                return 1;
+            }
+        }
+    }
+    return 0;
+}
+
+
+/*
+ * A3.3: service runtime certificate requests. Drains REQUESTED nodes from the
+ * requests shm zone (each flipped to PENDING under the shm lock by the drain),
+ * then for each drained host:
+ *   - already a config name  => set_state(ISSUED): the config sweep owns it, no
+ *     runtime order (dedupe). It is "issued" from the requester's point of view.
+ *   - genuinely runtime       => launch ONE ACME order under ca_list[0]; the rest
+ *     stay PENDING and are released back to REQUESTED so a later tick retries
+ *     them (a PENDING node the caller never completes would wedge forever — the
+ *     drain contract). order_complete records ISSUED/FAILED on the shm node.
+ *
+ * Only ca_list[0] issues runtime names (no per-name CA selection at runtime).
+ * Requires that CA's account to be live; if it is not, every drained host is
+ * released so nothing is lost. At most one order launches per call (the global
+ * one-in-flight singleton); pump_runtime is re-entered from order_complete via
+ * the sched pump until the REQUESTED set drains.
+ */
+static void
+ngx_autocert_sched_pump_runtime(ngx_cycle_t *cycle, ngx_autocert_conf_t *acf)
+{
+    ngx_pool_t               *pool;
+    ngx_array_t              *hosts;
+    ngx_str_t                *h;
+    ngx_autocert_ca_state_t  *state;
+    ngx_int_t                 n;
+    ngx_uint_t                key_type;
+
+    if (acf->requests_zone == NULL || ngx_autocert_ca_states_n == 0) {
+        return;                         /* no runtime surface / no CA engines */
+    }
+
+    /* ca_list[0] is the runtime issuer. If its account is not live, leave every
+     * REQUESTED node untouched (drain not run) and try again next tick. */
+    state = &ngx_autocert_ca_states[0];
+    if (!state->account_live || state->account == NULL) {
+        return;
+    }
+
+    /* runtime cert key type: the first configured variant (dual-cert runtime
+     * issuance is a later refinement — A3 issues one key type per runtime name). */
+    key_type = (acf->cert_key_types != NULL && acf->cert_key_types->nelts > 0)
+             ? ((ngx_uint_t *) acf->cert_key_types->elts)[0]
+             : NGX_HTTP_AUTOCERT_KEY_P256;
+
+    /* Short-lived pool for the drained host copies (freed before we return). */
+    pool = ngx_create_pool(NGX_MIN_POOL_SIZE, cycle->log);
+    if (pool == NULL) {
+        return;
+    }
+
+    /*
+     * Drain ONE host at a time (max=1) and dispose of it before claiming the
+     * next. This avoids claiming the whole REQUESTED backlog and then releasing
+     * most of it back — a distinct-host flood cannot make one pump churn the
+     * full set (Codex A3.3 MAJOR). Each iteration terminally disposes the claimed
+     * PENDING node (ISSUED / held-REQUESTED / FAILED / launched-order), so a
+     * re-drain never re-sees it and the loop converges. The GLOBAL new-order rate
+     * cap is A3.4; this only bounds per-pump work.
+     */
+    for ( ;; ) {
+        if (ngx_quit || ngx_terminate || ngx_exiting) {
+            break;                      /* retiring: stop claiming new work */
+        }
+
+        hosts = ngx_array_create(pool, 1, sizeof(ngx_str_t));
+        if (hosts == NULL) {
+            break;
+        }
+
+        n = ngx_autocert_requests_drain(acf->requests_zone, pool, hosts, 1);
+        if (n <= 0) {
+            break;                      /* 0: nothing eligible. <0: bad zone. */
+        }
+
+        h = hosts->elts;                /* exactly one host (max=1) */
+
+        if (ngx_autocert_name_is_config(h)) {
+            /*
+             * Operator already manages this name; the config sweep owns its
+             * issuance+renewal. Only report ISSUED if a valid cert is actually on
+             * disk — the config sweep may not have issued it yet (CA account not
+             * live, backoff, or a prior failure), so an unconditional ISSUED
+             * would lie to the requester (Codex A3.3 MAJOR). If no cert yet,
+             * release to REQUESTED with a short hold so we re-check after the
+             * config sweep has had a chance to run, without spinning.
+             */
+            if (!ngx_autocert_name_due(cycle, acf, h, key_type)) {
+                (void) ngx_autocert_requests_set_state(acf->requests_zone, h,
+                                                   NGX_AUTOCERT_REQ_ISSUED, 0);
+                ngx_log_debug1(NGX_LOG_DEBUG_CORE, cycle->log, 0,
+                               "autocert: runtime host \"%V\" covered by a "
+                               "config cert already on disk", h);
+            } else {
+                (void) ngx_autocert_requests_set_state(acf->requests_zone, h,
+                           NGX_AUTOCERT_REQ_REQUESTED,
+                           ngx_time() + 300 /* s: re-check after config sweep */);
+                ngx_log_debug1(NGX_LOG_DEBUG_CORE, cycle->log, 0,
+                               "autocert: runtime host \"%V\" is a config name "
+                               "not yet issued; deferring to config sweep", h);
+            }
+            continue;
+        }
+
+        /* Genuinely runtime: launch the order under ca_list[0]. The shm node is
+         * already PENDING (drain set it); order_complete writes ISSUED/FAILED. */
+        if (ngx_autocert_start_order_for(cycle, acf, state, h, key_type, 1)
+            == NGX_OK)
+        {
+            break;                      /* singleton consumed; complete re-pumps */
+        }
+
+        /*
+         * Launch failed (transient pool/OOM, or a deterministic startup reject).
+         * Mark FAILED so the shm node's own backoff advances — releasing to
+         * REQUESTED,0 would retry it every sweep with no failure count and spin
+         * on a persistent failure (Codex A3.3 MAJOR). set_state(FAILED,0)
+         * computes the exponential backoff on the node.
+         */
+        (void) ngx_autocert_requests_set_state(acf->requests_zone, h,
+                                               NGX_AUTOCERT_REQ_FAILED, 0);
+    }
+
+    ngx_destroy_pool(pool);             /* host copies no longer needed */
 }
 
 
@@ -1351,18 +1544,42 @@ ngx_autocert_order_complete(ngx_autocert_order_t *order, ngx_int_t rc)
                       "autocert: ACME order failed for \"%V\"", &order->domain);
     }
 
-    /* The in-flight (CA, name) was recorded at launch. Record the outcome into
-     * THAT CA's per-name backoff: success clears it, failure grows the per-name
-     * retry delay (don't hammer a failing name). */
-    state = &ngx_autocert_ca_states[ngx_autocert_sched_cur_ca];
+    if (ngx_autocert_sched_runtime) {
+        /*
+         * A3.3: this order was a runtime host drained from the requests shm
+         * zone, not a config name. Its backoff lives on the shm node, so record
+         * the outcome there via set_state (which computes next_eligible on
+         * FAILED), NOT in a CA's per-config-name backoff array (no slot for it).
+         */
+        ngx_autocert_conf_t  acf;
 
-    ngx_autocert_backoff_record(state, ngx_autocert_sched_cur, rc == NGX_OK);
+        if (ngx_autocert_get_conf(cycle, &acf) == NGX_OK
+            && acf.requests_zone != NULL)
+        {
+            time_t  hold = (rc != NGX_OK && order->retry_after > 0)
+                         ? order->retry_after : 0;
 
-    /* If the CA rate-limited us (429), honour its Retry-After: hold this name
-     * at least until then, on top of the exponential backoff just recorded. */
-    if (rc != NGX_OK && order->retry_after > 0) {
-        ngx_autocert_backoff_hold(state, ngx_autocert_sched_cur,
-                                  order->retry_after);
+            (void) ngx_autocert_requests_set_state(acf.requests_zone,
+                       &order->domain,
+                       rc == NGX_OK ? NGX_AUTOCERT_REQ_ISSUED
+                                    : NGX_AUTOCERT_REQ_FAILED,
+                       hold);
+        }
+
+    } else {
+        /* The in-flight (CA, name) was recorded at launch. Record the outcome into
+         * THAT CA's per-name backoff: success clears it, failure grows the per-name
+         * retry delay (don't hammer a failing name). */
+        state = &ngx_autocert_ca_states[ngx_autocert_sched_cur_ca];
+
+        ngx_autocert_backoff_record(state, ngx_autocert_sched_cur, rc == NGX_OK);
+
+        /* If the CA rate-limited us (429), honour its Retry-After: hold this name
+         * at least until then, on top of the exponential backoff just recorded. */
+        if (rc != NGX_OK && order->retry_after > 0) {
+            ngx_autocert_backoff_hold(state, ngx_autocert_sched_cur,
+                                      order->retry_after);
+        }
     }
 
     ngx_autocert_order_free(order);     /* drops token, frees order pool... */
@@ -1570,6 +1787,28 @@ static void
 ngx_autocert_driver_drop_order(void)
 {
     if (ngx_autocert_order != NULL) {
+        /*
+         * A3.3 BLOCKER: if the order in flight is for a RUNTIME host, its shm
+         * node was flipped to PENDING by the drain and its completion callback
+         * will now never run (we free the order here on exit / master_process-off
+         * reload). Left PENDING, the node wedges forever — future drains skip it.
+         * Release it back to REQUESTED so the next-generation worker 0 (or this
+         * process after a reload re-arm) re-drains and retries it. Best-effort:
+         * if the zone is gone the module is being torn down and nothing reads it.
+         */
+        if (ngx_autocert_sched_runtime && ngx_cycle != NULL) {
+            ngx_autocert_conf_t  acf;
+
+            if (ngx_autocert_get_conf((ngx_cycle_t *) ngx_cycle, &acf) == NGX_OK
+                && acf.requests_zone != NULL)
+            {
+                (void) ngx_autocert_requests_set_state(acf.requests_zone,
+                           &ngx_autocert_order->domain,
+                           NGX_AUTOCERT_REQ_REQUESTED, 0);
+            }
+        }
+        ngx_autocert_sched_runtime = 0;
+
         ngx_autocert_order_free(ngx_autocert_order);
         ngx_autocert_order = NULL;
     }

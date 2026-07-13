@@ -315,9 +315,10 @@ jobs:
                 $NGX/objs/src/os/unix/ngx_time.o $NGX/objs/src/core/ngx_times.o \
                 $NGX/objs/src/os/unix/ngx_alloc.o"
           INET_OBJS="$BASE_OBJS $NGX/objs/src/core/ngx_inet.o"
+          # ngx_array.o: A3.1 drain uses ngx_array_push; its test uses ngx_array_create.
           STORE_OBJS="$BASE_OBJS $NGX/objs/src/core/ngx_slab.o \
                 $NGX/objs/src/core/ngx_rbtree.o $NGX/objs/src/core/ngx_crc32.o \
-                $NGX/objs/src/core/ngx_shmtx.o"
+                $NGX/objs/src/core/ngx_shmtx.o $NGX/objs/src/core/ngx_array.o"
 
           # INC and OBJS are flag/object lists that must word-split.
           # ngx_inet.o: crypto.c now pulls ngx_autocert_str_is_ip (IP-cert arc),
