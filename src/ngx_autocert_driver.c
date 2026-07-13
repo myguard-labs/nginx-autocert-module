@@ -453,18 +453,26 @@ ngx_autocert_kick_handler(ngx_event_t *ev)
     }
 
     /*
-     * M4 (Codex #4) / M5: no issuable names => nothing to order, so do NOT build
-     * any ACME client or bootstrap any account. With per-vhost multi-CA an empty
-     * ca_list means no enabled vhost groups under any CA. The test seeds above
-     * are intentionally exempt (they exercise the serve path without an order
-     * flow). The renewal scheduler already guards on names; this guards the
-     * account bootstrap on the same condition.
+     * M4 (Codex #4) / M5: nothing to issue under => do NOT build any ACME client
+     * or bootstrap any account.
+     *
+     * The gate is ca_list ALONE (autolabel C). It used to also require
+     * names->nelts != 0, which made a runtime-only deployment — a label-driven
+     * gateway with regex/catch-all vhosts and zero config names — go permanently
+     * idle: no account, so a runtime name drained from requests_zone had nothing
+     * to order under. postconfig now materializes a CA group for the effective CA
+     * of an enabled vhost even when it collected no names, so an empty ca_list
+     * really does mean "autocert is enabled nowhere".
+     *
+     * A CA group with an empty name list is fine here: the renewal scheduler
+     * skips it (it iterates entry->names), while the runtime drain path orders
+     * by drained host, not from the group's name list. The test seeds above are
+     * intentionally exempt (they exercise the serve path without an order flow).
      */
-    if (acf.names == NULL || acf.names->nelts == 0
-        || acf.ca_list == NULL || acf.ca_list->nelts == 0)
-    {
+    if (acf.ca_list == NULL || acf.ca_list->nelts == 0) {
         ngx_log_error(NGX_LOG_NOTICE, cycle->log, 0,
-                      "autocert: no issuable names; driver idle (no account)");
+                      "autocert: not enabled on any server; driver idle "
+                      "(no account)");
         return;
     }
 

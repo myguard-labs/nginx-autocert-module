@@ -1251,6 +1251,11 @@ ngx_http_autocert_postconfig(ngx_conf_t *cf)
             continue;
         }
 
+        /* autolabel C: "autocert is in use" — counted even if this vhost's
+         * server_names are all regex/catch-all and contribute nothing issuable,
+         * because runtime issuance is exactly the case where they do. */
+        amcf->enabled_servers++;
+
         /*
          * Account contact is per-CA: each CA's newAccount gets the first email
          * configured by a vhost in that CA group (bound below via
@@ -1370,19 +1375,63 @@ ngx_http_autocert_postconfig(ngx_conf_t *cf)
         }
     }
 
+    /*
+     * autolabel C: runtime-only deployment (a label-driven gateway whose vhosts
+     * all match by regex/catch-all, so nothing issuable was collected above).
+     *
+     * ca_list entries are created lazily, per added name, so with zero config
+     * names ca_list is empty too — and the driver treats an empty ca_list as
+     * "nothing to do", never registering an ACME account. A runtime name drained
+     * later would then have no account to order under. Materialize the group for
+     * the effective CA of the FIRST enabled vhost so the account bootstraps.
+     *
+     * Deliberately only when names->nelts == 0: doing it for every enabled vhost
+     * would also mint an empty group for a skip-only vhost in an otherwise
+     * static config, bootstrapping an account for a CA nothing ever issues
+     * under. An empty group is inert for the config-name scheduler either way
+     * (it skips groups with no names) — the runtime drain path orders by host,
+     * not from the group's name list, so it only needs the account to exist.
+     */
+    if (amcf->names->nelts == 0 && amcf->enabled_servers != 0) {
+        for (s = 0; s < cmcf->servers.nelts; s++) {
+            cscf = cscfp[s];
+            ascf = cscf->ctx->srv_conf[ngx_http_autocert_module.ctx_index];
+
+            if (ascf->enable != 1) {
+                continue;
+            }
+
+            cac = ngx_http_autocert_effective_ca(amcf, ascf);
+
+            if (ngx_http_autocert_ca_entry(cf, amcf, cac) == NULL) {
+                return NGX_ERROR;
+            }
+
+            ngx_log_error(NGX_LOG_NOTICE, cf->log, 0,
+                          "autocert: no config names; provisioning CA \"%V\" "
+                          "for runtime-only issuance", &cac->ca);
+            break;
+        }
+    }
+
     ngx_log_error(NGX_LOG_NOTICE, cf->log, 0,
                   "autocert: %ui name(s) enabled for issuance across %ui CA(s)",
                   amcf->names->nelts, amcf->ca_list->nelts);
 
     /*
      * autolabel A1: the runtime cert-request registry, shared BY NAME with a
-     * consumer module. Added whenever autocert has issuable names (i.e. is
-     * enabled) so a consumer can attach it and read the stamped api_version.
+     * consumer module. Added whenever autocert is ENABLED ON ANY VHOST — not
+     * when it happens to have collected an issuable config name — so a consumer
+     * can attach it and read the stamped api_version. A label-driven gateway
+     * matches by regex/catch-all and has zero config names by construction;
+     * gating this on names->nelts left it with no zone to attach, so the
+     * consumer's init stamped api_version 0 and runtime issuance was silently
+     * inert (autolabel C).
      * autocert is the owner => init stamps NGX_AUTOCERT_API_VERSION (data
      * non-NULL). Reuses its tree across reload (noreuse off) so pending runtime
      * requests survive a reconfigure. A3 (driver pump) consumes REQUESTED nodes.
      */
-    if (amcf->names->nelts != 0) {
+    if (amcf->enabled_servers != 0) {
         ngx_str_set(&name, NGX_AUTOCERT_REQUESTS_ZONE);
 
         /* Tag = NULL, NOT a per-module address: this zone is shared by NAME
@@ -1414,7 +1463,7 @@ ngx_http_autocert_postconfig(ngx_conf_t *cf)
      * (noreuse off) so an in-flight challenge survives a reconfigure.
      */
     if ((amcf->challenge == NGX_HTTP_AUTOCERT_CHALLENGE_TLS_ALPN_01
-         && amcf->names->nelts != 0)
+         && amcf->enabled_servers != 0)
         || amcf->test_alpn_domain.len != 0)
     {
         ngx_str_set(&name, "autocert_tls_alpn");
@@ -1439,15 +1488,18 @@ ngx_http_autocert_postconfig(ngx_conf_t *cf)
         return NGX_ERROR;
     }
 
-    if (amcf->names->nelts == 0 && amcf->test_token.len == 0) {
-        /* Nothing to provision and no test seed; skip both zones. */
+    if (amcf->enabled_servers == 0 && amcf->test_token.len == 0) {
+        /* autocert not enabled anywhere and no test seed; skip both zones. */
         return NGX_OK;
     }
 
     /*
-     * Challenge token store + the :80 serving handler. Set up whenever there is
-     * something to provision (or a test seed). The zone reuses its tree across
-     * reload (noreuse off) so in-flight challenges survive a reconfigure.
+     * Challenge token store + the :80 serving handler. Set up whenever autocert
+     * is enabled on any vhost (or a test seed is present) — a runtime-only
+     * deployment has no config names but MUST still be able to answer the
+     * http-01 validation GET for a name it learns at runtime (autolabel C).
+     * The zone reuses its tree across reload (noreuse off) so in-flight
+     * challenges survive a reconfigure.
      */
     ngx_str_set(&name, "autocert_challenges");
 
