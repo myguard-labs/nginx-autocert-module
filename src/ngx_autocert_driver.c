@@ -1774,6 +1774,49 @@ ngx_autocert_sched_pump_runtime(ngx_cycle_t *cycle, ngx_autocert_conf_t *acf)
                                                NGX_AUTOCERT_REQ_FAILED, 0);
     }
 
+    /*
+     * A3.5 renewal scan: a runtime cert already ISSUED must be re-ordered before
+     * it expires. The drain loop above only ever sees REQUESTED nodes, so an
+     * ISSUED node would sit forever. Walk the ISSUED nodes (read-only), and for
+     * any whose on-disk cert is inside its renew_before window, flip it back to
+     * REQUESTED so the NEXT pump's drain re-orders it — through the same A3.4
+     * global rate cap and per-name backoff as a fresh request. We do not launch
+     * the order here: routing renewals back through REQUESTED keeps a single
+     * order-launch path and one rate-cap gate.
+     *
+     * Config-covered names are skipped: the config sweep owns their renewal, so
+     * re-requesting here would only bounce the node back to a 300s defer.
+     */
+    {
+        ngx_array_t  *issued;
+        ngx_str_t    *iv;
+        ngx_int_t     m;
+        ngx_uint_t    j;
+
+        issued = ngx_array_create(pool, 4, sizeof(ngx_str_t));
+        if (issued != NULL) {
+            m = ngx_autocert_requests_list_issued(acf->requests_zone, pool,
+                                                  issued, 0);
+            iv = issued->elts;
+
+            for (j = 0; m > 0 && j < (ngx_uint_t) m; j++) {
+                if (ngx_autocert_name_is_config(&iv[j], NULL)) {
+                    continue;           /* config sweep owns this name's renewal */
+                }
+
+                /* Runtime certs are stored under the concrete host (no wildcard
+                 * cover), so name_due stats the right path directly. */
+                if (ngx_autocert_name_due(cycle, acf, &iv[j], key_type)) {
+                    (void) ngx_autocert_requests_set_state(acf->requests_zone,
+                               &iv[j], NGX_AUTOCERT_REQ_REQUESTED, 0);
+                    ngx_log_error(NGX_LOG_NOTICE, cycle->log, 0,
+                        "autocert: runtime cert \"%V\" is due for renewal; "
+                        "re-queued", &iv[j]);
+                }
+            }
+        }
+    }
+
     ngx_destroy_pool(pool);             /* host copies no longer needed */
 }
 

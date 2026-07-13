@@ -399,14 +399,22 @@ ngx_autocert_requests_drain(ngx_shm_zone_t *shm_zone, ngx_pool_t *pool,
 
         rn = (ngx_autocert_request_t *) node;
 
-        if (rn->state != NGX_AUTOCERT_REQ_REQUESTED
+        /* Claim a node the driver should (re)order now: a fresh REQUESTED enqueue,
+         * or a FAILED node whose backoff has elapsed. set_state(FAILED,...) stamps
+         * next_eligible via the exponential backoff, so a runtime order that fails
+         * transiently (fresh request OR an A3.5 renewal re-queue) is retried once
+         * the window passes instead of being stranded FAILED forever. Both gate on
+         * next_eligible (0 = eligible immediately). */
+        if ((rn->state != NGX_AUTOCERT_REQ_REQUESTED
+             && rn->state != NGX_AUTOCERT_REQ_FAILED)
             || (rn->next_eligible != 0 && now < rn->next_eligible))
         {
             continue;
         }
 
-        /* Copy the host out first: if allocation fails the node stays REQUESTED
-         * and is retried next tick, rather than being claimed-but-lost. */
+        /* Copy the host out first: if allocation fails the node stays in its
+         * current state and is retried next tick, rather than being
+         * claimed-but-lost. */
         host = ngx_array_push(out);
         if (host == NULL) {
             ngx_shmtx_unlock(&shpool->mutex);
@@ -432,6 +440,82 @@ ngx_autocert_requests_drain(ngx_shm_zone_t *shm_zone, ngx_pool_t *pool,
 
     ngx_shmtx_unlock(&shpool->mutex);
     return claimed;
+}
+
+
+ngx_int_t
+ngx_autocert_requests_list_issued(ngx_shm_zone_t *shm_zone, ngx_pool_t *pool,
+    ngx_array_t *out, ngx_uint_t max)
+{
+    ngx_slab_pool_t             *shpool;
+    ngx_autocert_requests_sh_t  *sh;
+    ngx_autocert_request_t      *rn;
+    ngx_rbtree_node_t           *node, *sentinel;
+    ngx_str_t                   *host;
+    u_char                      *data;
+    ngx_int_t                    listed;
+
+    if (shm_zone == NULL || shm_zone->shm.addr == NULL
+        || pool == NULL || out == NULL)
+    {
+        return -1;
+    }
+
+    shpool = (ngx_slab_pool_t *) shm_zone->shm.addr;
+    sh = shpool->data;
+
+    if (sh == NULL || sh->api_version != NGX_AUTOCERT_API_VERSION) {
+        return -1;
+    }
+
+    listed = 0;
+
+    ngx_shmtx_lock(&shpool->mutex);
+
+    sentinel = sh->rbtree.sentinel;
+
+    if (sh->rbtree.root == sentinel) {
+        ngx_shmtx_unlock(&shpool->mutex);
+        return 0;
+    }
+
+    for (node = ngx_rbtree_min(sh->rbtree.root, sentinel);
+         node != NULL;
+         node = ngx_rbtree_next(&sh->rbtree, node))
+    {
+        if (max != 0 && (ngx_uint_t) listed >= max) {
+            break;
+        }
+
+        rn = (ngx_autocert_request_t *) node;
+
+        if (rn->state != NGX_AUTOCERT_REQ_ISSUED) {
+            continue;
+        }
+
+        /* Read-only: copy the host out, never touch node state. On alloc failure
+         * return what we have; the node is unchanged and re-listed next scan. */
+        host = ngx_array_push(out);
+        if (host == NULL) {
+            ngx_shmtx_unlock(&shpool->mutex);
+            return (listed > 0) ? listed : -1;
+        }
+
+        data = ngx_pnalloc(pool, rn->host_len);
+        if (data == NULL) {
+            out->nelts--;               /* undo the push we can't fill */
+            ngx_shmtx_unlock(&shpool->mutex);
+            return (listed > 0) ? listed : -1;
+        }
+
+        ngx_memcpy(data, rn->host, rn->host_len);
+        host->data = data;
+        host->len = rn->host_len;
+        listed++;
+    }
+
+    ngx_shmtx_unlock(&shpool->mutex);
+    return listed;
 }
 
 
