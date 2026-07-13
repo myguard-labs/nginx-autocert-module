@@ -119,6 +119,13 @@ SCRIPTS=(
 # four (matches the old per-case matrix). Always sudo (root-owned store).
 CERT_CASES=(key-mismatch expired future wrong-san)
 
+# max-port.sh sources this file purely to reuse PORT_BASES/SCRIPTS/CERT_CASES so
+# its port-budget ceiling can never drift from the real suite. Hand control back
+# before we touch docker or run a single test.
+if [ -n "${AC_E2E_MAX_PORT_ONLY:-}" ]; then
+    return 0
+fi
+
 PASS=(); FAIL=(); SKIP=()
 
 run_one() {

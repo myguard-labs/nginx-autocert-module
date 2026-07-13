@@ -540,8 +540,28 @@ jobs:
           BIN="$NGX/objs/${{ matrix.flavor }}"
           [ -f "$BIN" ] || BIN="$NGX/objs/nginx"
           chmod +x "$BIN"
-          run_offset=$(( ((GITHUB_RUN_ID % 20) + 1) * 2000 ))
+          # Every published host port MUST stay below the ephemeral range
+          # (/proc/sys/net/ipv4/ip_local_port_range, 32768 by default). The old
+          # scheme spread run_offset over 2000..40000, which pushed ports up into
+          # that range, where they raced the kernel's own outbound allocations:
+          # docker then failed the container with "port is already allocated" on a
+          # RANDOM test (exit 125), and a rerun "fixed" it only because a new run
+          # id yielded a new offset. Keep run_offset small enough that
+          #   max(PORT_BASES) + run_offset + flavor_offset + max_slot*100 < 32768.
+          run_offset=$(( (GITHUB_RUN_ID % 6) * 1500 ))
           port_offset=$(( run_offset + ${{ matrix.port_offset }} ))
           echo "e2e port offset: run_offset=${run_offset} flavor_offset=${{ matrix.port_offset }} port_offset=${port_offset}"
+
+          # Fail LOUDLY if the budget is ever blown — a silent overflow back into
+          # the ephemeral range is exactly the failure this guard exists to stop.
+          ephemeral_lo=$(cut -f1 < /proc/sys/net/ipv4/ip_local_port_range)
+          max_port=$(AC_PORT_OFFSET="$port_offset" bash tests/e2e/max-port.sh)
+          echo "e2e highest published port: ${max_port} (ephemeral floor ${ephemeral_lo})"
+          if [ "$max_port" -ge "$ephemeral_lo" ]; then
+              echo "::error::e2e port budget blown: highest published port ${max_port}" \
+                   ">= ephemeral floor ${ephemeral_lo}; shrink run_offset in build-test.yml"
+              exit 1
+          fi
+
           SERVER_BIN="$BIN" NGX_BUILD_DIR="$NGX" FLAVOR="${{ matrix.flavor }}" AC_PORT_OFFSET="$port_offset" \
             bash tests/e2e/run-all.sh
