@@ -88,6 +88,7 @@ SCRIPTS=(
   dns01-exec-hook.sh
   wildcard-issue.sh
   wildcard-shared.sh
+  runtime-issue.sh
   multi-ca-grouping.sh
   multi-ca-srv-scope.sh
   multi-ca.sh:sudo

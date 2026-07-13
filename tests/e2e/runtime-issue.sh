@@ -1,0 +1,256 @@
+#!/usr/bin/env bash
+#
+# Runtime-issuance full lifecycle e2e test (autolabel C).
+#
+# Proves the A1-A6 arc end to end WITHOUT a real consumer module (label-
+# autoconf): a test-only directive seeds a host into the requests_zone as
+# REQUESTED (the exact insertion path a real consumer would use), then:
+#   1. the driver pump (A3) drains it, orders it under Pebble (http-01, A5
+#      forces http-01 for runtime names), and flips it to ISSUED;
+#   2. the serve gate (A4) presents that issued cert on the runtime host's
+#      SNI, sourced from requests_zone (NOT the config-time `names` set —
+#      the host is deliberately absent from any `server_name`/`autocert on;`
+#      block, so this is genuinely runtime-only);
+#   3. SIGKILL the worker (hard crash, not `-s stop`/`-s reload` — proves the
+#      shm state is gone, not gracefully preserved) and wait for the master
+#      to respawn a fresh worker;
+#   4. the fresh worker's ngx_autocert_runtime_seed() (A6) restores the
+#      ISSUED state from the on-disk `.autocert-runtime` marker, so the host
+#      is re-served immediately WITHOUT a new ACME order (asserted via the
+#      Pebble order count staying flat across the crash+respawn).
+#
+# DNS mock: same pattern as renewal.sh / wildcard-issue.sh — challtestsrv's
+# management API publishes an A record for the runtime host pointing at the
+# docker network gateway (the host), so Pebble's http-01 validator (running
+# in its own container) can reach this process's :80-equivalent listener.
+#
+# Inputs (env):
+#   SERVER_BIN    - built nginx/angie binary (required)
+#   NGX_BUILD_DIR - dir holding objs/*.so (defaults to two levels up from BIN)
+
+set -euo pipefail
+
+SERVER_BIN="${SERVER_BIN:?set SERVER_BIN to the built nginx/angie binary}"
+NGX_BUILD_DIR="${NGX_BUILD_DIR:-$(cd "$(dirname "$SERVER_BIN")/.." && pwd)}"
+
+HTTP_SO="$NGX_BUILD_DIR/objs/ngx_http_autocert_module.so"
+[ -f "$HTTP_SO" ] || { echo "missing $HTTP_SO"; exit 1; }
+
+PREFIX="${PREFIX:-/tmp/ac-runtime-issue}"
+NET_NAME="ac-rt-net-$$"
+PEBBLE_NAME="ac-rt-pebble-$$"
+DNS_NAME="ac-rt-dns-$$"
+
+CONFIG_DOMAIN="cfg.example.com"        # ordinary config name (creates requests_zone)
+RUNTIME_HOST="runtime.example.com"     # seeded ONLY via the test directive
+# Pebble's httpPort (below) is what it actually GETs for http-01 validation
+# (matches renewal.sh's convention) -- this MUST be the port nginx listens on.
+HTTP_PORT="${AC_PORT_5002:-5002}"
+TLS_PORT="${AC_PORT_8443:-8443}"       # TLS SNI serve probe
+
+cleanup() {
+    "$SERVER_BIN" -p "$PREFIX" -c "$PREFIX/conf/nginx.conf" -s stop 2>/dev/null || true
+    local pid
+    pid=$(ss -ltnp 2>/dev/null | grep ":$TLS_PORT " | grep -oP 'pid=\K[0-9]+') || true
+    if [ -n "${pid:-}" ]; then kill -9 "$pid" 2>/dev/null || true; fi
+    docker rm -f "$PEBBLE_NAME" "$DNS_NAME" >/dev/null 2>&1 || true
+    docker network rm "$NET_NAME" >/dev/null 2>&1 || true
+}
+trap cleanup EXIT
+
+rm -rf "$PREFIX"
+mkdir -p "$PREFIX/logs" "$PREFIX/conf" "$PREFIX/store"
+
+docker network create "$NET_NAME" >/dev/null
+HOST_IP=$(docker network inspect "$NET_NAME" \
+    -f '{{ (index .IPAM.Config 0).Gateway }}')
+echo "== host IP reachable from containers: $HOST_IP =="
+
+DNS_PORT="${DNS_PORT:-${AC_PORT_15353:-15353}}"
+MGMT_PORT=$((DNS_PORT + 1))
+docker run -d --name "$DNS_NAME" --network "$NET_NAME" \
+    -p "${DNS_PORT}":53/udp -p "${DNS_PORT}":53/tcp \
+    -p "${MGMT_PORT}":8055 \
+    ghcr.io/letsencrypt/pebble-challtestsrv:latest \
+    -dnsserver :53 -management :8055 \
+    -http01 "" -https01 "" -tlsalpn01 "" -doh "" \
+    -defaultIPv4 "" -defaultIPv6 "" >/dev/null
+DNS_CONTAINER_IP=$(docker inspect -f \
+    '{{ (index .NetworkSettings.Networks "'"$NET_NAME"'").IPAddress }}' "$DNS_NAME")
+
+for i in $(seq 1 30); do
+    if curl -sf -X POST "http://127.0.0.1:${MGMT_PORT}/clear-txt" \
+            -d '{"host":"_probe.invalid."}' >/dev/null 2>&1; then break; fi
+    sleep 1
+    [ "$i" = 30 ] && { echo "challtestsrv mgmt did not come up"; docker logs "$DNS_NAME"; exit 1; }
+done
+curl -sf -X POST "http://127.0.0.1:${MGMT_PORT}/add-a" \
+    -d "{\"host\":\"pebble.\",\"addresses\":[\"127.0.0.1\"]}" >/dev/null
+curl -sf -X POST "http://127.0.0.1:${MGMT_PORT}/add-a" \
+    -d "{\"host\":\"${CONFIG_DOMAIN}.\",\"addresses\":[\"${HOST_IP}\"]}" >/dev/null
+curl -sf -X POST "http://127.0.0.1:${MGMT_PORT}/add-a" \
+    -d "{\"host\":\"${RUNTIME_HOST}.\",\"addresses\":[\"${HOST_IP}\"]}" >/dev/null
+
+cat > "$PREFIX/pebble-config.json" <<EOF
+{
+  "pebble": {
+    "listenAddress": "0.0.0.0:14000",
+    "managementListenAddress": "0.0.0.0:15000",
+    "certificate": "test/certs/localhost/cert.pem",
+    "privateKey": "test/certs/localhost/key.pem",
+    "httpPort": ${AC_PORT_5002:-5002},
+    "tlsPort": ${AC_PORT_5001:-5001},
+    "ocspResponderURL": "",
+    "externalAccountBindingRequired": false
+  }
+}
+EOF
+
+echo "== starting Pebble =="
+docker run -d --name "$PEBBLE_NAME" --network "$NET_NAME" \
+    -p "${AC_PORT_14000:-14000}":14000 -p "${AC_PORT_15000:-15000}":15000 \
+    -e PEBBLE_VA_NOSLEEP=1 \
+    -e PEBBLE_WFE_NONCEREJECT=0 \
+    -v "$PREFIX/pebble-config.json:/test/config/pebble-config.json:ro" \
+    ghcr.io/letsencrypt/pebble:latest \
+    -config /test/config/pebble-config.json \
+    -dnsserver "${DNS_CONTAINER_IP}:53" -strict >/dev/null
+
+for i in $(seq 1 30); do
+    if curl -ksf "https://127.0.0.1:${AC_PORT_14000:-14000}/dir" >/dev/null 2>&1; then break; fi
+    sleep 1
+    [ "$i" = 30 ] && { echo "Pebble did not come up"; docker logs "$PEBBLE_NAME"; exit 1; }
+done
+docker cp "$PEBBLE_NAME:/test/certs/pebble.minica.pem" "$PREFIX/ca.pem"
+
+# HTTP_PORT must be reachable from the Pebble container at HOST_IP:HTTP_PORT for
+# the http-01 validation GET (autocert forces http-01 for runtime names, A5).
+cat > "$PREFIX/conf/nginx.conf" <<EOF
+load_module $HTTP_SO;
+user root;   # worker-0 ACME driver writes the store; keep worker uid able to
+error_log $PREFIX/logs/error.log notice;
+events {}
+http {
+    autocert on;
+    autocert_contact admin@example.com;
+    autocert_ca https://pebble:${AC_PORT_14000:-14000}/dir;
+    autocert_resolver 127.0.0.1:${DNS_PORT};
+    autocert_ca_trusted_certificate $PREFIX/ca.pem;
+    autocert_store_path $PREFIX/store;
+    autocert_challenge http-01;
+    autocert_test_runtime_request ${RUNTIME_HOST};
+    server {
+        # server_name is CONFIG_DOMAIN only: the http-01 challenge handler
+        # matches purely on the token path (/.well-known/acme-challenge/<token>
+        # against challenge_zone), not on server_name/Host -- it doesn't need
+        # RUNTIME_HOST here. Listing RUNTIME_HOST in server_name on an
+        # "autocert on;" block would collect it into amcf->names too (every
+        # server_name of an enabled vhost is collected), defeating the point of
+        # this test: RUNTIME_HOST must be seeded ONLY via
+        # autocert_test_runtime_request / requests_zone, never a config name.
+        listen ${HTTP_PORT};
+        server_name ${CONFIG_DOMAIN};
+        autocert on;
+    }
+    server {
+        listen ${TLS_PORT} ssl;
+        server_name ${CONFIG_DOMAIN};
+        autocert on;
+    }
+}
+EOF
+
+echo "== config accepts autocert_test_runtime_request =="
+"$SERVER_BIN" -t -p "$PREFIX" -c "$PREFIX/conf/nginx.conf"
+echo "✓ config accepted"
+
+echo "== start =="
+"$SERVER_BIN" -p "$PREFIX" -c "$PREFIX/conf/nginx.conf"
+for _ in $(seq 1 30); do [ -s "$PREFIX/logs/nginx.pid" ] && break; sleep 0.2; done
+MASTER=$(cat "$PREFIX/logs/nginx.pid" 2>/dev/null) || { echo "::error::no master pidfile"; exit 1; }
+
+echo "== wait: test host seeded into requests_zone =="
+for i in $(seq 1 60); do
+    grep -q "seeded test runtime request \"${RUNTIME_HOST}\"" "$PREFIX/logs/error.log" && break
+    sleep 0.5
+    [ "$i" = 60 ] && { echo "::error::runtime host never seeded"; grep autocert "$PREFIX/logs/error.log" | tail -30; exit 1; }
+done
+echo "✓ ${RUNTIME_HOST} seeded as REQUESTED"
+
+echo "== wait: config-name cert AND runtime-name cert both provisioned =="
+issued_cfg=; issued_rt=
+for i in $(seq 1 180); do
+    grep -q "certificate provisioned for \"${CONFIG_DOMAIN}\"" "$PREFIX/logs/error.log" && issued_cfg=1
+    grep -q "certificate provisioned for \"${RUNTIME_HOST}\"" "$PREFIX/logs/error.log" && issued_rt=1
+    [ -n "$issued_cfg" ] && [ -n "$issued_rt" ] && break
+    if grep -Eq 'autocert: (ACME order failed|finalize failed|order poll timed out|authorization did not become valid)' \
+            "$PREFIX/logs/error.log"; then
+        break
+    fi
+    sleep 0.5
+done
+grep autocert "$PREFIX/logs/error.log" | tail -40 || true
+[ -n "$issued_cfg" ] || { echo "::error::${CONFIG_DOMAIN} not provisioned"; docker logs "$PEBBLE_NAME" 2>&1 | tail -40; exit 1; }
+[ -n "$issued_rt" ]  || { echo "::error::${RUNTIME_HOST} (runtime) not provisioned"; docker logs "$PEBBLE_NAME" 2>&1 | tail -40; exit 1; }
+echo "✓ both ${CONFIG_DOMAIN} and runtime ${RUNTIME_HOST} provisioned"
+
+# A6 marker on disk (write side) — same segment naming as the store writer.
+MARKER="$PREFIX/store/${RUNTIME_HOST}/.autocert-runtime"
+[ -f "$MARKER" ] || { echo "::error::missing A6 marker $MARKER"; ls -la "$PREFIX/store" 2>&1; exit 1; }
+echo "✓ A6 runtime marker present on disk"
+
+# Count of "provisioned" log lines for the runtime host before the crash, so we
+# can prove the post-respawn re-serve does NOT enqueue a second order for it
+# (a fresh order would add another such line).
+orders_before=$(grep -oc "certificate provisioned for \"${RUNTIME_HOST}\"" "$PREFIX/logs/error.log" || true)
+
+echo "== serve: TLS SNI for ${RUNTIME_HOST} presents the issued (non-dummy) cert =="
+san=$(echo | openssl s_client -connect "127.0.0.1:${TLS_PORT}" \
+        -servername "$RUNTIME_HOST" 2>/dev/null \
+        | openssl x509 -noout -ext subjectAltName 2>/dev/null || true)
+echo "$san" | grep -qF "DNS:${RUNTIME_HOST}" \
+    || { echo "::error::SNI ${RUNTIME_HOST} did not serve the issued cert (SAN: $san)"; exit 1; }
+cn=$(echo | openssl s_client -connect "127.0.0.1:${TLS_PORT}" \
+        -servername "$RUNTIME_HOST" 2>/dev/null \
+        | openssl x509 -noout -subject 2>/dev/null || true)
+echo "$cn" | grep -q "M7 dummy" && { echo "::error::runtime SNI served the M7 dummy cert, not the issued one"; exit 1; }
+echo "✓ ${RUNTIME_HOST} served the ACME-issued cert via cert_cb SNI fallback (A4)"
+
+echo "== hard crash: SIGKILL the worker (not -s stop/reload) =="
+# Find the worker (child of MASTER) actually bound to TLS_PORT.
+WORKER=$(ss -ltnp 2>/dev/null | grep ":$TLS_PORT " | grep -oP 'pid=\K[0-9]+' | head -1)
+[ -n "$WORKER" ] || { echo "::error::could not find worker pid bound to :$TLS_PORT"; ss -ltnp; exit 1; }
+kill -9 "$WORKER" 2>/dev/null || { echo "::error::could not SIGKILL worker $WORKER"; exit 1; }
+echo "  killed worker $WORKER"
+
+alive() { kill -0 "$1" 2>/dev/null; }
+for _ in $(seq 1 50); do alive "$MASTER" || break; sleep 0.2; [ "$(cat "$PREFIX/logs/nginx.pid" 2>/dev/null)" = "$MASTER" ] && break; done
+alive "$MASTER" || { echo "::error::master $MASTER died on worker crash (should respawn, not exit)"; exit 1; }
+[ "$(cat "$PREFIX/logs/nginx.pid" 2>/dev/null)" = "$MASTER" ] || { echo "::error::master pid changed after crash"; exit 1; }
+echo "✓ master $MASTER survived, respawns a fresh worker"
+
+echo "== wait: fresh worker restores runtime state from the A6 disk marker =="
+for i in $(seq 1 60); do
+    grep -q "A6 restored runtime name \"${RUNTIME_HOST}\"" "$PREFIX/logs/error.log" && break
+    sleep 0.3
+    [ "$i" = 60 ] && { echo "::error::A6 restore never logged after respawn"; grep autocert "$PREFIX/logs/error.log" | tail -30; exit 1; }
+done
+echo "✓ A6 restored ${RUNTIME_HOST} into shm from disk marker after crash"
+
+echo "== re-served WITHOUT a new ACME order =="
+for i in $(seq 1 60); do
+    san=$(echo | openssl s_client -connect "127.0.0.1:${TLS_PORT}" \
+            -servername "$RUNTIME_HOST" 2>/dev/null \
+            | openssl x509 -noout -ext subjectAltName 2>/dev/null || true)
+    echo "$san" | grep -qF "DNS:${RUNTIME_HOST}" && break
+    sleep 0.5
+    [ "$i" = 60 ] && { echo "::error::${RUNTIME_HOST} not re-served after crash+respawn"; exit 1; }
+done
+echo "✓ ${RUNTIME_HOST} re-served immediately after crash+respawn"
+
+orders_after=$(grep -oc "certificate provisioned for \"${RUNTIME_HOST}\"" "$PREFIX/logs/error.log" || true)
+[ "$orders_after" -eq "$orders_before" ] \
+    || { echo "::error::a NEW order was placed for ${RUNTIME_HOST} after respawn (before=$orders_before after=$orders_after)"; exit 1; }
+echo "✓ no new ACME order placed for ${RUNTIME_HOST} across the crash+respawn ($orders_after provision(s) total)"
+
+echo "✓✓ autolabel C: runtime issuance lifecycle (seed -> drain/order -> serve -> crash -> A6 restore -> re-serve, no re-order) verified end-to-end"

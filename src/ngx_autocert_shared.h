@@ -73,6 +73,12 @@ typedef struct {
      * for names enqueued at runtime (label-autoconf). NULL when no autocert
      * server names are configured (zone only created then). */
     ngx_shm_zone_t  *requests_zone;
+
+    /* autolabel C test seed: autocert_test_runtime_request <host>; the driver's
+     * kick handler inserts this host into requests_zone as REQUESTED once
+     * (host.len == 0 when unset). Lets the Pebble e2e exercise the runtime
+     * issuance lifecycle without a real label-autoconf consumer. */
+    ngx_str_t        test_runtime_host;
 } ngx_autocert_conf_t;
 
 

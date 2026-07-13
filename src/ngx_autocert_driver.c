@@ -147,6 +147,7 @@ static ngx_autocert_order_t        *ngx_autocert_order;
 static ngx_pool_t                  *ngx_autocert_order_pool;
 static ngx_uint_t                   ngx_autocert_test_seeded;
 static ngx_uint_t                   ngx_autocert_test_alpn_seeded;
+static ngx_uint_t                   ngx_autocert_test_runtime_seeded;
 static ngx_event_t                  ngx_autocert_kick_timer;
 
 /*
@@ -334,6 +335,7 @@ ngx_autocert_kick_handler(ngx_event_t *ev)
 {
     ngx_cycle_t              *cycle = ev->data;
     ngx_autocert_conf_t       acf;
+    ngx_int_t                 ensure_rc;
 
     if (ngx_quit || ngx_terminate || ngx_exiting) {
         return;
@@ -416,6 +418,37 @@ ngx_autocert_kick_handler(ngx_event_t *ev)
         }
         if (atmp != NULL) {
             ngx_destroy_pool(atmp);
+        }
+    }
+
+    /* TEST-ONLY (autolabel C): seed a single host into requests_zone as
+     * REQUESTED once, via the SAME ngx_autocert_requests_ensure() path a real
+     * consumer module (label-autoconf) would use. Lets the Pebble e2e drive
+     * the full runtime-issuance lifecycle (drain/order -> serve -> persist)
+     * without a real consumer. set_state() forces REQUESTED even if ensure()
+     * found an existing node (e.g. re-seeded from the A6 disk marker on a
+     * fresh worker), so the test always gets a fresh order. */
+    if (!ngx_autocert_test_runtime_seeded
+        && acf.requests_zone != NULL && acf.test_runtime_host.len != 0)
+    {
+        ngx_autocert_test_runtime_seeded = 1;
+        ensure_rc = ngx_autocert_requests_ensure(acf.requests_zone,
+                                                  &acf.test_runtime_host);
+
+        if (ensure_rc != NGX_AUTOCERT_REQ_UNKNOWN
+            && ensure_rc != NGX_AUTOCERT_REQ_DENIED
+            && ngx_autocert_requests_set_state(acf.requests_zone,
+                                                &acf.test_runtime_host,
+                                                NGX_AUTOCERT_REQ_REQUESTED, 0)
+               == NGX_OK)
+        {
+            ngx_log_error(NGX_LOG_NOTICE, cycle->log, 0,
+                          "autocert: seeded test runtime request \"%V\"",
+                          &acf.test_runtime_host);
+        } else {
+            ngx_log_error(NGX_LOG_ERR, cycle->log, 0,
+                          "autocert: failed to seed test runtime request "
+                          "\"%V\"", &acf.test_runtime_host);
         }
     }
 
@@ -2539,6 +2572,7 @@ ngx_autocert_driver_reload(ngx_cycle_t *cycle)
     ngx_memzero(&ngx_autocert_sched_timer, sizeof(ngx_event_t));
     ngx_autocert_test_seeded = 0;
     ngx_autocert_test_alpn_seeded = 0;
+    ngx_autocert_test_runtime_seeded = 0;
 
     ngx_autocert_cycle = cycle;
 

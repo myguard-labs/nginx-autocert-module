@@ -112,6 +112,7 @@ ngx_autocert_get_conf(ngx_cycle_t *cycle, ngx_autocert_conf_t *out)
     out->test_alpn_domain = amcf->test_alpn_domain;
     out->test_alpn_keyauth = amcf->test_alpn_keyauth;
     out->requests_zone = amcf->requests_zone;
+    out->test_runtime_host = amcf->test_runtime_host;
 
     /*
      * Fall back to the http{}-level `resolver` directive when autocert_resolver
