@@ -352,6 +352,90 @@ ngx_autocert_requests_state(ngx_shm_zone_t *shm_zone, ngx_str_t *host)
 
 
 ngx_int_t
+ngx_autocert_requests_drain(ngx_shm_zone_t *shm_zone, ngx_pool_t *pool,
+    ngx_array_t *out, ngx_uint_t max)
+{
+    ngx_slab_pool_t             *shpool;
+    ngx_autocert_requests_sh_t  *sh;
+    ngx_autocert_request_t      *rn;
+    ngx_rbtree_node_t           *node, *sentinel;
+    ngx_str_t                   *host;
+    u_char                      *data;
+    time_t                       now;
+    ngx_int_t                    claimed;
+
+    if (shm_zone == NULL || shm_zone->shm.addr == NULL
+        || pool == NULL || out == NULL)
+    {
+        return -1;
+    }
+
+    shpool = (ngx_slab_pool_t *) shm_zone->shm.addr;
+    sh = shpool->data;
+
+    if (sh == NULL || sh->api_version != NGX_AUTOCERT_API_VERSION) {
+        return -1;
+    }
+
+    now = ngx_time();
+    claimed = 0;
+
+    ngx_shmtx_lock(&shpool->mutex);
+
+    sentinel = sh->rbtree.sentinel;
+
+    if (sh->rbtree.root == sentinel) {
+        ngx_shmtx_unlock(&shpool->mutex);
+        return 0;
+    }
+
+    for (node = ngx_rbtree_min(sh->rbtree.root, sentinel);
+         node != NULL;
+         node = ngx_rbtree_next(&sh->rbtree, node))
+    {
+        if (max != 0 && (ngx_uint_t) claimed >= max) {
+            break;
+        }
+
+        rn = (ngx_autocert_request_t *) node;
+
+        if (rn->state != NGX_AUTOCERT_REQ_REQUESTED
+            || (rn->next_eligible != 0 && now < rn->next_eligible))
+        {
+            continue;
+        }
+
+        /* Copy the host out first: if allocation fails the node stays REQUESTED
+         * and is retried next tick, rather than being claimed-but-lost. */
+        host = ngx_array_push(out);
+        if (host == NULL) {
+            ngx_shmtx_unlock(&shpool->mutex);
+            return (claimed > 0) ? claimed : -1;
+        }
+
+        data = ngx_pnalloc(pool, rn->host_len);
+        if (data == NULL) {
+            out->nelts--;               /* undo the push we can't fill */
+            ngx_shmtx_unlock(&shpool->mutex);
+            return (claimed > 0) ? claimed : -1;
+        }
+
+        ngx_memcpy(data, rn->host, rn->host_len);
+        host->data = data;
+        host->len = rn->host_len;
+
+        /* Claim it: a concurrent drain now sees PENDING and skips it. */
+        rn->state = NGX_AUTOCERT_REQ_PENDING;
+        rn->last_attempt = now;
+        claimed++;
+    }
+
+    ngx_shmtx_unlock(&shpool->mutex);
+    return claimed;
+}
+
+
+ngx_int_t
 ngx_autocert_requests_set_state(ngx_shm_zone_t *shm_zone, ngx_str_t *host,
     ngx_uint_t state, time_t next_eligible)
 {
