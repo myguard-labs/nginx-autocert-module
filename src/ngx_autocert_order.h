@@ -77,6 +77,13 @@ struct ngx_autocert_order_s {
     ngx_autocert_order_handler_pt    handler;
     void                            *data;
 
+    /* A3.4: optional hook invoked exactly once, when the ACME newOrder POST has
+     * been accepted for sending (a real order against the CA's budget), NOT at
+     * _start (which only launches directory discovery). The driver uses it to
+     * count runtime new-orders against the global rate cap so a pre-newOrder
+     * failure never consumes budget. NULL = not counted (config orders). */
+    void                           (*on_new_order)(ngx_autocert_order_t *order);
+
     /* outputs (valid on handler NGX_OK) */
     ngx_str_t                        order_url;      /* order resource URL */
     ngx_str_t                        finalize_url;   /* finalize endpoint */

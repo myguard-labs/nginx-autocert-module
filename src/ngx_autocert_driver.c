@@ -55,6 +55,7 @@
 #include "ngx_http_autocert_conf.h"    /* store-layout enum */
 #include "ngx_autocert_order.h"
 #include "ngx_autocert_requests.h"      /* A3.3: runtime request drain/set_state */
+#include "ngx_autocert_ratecap.h"       /* A3.4: rate-cap + wildcard-cover pures */
 #include "ngx_http_autocert_crypto.h"
 
 
@@ -721,6 +722,44 @@ static ngx_uint_t               ngx_autocert_sched_cur;    /* backoff slot in fl
  */
 static ngx_uint_t               ngx_autocert_sched_runtime; /* in-flight order is runtime */
 
+/*
+ * A3.4: driver-local global rate cap on RUNTIME new-orders. The driver runs on a
+ * single process (worker 0, interprocess-flock singleton), so a plain in-process
+ * rolling window suffices — no shm. This guards Let's Encrypt account limits so a
+ * hostile label flood (via the requests zone) cannot burn the ACME budget:
+ *   - a global rolling window of new runtime orders (default 300 / 3h), and
+ *   - a per-host rolling window of runtime FAILURES (default 5 / 1h).
+ * Config names are NOT counted (the operator's own set; the config sweep bounds
+ * itself by name count + per-name backoff). Over either cap, the drained host is
+ * released to REQUESTED with a hold until the window frees, so nothing is lost.
+ *
+ * The windows are simple ring buffers of unix timestamps; "count in window" is a
+ * scan of the ring dropping entries older than the window. Sizes are the caps, so
+ * a full ring == at cap. Cheap: the rings are tiny and only touched on the runtime
+ * order path (already rate-limited by the one-in-flight singleton).
+ */
+#define NGX_AUTOCERT_RT_ORDER_MAX     300           /* new runtime orders / window */
+#define NGX_AUTOCERT_RT_ORDER_WINDOW  (3 * 60 * 60) /* 3h, seconds (LE new-order) */
+#define NGX_AUTOCERT_RT_FAIL_MAX      5             /* runtime fails / host / window */
+#define NGX_AUTOCERT_RT_FAIL_WINDOW   (60 * 60)     /* 1h, seconds */
+
+static time_t   ngx_autocert_rt_order_ring[NGX_AUTOCERT_RT_ORDER_MAX];
+static ngx_uint_t ngx_autocert_rt_order_head;       /* next write slot (wraps) */
+
+typedef struct {
+    u_char   host[256];                             /* NUL-terminated drained host */
+    size_t   len;
+    time_t   ring[NGX_AUTOCERT_RT_FAIL_MAX];
+    ngx_uint_t head;
+} ngx_autocert_rt_fail_t;
+
+/* Per-host fail windows for the hosts currently or recently failing. Small fixed
+ * table (LRU-evict the oldest on overflow); a runtime flood is bounded by the
+ * order cap above, so this need only be large enough for the concurrent failing
+ * set, not every host ever seen. */
+#define NGX_AUTOCERT_RT_FAIL_HOSTS    64
+static ngx_autocert_rt_fail_t ngx_autocert_rt_fail[NGX_AUTOCERT_RT_FAIL_HOSTS];
+
 static void ngx_autocert_sched_handler(ngx_event_t *ev);
 static void ngx_autocert_sched_pump(ngx_cycle_t *cycle);
 static ngx_int_t ngx_autocert_name_due(ngx_cycle_t *cycle,
@@ -730,6 +769,11 @@ static ngx_int_t ngx_autocert_start_order_for(ngx_cycle_t *cycle,
     ngx_uint_t key_type, ngx_uint_t runtime);
 static void ngx_autocert_sched_pump_runtime(ngx_cycle_t *cycle,
     ngx_autocert_conf_t *acf);
+static ngx_uint_t ngx_autocert_rt_order_at_cap(time_t now);
+static void ngx_autocert_rt_order_record(time_t now);
+static void ngx_autocert_rt_order_accounted(ngx_autocert_order_t *order);
+static ngx_uint_t ngx_autocert_rt_fail_at_cap(ngx_str_t *host, time_t now);
+static void ngx_autocert_rt_fail_record(ngx_str_t *host, time_t now);
 static ngx_int_t ngx_autocert_ca_backoff_ensure(ngx_cycle_t *cycle,
     ngx_autocert_conf_t *acf, ngx_autocert_ca_state_t *state);
 static void ngx_autocert_backoff_record(ngx_autocert_ca_state_t *state,
@@ -1345,6 +1389,9 @@ ngx_autocert_start_order_for(ngx_cycle_t *cycle, ngx_autocert_conf_t *acf,
     order->profile = acf->profile;
     order->handler = ngx_autocert_order_complete;
     order->data = cycle;
+    /* A3.4: only runtime orders count against the global new-order cap; the hook
+     * fires once, when the real newOrder POST is accepted (not here at launch). */
+    order->on_new_order = runtime ? ngx_autocert_rt_order_accounted : NULL;
 
     ngx_autocert_order = order;
     ngx_autocert_order_pool = pool;
@@ -1372,13 +1419,23 @@ ngx_autocert_start_order_for(ngx_cycle_t *cycle, ngx_autocert_conf_t *acf,
  * requests for names the operator already manages must NOT trigger a second
  * ACME order — the config sweep covers them. Case-insensitive: config names are
  * stored as written; drained runtime hosts are lowercased by the shm normalizer.
+ *
+ * A3.4 MINOR (a): also matches a config WILDCARD covering the host, and — when
+ * `covering` is non-NULL — outputs the matched CONFIG name (which may be the
+ * wildcard "*.example.com", not the concrete host). The freshness check must run
+ * against the config name so a wildcard's on-disk store key
+ * ("_wildcard_.example.com") is found, not the concrete host's.
  */
 static ngx_uint_t
-ngx_autocert_name_is_config(ngx_str_t *host)
+ngx_autocert_name_is_config(ngx_str_t *host, ngx_str_t **covering)
 {
     ngx_uint_t                c, i;
     ngx_autocert_ca_state_t  *state;
     ngx_str_t                *names;
+
+    if (covering != NULL) {
+        *covering = NULL;
+    }
 
     for (c = 0; c < ngx_autocert_ca_states_n; c++) {
         state = &ngx_autocert_ca_states[c];
@@ -1387,14 +1444,149 @@ ngx_autocert_name_is_config(ngx_str_t *host)
         }
         names = state->entry->names->elts;
         for (i = 0; i < state->entry->names->nelts; i++) {
-            if (names[i].len == host->len
-                && ngx_strncasecmp(names[i].data, host->data, host->len) == 0)
+            /*
+             * Exact match, or (A3.3 MINOR a) a config wildcard "*.example.com"
+             * covering a runtime host one label deeper. ngx_autocert_name_covers
+             * handles both and is unit-tested (ngx_autocert_ratecap.h).
+             */
+            if (ngx_autocert_name_covers(names[i].data, names[i].len,
+                                         host->data, host->len))
             {
+                if (covering != NULL) {
+                    *covering = &names[i];
+                }
                 return 1;
             }
         }
     }
     return 0;
+}
+
+
+/* A3.4: is the GLOBAL runtime new-order window at cap? */
+static ngx_uint_t
+ngx_autocert_rt_order_at_cap(time_t now)
+{
+    return ngx_autocert_rt_window_count(ngx_autocert_rt_order_ring,
+               NGX_AUTOCERT_RT_ORDER_MAX, now, NGX_AUTOCERT_RT_ORDER_WINDOW)
+           >= NGX_AUTOCERT_RT_ORDER_MAX;
+}
+
+
+/* A3.4: record one runtime new-order launch in the global window. */
+static void
+ngx_autocert_rt_order_record(time_t now)
+{
+    ngx_autocert_rt_ring_push(ngx_autocert_rt_order_ring,
+        NGX_AUTOCERT_RT_ORDER_MAX, &ngx_autocert_rt_order_head, now);
+}
+
+
+/*
+ * A3.4: order->on_new_order hook for runtime orders. Fires exactly once, from the
+ * order flow, when the ACME newOrder POST has been accepted for sending — so the
+ * global cap counts real CA orders, not launch attempts that die before newOrder.
+ */
+static void
+ngx_autocert_rt_order_accounted(ngx_autocert_order_t *order)
+{
+    ngx_autocert_rt_order_record(ngx_time());
+    ngx_log_debug1(NGX_LOG_DEBUG_CORE, order->log, 0,
+                   "autocert: counted runtime new-order for \"%V\"",
+                   &order->domain);
+}
+
+
+/*
+ * A3.4: find the per-host fail entry for `host`, or NULL. Match is on the exact
+ * NUL-free bytes (drained hosts are already lowercased by the shm normalizer).
+ */
+static ngx_autocert_rt_fail_t *
+ngx_autocert_rt_fail_find(ngx_str_t *host)
+{
+    ngx_uint_t               i;
+    ngx_autocert_rt_fail_t  *e;
+
+    if (host->len == 0 || host->len >= sizeof(e->host)) {
+        return NULL;
+    }
+    for (i = 0; i < NGX_AUTOCERT_RT_FAIL_HOSTS; i++) {
+        e = &ngx_autocert_rt_fail[i];
+        if (e->len == host->len
+            && ngx_memcmp(e->host, host->data, host->len) == 0)
+        {
+            return e;
+        }
+    }
+    return NULL;
+}
+
+
+/* A3.4: is this host's runtime-FAILURE window at cap? Unknown host => not. */
+static ngx_uint_t
+ngx_autocert_rt_fail_at_cap(ngx_str_t *host, time_t now)
+{
+    ngx_autocert_rt_fail_t  *e;
+
+    e = ngx_autocert_rt_fail_find(host);
+    if (e == NULL) {
+        return 0;
+    }
+    return ngx_autocert_rt_window_count(e->ring, NGX_AUTOCERT_RT_FAIL_MAX,
+               now, NGX_AUTOCERT_RT_FAIL_WINDOW) >= NGX_AUTOCERT_RT_FAIL_MAX;
+}
+
+
+/*
+ * A3.4: record one runtime FAILURE for `host`. Reuse its entry if present, else
+ * claim a slot: a free one, else one whose failure window has fully EXPIRED
+ * (window_count == 0). A slot that still holds in-window failures is NEVER
+ * evicted — otherwise a host at its cap could be dropped and immediately fail
+ * anew inside the same window, bypassing the cap (Codex A3.4 MAJOR). If every
+ * slot holds active (in-window) failures, we simply don't track this host: that
+ * requires >= NGX_AUTOCERT_RT_FAIL_HOSTS distinct hosts each failing within the
+ * window — a flood already bounded by the GLOBAL new-order cap (each failure was
+ * preceded by a counted order). Silently no-ops on an over-long host (can't
+ * happen for a valid drained name — the normalizer caps at 253).
+ */
+static void
+ngx_autocert_rt_fail_record(ngx_str_t *host, time_t now)
+{
+    ngx_uint_t               i;
+    ngx_autocert_rt_fail_t  *e, *slot;
+
+    if (host->len == 0 || host->len >= sizeof(e->host)) {
+        return;
+    }
+
+    e = ngx_autocert_rt_fail_find(host);
+    if (e == NULL) {
+        slot = NULL;
+        for (i = 0; i < NGX_AUTOCERT_RT_FAIL_HOSTS; i++) {
+            e = &ngx_autocert_rt_fail[i];
+            if (e->len == 0) {
+                slot = e;                   /* free slot: take it */
+                break;
+            }
+            if (slot == NULL
+                && ngx_autocert_rt_window_count(e->ring,
+                       NGX_AUTOCERT_RT_FAIL_MAX, now,
+                       NGX_AUTOCERT_RT_FAIL_WINDOW) == 0)
+            {
+                slot = e;                   /* reusable: fully aged out */
+            }
+        }
+        if (slot == NULL) {
+            return;                         /* table full of active hosts; skip */
+        }
+        e = slot;
+        ngx_memcpy(e->host, host->data, host->len);
+        e->len = host->len;
+        ngx_memzero(e->ring, sizeof(e->ring));
+        e->head = 0;
+    }
+
+    ngx_autocert_rt_ring_push(e->ring, NGX_AUTOCERT_RT_FAIL_MAX, &e->head, now);
 }
 
 
@@ -1474,7 +1666,10 @@ ngx_autocert_sched_pump_runtime(ngx_cycle_t *cycle, ngx_autocert_conf_t *acf)
 
         h = hosts->elts;                /* exactly one host (max=1) */
 
-        if (ngx_autocert_name_is_config(h)) {
+        {
+        ngx_str_t  *cover;
+
+        if (ngx_autocert_name_is_config(h, &cover)) {
             /*
              * Operator already manages this name; the config sweep owns its
              * issuance+renewal. Only report ISSUED if a valid cert is actually on
@@ -1483,8 +1678,14 @@ ngx_autocert_sched_pump_runtime(ngx_cycle_t *cycle, ngx_autocert_conf_t *acf)
              * would lie to the requester (Codex A3.3 MAJOR). If no cert yet,
              * release to REQUESTED with a short hold so we re-check after the
              * config sweep has had a chance to run, without spinning.
+             *
+             * A3.4 MINOR (a): freshness is checked against the COVERING config
+             * name (`cover`), not the concrete host — a wildcard "*.example.com"
+             * stores its cert under "_wildcard_.example.com", so name_due(host)
+             * would stat the wrong path and never see the cert, spinning the
+             * host on the 300s re-check forever.
              */
-            if (!ngx_autocert_name_due(cycle, acf, h, key_type)) {
+            if (!ngx_autocert_name_due(cycle, acf, cover, key_type)) {
                 (void) ngx_autocert_requests_set_state(acf->requests_zone, h,
                                                    NGX_AUTOCERT_REQ_ISSUED, 0);
                 ngx_log_debug1(NGX_LOG_DEBUG_CORE, cycle->log, 0,
@@ -1500,9 +1701,62 @@ ngx_autocert_sched_pump_runtime(ngx_cycle_t *cycle, ngx_autocert_conf_t *acf)
             }
             continue;
         }
+        }
+
+        /*
+         * A3.4 global rate cap: refuse to launch a runtime order over the LE
+         * budget. Over the GLOBAL new-order window, or this host's FAILURE
+         * window, release the host to REQUESTED with a hold until the window
+         * frees so it retries later without being lost or hammering the CA. The
+         * config sweep is unaffected (it does not go through this cap).
+         */
+        {
+            time_t  now = ngx_time();
+            time_t  oldest;
+
+            if (ngx_autocert_rt_order_at_cap(now)) {
+                oldest = ngx_autocert_rt_window_oldest(
+                             ngx_autocert_rt_order_ring,
+                             NGX_AUTOCERT_RT_ORDER_MAX, now,
+                             NGX_AUTOCERT_RT_ORDER_WINDOW);
+                ngx_log_error(NGX_LOG_WARN, cycle->log, 0,
+                    "autocert: runtime new-order rate cap reached (%d / %d s); "
+                    "deferring \"%V\"", NGX_AUTOCERT_RT_ORDER_MAX,
+                    NGX_AUTOCERT_RT_ORDER_WINDOW, h);
+                /* hold only until the window actually frees: the oldest counted
+                 * order ages out at oldest+window; +1 clears the strict-`>` edge.
+                 * Fall back to a full window if oldest is somehow unset. */
+                (void) ngx_autocert_requests_set_state(acf->requests_zone, h,
+                           NGX_AUTOCERT_REQ_REQUESTED,
+                           oldest ? oldest + NGX_AUTOCERT_RT_ORDER_WINDOW + 1
+                                  : now + NGX_AUTOCERT_RT_ORDER_WINDOW);
+                continue;
+            }
+
+            if (ngx_autocert_rt_fail_at_cap(h, now)) {
+                ngx_autocert_rt_fail_t  *fe = ngx_autocert_rt_fail_find(h);
+                oldest = fe ? ngx_autocert_rt_window_oldest(fe->ring,
+                                  NGX_AUTOCERT_RT_FAIL_MAX, now,
+                                  NGX_AUTOCERT_RT_FAIL_WINDOW)
+                            : 0;
+                ngx_log_error(NGX_LOG_WARN, cycle->log, 0,
+                    "autocert: runtime host \"%V\" over failure cap "
+                    "(%d / %d s); deferring", h, NGX_AUTOCERT_RT_FAIL_MAX,
+                    NGX_AUTOCERT_RT_FAIL_WINDOW);
+                (void) ngx_autocert_requests_set_state(acf->requests_zone, h,
+                           NGX_AUTOCERT_REQ_REQUESTED,
+                           oldest ? oldest + NGX_AUTOCERT_RT_FAIL_WINDOW + 1
+                                  : now + NGX_AUTOCERT_RT_FAIL_WINDOW);
+                continue;
+            }
+        }
 
         /* Genuinely runtime: launch the order under ca_list[0]. The shm node is
-         * already PENDING (drain set it); order_complete writes ISSUED/FAILED. */
+         * already PENDING (drain set it); order_complete writes ISSUED/FAILED.
+         * The GLOBAL new-order count is NOT bumped here — start_order_for only
+         * launches directory discovery; the real ACME newOrder POST is counted
+         * later via ngx_autocert_rt_order_account() from the order flow, so a
+         * pre-newOrder failure never consumes budget (Codex A3.4 MAJOR). */
         if (ngx_autocert_start_order_for(cycle, acf, state, h, key_type, 1)
             == NGX_OK)
         {
@@ -1559,11 +1813,30 @@ ngx_autocert_order_complete(ngx_autocert_order_t *order, ngx_int_t rc)
             time_t  hold = (rc != NGX_OK && order->retry_after > 0)
                          ? order->retry_after : 0;
 
-            (void) ngx_autocert_requests_set_state(acf.requests_zone,
-                       &order->domain,
-                       rc == NGX_OK ? NGX_AUTOCERT_REQ_ISSUED
-                                    : NGX_AUTOCERT_REQ_FAILED,
-                       hold);
+            /* A3.4: count a runtime failure against this host's fail window so a
+             * host that keeps failing is deferred once it trips the cap. */
+            if (rc != NGX_OK) {
+                ngx_autocert_rt_fail_record(&order->domain, ngx_time());
+            }
+
+            /*
+             * A3.3 MINOR (b): a failed set_state must not silently strand the
+             * node PENDING (it would wedge — never re-drained). Alert-log and
+             * best-effort release to REQUESTED so a later tick retries it.
+             */
+            if (ngx_autocert_requests_set_state(acf.requests_zone,
+                    &order->domain,
+                    rc == NGX_OK ? NGX_AUTOCERT_REQ_ISSUED
+                                 : NGX_AUTOCERT_REQ_FAILED,
+                    hold) != NGX_OK)
+            {
+                ngx_log_error(NGX_LOG_ALERT, cycle->log, 0,
+                    "autocert: failed to record runtime outcome for \"%V\"; "
+                    "releasing to REQUESTED to avoid a wedged PENDING node",
+                    &order->domain);
+                (void) ngx_autocert_requests_set_state(acf.requests_zone,
+                           &order->domain, NGX_AUTOCERT_REQ_REQUESTED, hold);
+            }
         }
 
     } else {

@@ -383,6 +383,17 @@ jobs:
           gcc -o test_requests test_requests_tu.o requests.o $STORE_OBJS
           ./test_requests
 
+          # autolabel A3.4: pure rate-cap + wildcard-cover primitives
+          # (ngx_autocert_ratecap.h). Header-only; the test provides link stubs
+          # for the ngx_string.o refs it never calls (ngx_alloc/ngx_pnalloc/
+          # ngx_log_error_core/ngx_cycle), so it links against ONLY ngx_string.o
+          # (NOT $STORE_OBJS — ngx_palloc.o there would clash with the stubs).
+          # shellcheck disable=SC2086
+          gcc -Wall -Wextra -Werror $CORE_INC \
+            "$GITHUB_WORKSPACE/tests/unit/test_ratecap.c" \
+            "$NGX/objs/src/core/ngx_string.o" -o test_ratecap
+          ./test_ratecap
+
           # shellcheck disable=SC2086
           gcc -Wall -Werror $CORE_INC -c \
             "$GITHUB_WORKSPACE/src/ngx_autocert_alpn.c" -o alpn.o
