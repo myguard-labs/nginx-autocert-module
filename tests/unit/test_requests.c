@@ -774,6 +774,151 @@ test_list_issued(void)
 }
 
 
+/*
+ * Idle-TTL GC. Backdates last_seen by direct node access (the tests link the
+ * TU, and this harness is single-process — the "driver" side of the contract),
+ * then verifies: idle non-PENDING nodes are evicted (host copied to out,
+ * count decremented, slot reusable), PENDING and fresh nodes survive, and
+ * both keep-alive paths (ensure() hit, set_state()) actually refresh
+ * last_seen.
+ */
+static ngx_autocert_request_t *
+gc_find(ngx_shm_zone_t *zone, ngx_str_t *host)
+{
+    ngx_slab_pool_t             *shpool;
+    ngx_autocert_requests_sh_t  *sh;
+    ngx_rbtree_node_t           *node;
+    ngx_autocert_request_t      *rn;
+
+    shpool = (ngx_slab_pool_t *) zone->shm.addr;
+    sh = shpool->data;
+
+    if (sh->rbtree.root == sh->rbtree.sentinel) {
+        return NULL;
+    }
+
+    for (node = ngx_rbtree_min(sh->rbtree.root, sh->rbtree.sentinel);
+         node != NULL;
+         node = ngx_rbtree_next(&sh->rbtree, node))
+    {
+        rn = (ngx_autocert_request_t *) node;
+        if (rn->host_len == host->len
+            && ngx_memcmp(rn->host, host->data, host->len) == 0)
+        {
+            return rn;
+        }
+    }
+
+    return NULL;
+}
+
+static void
+test_gc(void)
+{
+    ngx_shm_zone_t              *zone;
+    ngx_pool_t                  *pool;
+    ngx_array_t                 *out;
+    ngx_slab_pool_t             *shpool;
+    ngx_autocert_requests_sh_t  *sh;
+    ngx_autocert_request_t      *rn;
+    ngx_str_t                    idle_req  = S("gc-idle-req.example.com");
+    ngx_str_t                    idle_iss  = S("gc-idle-issued.example.com");
+    ngx_str_t                    idle_pend = S("gc-idle-pending.example.com");
+    ngx_str_t                    fresh     = S("gc-fresh.example.com");
+    ngx_int_t                    n;
+    time_t                       ttl = 100;
+
+    zone = ngx_autocert_test_zone_create();
+    if (zone == NULL
+        || ngx_autocert_requests_init_zone(zone, NULL) != NGX_OK)
+    {
+        CHECK(0, "gc: fresh zone");
+        return;
+    }
+
+    pool = ngx_create_pool(4096, ngx_cycle->log);
+    if (pool == NULL) {
+        CHECK(0, "gc: pool");
+        ngx_autocert_test_zone_destroy();
+        return;
+    }
+
+    shpool = (ngx_slab_pool_t *) zone->shm.addr;
+    sh = shpool->data;
+
+    /* bad args / disabled */
+    out = ngx_array_create(pool, 8, sizeof(ngx_str_t));
+    CHECK(ngx_autocert_requests_gc(NULL, ttl, pool, out) == -1,
+          "gc: NULL zone => -1");
+    CHECK(ngx_autocert_requests_gc(zone, 0, pool, out) == 0,
+          "gc: ttl 0 => disabled, evicts nothing");
+    CHECK(ngx_autocert_requests_gc(zone, ttl, pool, out) == 0,
+          "gc: empty tree evicts nothing");
+
+    /* seed: idle REQUESTED + idle ISSUED (evictable), idle PENDING (order in
+     * flight — must survive), fresh REQUESTED (inside TTL — must survive). */
+    (void) ngx_autocert_requests_ensure(zone, &idle_req);
+    (void) ngx_autocert_requests_ensure(zone, &idle_iss);
+    (void) ngx_autocert_requests_set_state(zone, &idle_iss,
+              NGX_AUTOCERT_REQ_ISSUED, 0);
+    (void) ngx_autocert_requests_ensure(zone, &idle_pend);
+    (void) ngx_autocert_requests_set_state(zone, &idle_pend,
+              NGX_AUTOCERT_REQ_PENDING, 0);
+    (void) ngx_autocert_requests_ensure(zone, &fresh);
+
+    gc_find(zone, &idle_req)->last_seen  = ngx_time() - ttl - 10;
+    gc_find(zone, &idle_iss)->last_seen  = ngx_time() - ttl - 10;
+    gc_find(zone, &idle_pend)->last_seen = ngx_time() - ttl - 10;
+
+    out = ngx_array_create(pool, 8, sizeof(ngx_str_t));
+    n = ngx_autocert_requests_gc(zone, ttl, pool, out);
+    CHECK(n == 2, "gc: exactly the two idle non-PENDING nodes evicted");
+    CHECK((ngx_uint_t) n == out->nelts, "gc: return count == out->nelts");
+
+    CHECK(ngx_autocert_requests_state(zone, &idle_req)
+              == NGX_AUTOCERT_REQ_UNKNOWN
+       && ngx_autocert_requests_state(zone, &idle_iss)
+              == NGX_AUTOCERT_REQ_UNKNOWN,
+          "gc: evicted hosts now read UNKNOWN");
+    CHECK(ngx_autocert_requests_state(zone, &idle_pend)
+              == NGX_AUTOCERT_REQ_PENDING,
+          "gc: idle PENDING survives (order in flight)");
+    CHECK(ngx_autocert_requests_state(zone, &fresh)
+              == NGX_AUTOCERT_REQ_REQUESTED,
+          "gc: fresh node survives");
+    CHECK(sh->count == 2, "gc: count decremented per eviction (cap freed)");
+
+    /* the freed slot is reusable: re-ensure re-inserts as REQUESTED */
+    CHECK(ngx_autocert_requests_ensure(zone, &idle_req)
+              == NGX_AUTOCERT_REQ_REQUESTED,
+          "gc: evicted host re-ensures as a fresh REQUESTED");
+
+    /* keep-alive path 1: an ensure() hit refreshes last_seen */
+    rn = gc_find(zone, &fresh);
+    rn->last_seen = ngx_time() - ttl - 10;
+    (void) ngx_autocert_requests_ensure(zone, &fresh);          /* hit */
+    out = ngx_array_create(pool, 8, sizeof(ngx_str_t));
+    n = ngx_autocert_requests_gc(zone, ttl, pool, out);
+    CHECK(n == 0 && ngx_autocert_requests_state(zone, &fresh)
+              == NGX_AUTOCERT_REQ_REQUESTED,
+          "gc: ensure() hit refreshes last_seen (node kept)");
+
+    /* keep-alive path 2: set_state() refreshes last_seen */
+    rn = gc_find(zone, &fresh);
+    rn->last_seen = ngx_time() - ttl - 10;
+    (void) ngx_autocert_requests_set_state(zone, &fresh,
+              NGX_AUTOCERT_REQ_ISSUED, 0);
+    out = ngx_array_create(pool, 8, sizeof(ngx_str_t));
+    n = ngx_autocert_requests_gc(zone, ttl, pool, out);
+    CHECK(n == 0 && ngx_autocert_requests_state(zone, &fresh)
+              == NGX_AUTOCERT_REQ_ISSUED,
+          "gc: set_state() refreshes last_seen (node kept)");
+
+    ngx_destroy_pool(pool);
+    ngx_autocert_test_zone_destroy();
+}
+
+
 int
 main(void)
 {
@@ -814,6 +959,7 @@ main(void)
     test_version_mismatch_failsafe();
     test_drain();
     test_list_issued();
+    test_gc();
     test_reload_preserves_tree();
     test_reload_stamp_transitions();
 
