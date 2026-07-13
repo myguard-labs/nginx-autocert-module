@@ -157,4 +157,27 @@ ngx_int_t ngx_autocert_requests_set_state(ngx_shm_zone_t *shm_zone,
     ngx_str_t *host, ngx_uint_t state, time_t next_eligible);
 
 
+/*
+ * Driver-side drain-and-claim (autocert worker-0 only). Under the slab mutex,
+ * walks the tree and, for every REQUESTED node whose next_eligible has passed
+ * (now >= next_eligible), flips it to PENDING and appends a COPY of its host
+ * (allocated from `pool`) to `out`. Claiming under the same lock that reads the
+ * node makes a concurrent re-drain see PENDING, so a host is handed out once.
+ *
+ * At most `max` hosts are claimed per call (0 = no limit); the rest stay
+ * REQUESTED for the next tick. The caller MUST, for each returned host, either
+ * drive an order to completion (then set_state ISSUED/FAILED) or, if it cannot
+ * launch (e.g. global rate cap), release it with
+ * set_state(host, REQ_REQUESTED, 0) so it is retried — a PENDING node never
+ * drained again would wedge forever.
+ *
+ * Returns the number of hosts claimed (appended to `out`), or -1 on bad
+ * zone/version or an allocation failure mid-walk (partial claims already in
+ * `out` are valid and still owned by the caller). Host strings in `out` are
+ * ngx_str_t with pool-owned data; safe to use after the lock is dropped.
+ */
+ngx_int_t ngx_autocert_requests_drain(ngx_shm_zone_t *shm_zone, ngx_pool_t *pool,
+    ngx_array_t *out, ngx_uint_t max);
+
+
 #endif /* _NGX_AUTOCERT_REQUESTS_H_INCLUDED_ */
