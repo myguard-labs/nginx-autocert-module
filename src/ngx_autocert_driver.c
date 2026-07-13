@@ -1999,28 +1999,53 @@ static void
 ngx_autocert_runtime_marker_write(ngx_cycle_t *cycle, ngx_autocert_conf_t *acf,
     ngx_str_t *host)
 {
-    u_char  dir[NGX_MAX_PATH];
-    u_char  path[NGX_MAX_PATH + sizeof("/" NGX_AUTOCERT_RUNTIME_MARKER)];
-    size_t  dlen;
-    int     fd;
+    u_char       dir[NGX_MAX_PATH];
+    size_t       dlen;
+    int          dfd, fd;
+    struct stat  st;
 
     dlen = ngx_autocert_runtime_dir(acf, host, dir, sizeof(dir));
-    if (dlen == 0
-        || dlen + sizeof("/" NGX_AUTOCERT_RUNTIME_MARKER) > sizeof(path))
-    {
+    if (dlen == 0) {
+        return;
+    }
+    dir[dlen] = '\0';
+
+    /*
+     * Pin the per-host cert directory itself (every ancestor component walked
+     * with O_NOFOLLOW|O_DIRECTORY by ngx_autocert_open_dir_path — same fd-pin
+     * discipline as the store writer), then create/open the marker leaf
+     * relative to that pinned fd with an explicit mode and O_NOFOLLOW so a
+     * pre-planted symlink/FIFO/device at the leaf can't be followed or opened
+     * in a mode that blocks (Codex A6 audit: the shared open-file helper takes
+     * no mode arg, so O_CREAT through it left permissions undefined pending a
+     * later fchmod race).
+     */
+    dfd = ngx_autocert_open_dir_path((const char *) dir, 0, 0);
+    if (dfd == -1) {
+        ngx_log_error(NGX_LOG_ERR, cycle->log, ngx_errno,
+                      "autocert: A6 failed to pin store dir for \"%V\" "
+                      "(restart will not remember this name)", host);
         return;
     }
 
-    ngx_memcpy(path, dir, dlen);
-    ngx_memcpy(path + dlen, "/" NGX_AUTOCERT_RUNTIME_MARKER,
-               sizeof("/" NGX_AUTOCERT_RUNTIME_MARKER));
-
-    fd = ngx_autocert_open_file_path((const char *) path,
-                                      O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC);
+    fd = openat(dfd, NGX_AUTOCERT_RUNTIME_MARKER,
+                O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW | O_CLOEXEC, 0644);
+    (void) close(dfd);
     if (fd == -1) {
         ngx_log_error(NGX_LOG_ERR, cycle->log, ngx_errno,
                       "autocert: A6 failed to write runtime marker for \"%V\" "
                       "(restart will not remember this name)", host);
+        return;
+    }
+
+    /* Refuse to write into anything but a regular file even post-open (e.g. a
+     * pre-existing FIFO O_TRUNC succeeds against but never blocks on write
+     * since we opened it, not followed a symlink to it — belt and suspenders). */
+    if (fstat(fd, &st) == -1 || !S_ISREG(st.st_mode)) {
+        (void) close(fd);
+        ngx_log_error(NGX_LOG_ERR, cycle->log, 0,
+                      "autocert: A6 refusing non-regular runtime marker path "
+                      "for \"%V\"", host);
         return;
     }
 
@@ -2030,7 +2055,6 @@ ngx_autocert_runtime_marker_write(ngx_cycle_t *cycle, ngx_autocert_conf_t *acf,
                       "for \"%V\"", host);
     }
 
-    (void) fchmod(fd, 0644);
     (void) close(fd);
 }
 
@@ -2064,6 +2088,7 @@ ngx_autocert_runtime_seed(ngx_cycle_t *cycle)
     struct dirent        *de;
     int                   dfd, mfd, cfd;
     ssize_t               n;
+    struct stat           mst;
     u_char                hostbuf[NGX_AUTOCERT_REQUEST_NAME_MAX];
     ngx_str_t             host;
     ngx_uint_t            key_type;
@@ -2115,19 +2140,37 @@ ngx_autocert_runtime_seed(ngx_cycle_t *cycle)
             continue;
         }
 
+        /*
+         * O_NONBLOCK so a planted FIFO can't block worker-0 init while it
+         * holds the driver singleton lock (Codex A6 audit); the immediate
+         * fstat()+S_ISREG check below then refuses anything that isn't a
+         * plain file before reading (a FIFO opened O_NONBLOCK|O_RDONLY with
+         * no writer would otherwise return EOF/short-read, not hang — the
+         * type check is the actual gate, O_NONBLOCK just removes the hang
+         * as a possibility even before that check runs).
+         */
         mfd = openat(dfd, NGX_AUTOCERT_RUNTIME_MARKER,
-                     O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+                     O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
         if (mfd == -1) {
             (void) close(dfd);
             continue;                    /* not a runtime dir (or config-only) */
+        }
+
+        if (fstat(mfd, &mst) == -1 || !S_ISREG(mst.st_mode)
+            || mst.st_size <= 0
+            || (size_t) mst.st_size > NGX_AUTOCERT_REQUEST_NAME_MAX)
+        {
+            (void) close(mfd);
+            (void) close(dfd);
+            continue;                    /* not a plain, right-sized marker */
         }
 
         n = read(mfd, hostbuf, sizeof(hostbuf));
         (void) close(mfd);
         (void) close(dfd);
 
-        if (n <= 0 || (size_t) n > NGX_AUTOCERT_REQUEST_NAME_MAX) {
-            continue;                    /* corrupt/empty marker: ignore */
+        if (n <= 0 || (size_t) n != (size_t) mst.st_size) {
+            continue;                    /* short read / raced truncate: ignore */
         }
 
         host.data = hostbuf;
@@ -2273,6 +2316,11 @@ ngx_autocert_relock_handler(ngx_event_t *ev)
     switch (ngx_autocert_driver_trylock(cycle)) {
 
     case NGX_OK:
+        /* A6: same seed-before-arm as the immediate-acquisition path in
+         * ngx_autocert_driver_init_process — the singleton was only just
+         * taken here, so this worker's shm view may still be missing markers
+         * a prior generation never got to (or a fresh restart never had). */
+        ngx_autocert_runtime_seed(cycle);
         ngx_autocert_driver_arm(cycle);
         return;                             /* acquired; stop retrying */
 
