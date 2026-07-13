@@ -152,6 +152,21 @@ typedef struct {
     ngx_shm_zone_t  *shm_zone;      /* published enabled-name set (for M4) */
     ngx_array_t     *names;         /* ngx_str_t, collected at postconfig */
 
+    /*
+     * autolabel C: count of vhosts with `autocert on;`, regardless of whether
+     * any of them contributed an issuable server_name. This — NOT names->nelts
+     * — is the "autocert is in use" signal that provisions the runtime registry,
+     * the challenge surfaces and the ACME account.
+     *
+     * A label-driven gateway matches its hosts with a regex/catch-all
+     * server_name and learns every real hostname at runtime, so it legitimately
+     * has zero config names. Gating on names->nelts left such a deployment with
+     * no requests_zone to attach and no challenge surface to answer on, so
+     * runtime issuance could never activate (it failed silently: the consumer's
+     * init stamped api_version 0 and every helper fail-safed to inert).
+     */
+    ngx_uint_t       enabled_servers;
+
     /* M2: enabled names grouped by CA. ngx_autocert_ca_entry_t array; one entry
      * until M4 introduces per-vhost CAs. The flat `names` above stays the serve
      * gate; ca_list is what the driver (M5) iterates to order per CA. */
