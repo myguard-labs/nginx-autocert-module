@@ -129,6 +129,16 @@ cat > "$PREFIX/conf/nginx.conf" <<EOF
 load_module $HTTP_SO;
 user root;   # worker-0 ACME driver writes the store; keep worker uid able to
 error_log $PREFIX/logs/error.log notice;
+# Explicit pid path: this script is the only one in the suite that reads the
+# master pidfile back (the SIGKILL-worker/master-survives/A6-restore
+# assertions below need \$MASTER). angie's compiled-in default pidfile name is
+# logs/angie.pid, not logs/nginx.pid like nginx/mainline -- without an
+# explicit \`pid\` directive the master starts fine (config test passes, certs
+# get issued) but $PREFIX/logs/nginx.pid never appears on an angie build, so
+# the wait loop below always times out with "no master pidfile" after 30s.
+# Every other e2e script in this suite never reads the pidfile back, so they
+# never hit this nginx/angie default-name divergence.
+pid $PREFIX/logs/nginx.pid;
 events {}
 http {
     autocert on;
