@@ -390,6 +390,7 @@ ngx_autocert_order_new_order(ngx_autocert_order_t *order)
     u_char    *p;
     size_t     size;
     ngx_str_t  type;
+    ngx_int_t  rc;
 
     /* An IP-address identifier (LE IP certs, RFC 8738) uses type "ip"; a dns
      * name uses "dns". The value is the literal in both cases. */
@@ -435,9 +436,19 @@ ngx_autocert_order_new_order(ngx_autocert_order_t *order)
                    "autocert: POST newOrder for \"%V\" to \"%V\"",
                    &order->domain, &order->new_order_url);
 
-    return ngx_autocert_account_post(order->account, &order->new_order_url,
-                                     &payload,
-                                     ngx_autocert_order_new_order_done, order);
+    rc = ngx_autocert_account_post(order->account, &order->new_order_url,
+                                   &payload,
+                                   ngx_autocert_order_new_order_done, order);
+
+    /* A3.4: the newOrder POST is now accepted for sending — a real order against
+     * the CA budget. Count it exactly once (runtime orders only; on_new_order is
+     * NULL for config orders). A later per-name/backoff failure does not
+     * un-count it: the CA saw the request. */
+    if (rc == NGX_OK && order->on_new_order != NULL) {
+        order->on_new_order(order);
+    }
+
+    return rc;
 }
 
 
