@@ -160,6 +160,17 @@ invoke() {   # invoke <use_sudo> <script-abs> [extra env KEY=VAL ...]
     fi
 }
 
+# Self-hosted runners persist Docker state across job runs. A prior job
+# killed mid-e2e (runner OOM, workflow cancel) can leave an ac-* container
+# holding a UDP port binding; docker-proxy for that stale container then
+# collides with the next run's `-p ...:53/udp` and fails the whole script
+# with "address already in use" on an unrelated ephemeral port. Reap any
+# leftovers from a previous run before starting ours.
+for pat in 'ac-dns-' 'ac-pebble-'; do
+    docker ps -aq --filter "name=${pat}" | xargs -r docker rm -f >/dev/null 2>&1 || true
+done
+docker network ls -q --filter 'name=ac-net-' | xargs -r docker network rm >/dev/null 2>&1 || true
+
 chmod +x "$SERVER_BIN" 2>/dev/null || true
 
 slot=0
