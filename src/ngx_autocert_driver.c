@@ -1377,7 +1377,19 @@ ngx_autocert_start_order_for(ngx_cycle_t *cycle, ngx_autocert_conf_t *acf,
     }
     ngx_memcpy(order->domain.data, name->data, name->len);
     order->challenge_zone = acf->challenge_zone;
-    order->challenge = acf->challenge;          /* M10c/M16: http/alpn/dns */
+    /*
+     * A5 policy: runtime (label-autoconf) names must never use dns-01. ACME
+     * validation IS the runtime allowlist (2026-07-10 design decision) — a
+     * dns-01 challenge only proves control of DNS, not that the name points
+     * here, so it would let anyone with DNS control on any zone mint a cert
+     * served by this instance. Config-name orders keep the operator's chosen
+     * challenge; runtime orders fall back to http-01 (challenge_zone is
+     * always provisioned whenever acf->names is non-empty, independent of the
+     * configured challenge mode, so it's always available as the fallback).
+     */
+    order->challenge = (runtime && acf->challenge == NGX_AUTOCERT_CHALLENGE_DNS_01)
+                        ? NGX_AUTOCERT_CHALLENGE_HTTP_01
+                        : acf->challenge;            /* M10c/M16: http/alpn/dns */
     order->alpn_zone = acf->alpn_zone;          /* M10b store, used when alpn */
     order->dns_hook_add = acf->dns_hook_add;            /* M16 dns-01 */
     order->dns_hook_remove = acf->dns_hook_remove;
