@@ -2061,8 +2061,23 @@ ngx_autocert_runtime_marker_write(ngx_cycle_t *cycle, ngx_autocert_conf_t *acf,
         return;
     }
 
+    /*
+     * O_NONBLOCK is REQUIRED, and O_TRUNC must NOT be set here.
+     *
+     * O_NOFOLLOW rejects a symlink at the leaf, but it does NOT stop us opening a
+     * FIFO that was planted there directly. Opening a FIFO O_WRONLY blocks in
+     * openat() until a reader appears (POSIX), so the S_ISREG check below would
+     * never be reached: the sole ACME driver event loop — and this nginx worker —
+     * would wedge indefinitely after a successful runtime issuance. O_NONBLOCK
+     * makes that open fail fast with ENXIO instead (and is harmless on a regular
+     * file, where it has no effect on the write path).
+     *
+     * O_TRUNC is likewise deferred: it acts BEFORE we can fstat the fd, so it
+     * would let a hostile leaf be truncated before we established it is a regular
+     * file. We open, verify the type, and only then ftruncate the pinned fd.
+     */
     fd = openat(dfd, NGX_AUTOCERT_RUNTIME_MARKER,
-                O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW | O_CLOEXEC, 0644);
+                O_WRONLY | O_CREAT | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC, 0644);
     (void) close(dfd);
     if (fd == -1) {
         ngx_log_error(NGX_LOG_ERR, cycle->log, ngx_errno,
@@ -2071,14 +2086,22 @@ ngx_autocert_runtime_marker_write(ngx_cycle_t *cycle, ngx_autocert_conf_t *acf,
         return;
     }
 
-    /* Refuse to write into anything but a regular file even post-open (e.g. a
-     * pre-existing FIFO O_TRUNC succeeds against but never blocks on write
-     * since we opened it, not followed a symlink to it — belt and suspenders). */
-    if (fstat(fd, &st) == -1 || !S_ISREG(st.st_mode)) {
+    /* Only ever write into a regular file, and only one with a single link — a
+     * hard link to someone else's file must not be truncated through this fd. */
+    if (fstat(fd, &st) == -1 || !S_ISREG(st.st_mode) || st.st_nlink != 1) {
         (void) close(fd);
         ngx_log_error(NGX_LOG_ERR, cycle->log, 0,
                       "autocert: A6 refusing non-regular runtime marker path "
                       "for \"%V\"", host);
+        return;
+    }
+
+    /* now that the fd is known to be a plain, single-linked regular file */
+    if (ftruncate(fd, 0) == -1) {
+        (void) close(fd);
+        ngx_log_error(NGX_LOG_ERR, cycle->log, ngx_errno,
+                      "autocert: A6 failed to truncate runtime marker for \"%V\"",
+                      host);
         return;
     }
 
