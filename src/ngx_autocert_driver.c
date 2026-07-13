@@ -31,6 +31,7 @@
 #include <fcntl.h>             /* openat/AT_* — M3 atomic key migration */
 #include <unistd.h>            /* close(2), renameat(2) */
 #include <errno.h>             /* EINVAL/ENOTTY/EOPNOTSUPP for renameat2 */
+#include <dirent.h>            /* A6: opendir/readdir the store container */
 
 /*
  * M3: migrate the legacy account key with RENAME_NOREPLACE so it can never
@@ -68,6 +69,14 @@
                                            * OOM / register start) so the driver
                                            * doesn't sit idle until reload */
 #define NGX_AUTOCERT_HTTP_TIMEOUT 30000   /* ms; per-request transport timeout */
+
+/*
+ * A6: marker filename dropped beside a runtime cert's fullchain so the driver
+ * can rebuild the requests shm zone from disk after a real process restart
+ * (fresh shm, unlike a single-process reload which inherits the old segment).
+ * Leading dot keeps it out of any directory listing a store tool might do.
+ */
+#define NGX_AUTOCERT_RUNTIME_MARKER  ".autocert-runtime"
 
 
 /*
@@ -115,6 +124,9 @@ static void ngx_autocert_bootstrap_ca(ngx_cycle_t *cycle, ngx_uint_t ca_idx);
 static void ngx_autocert_start_order(ngx_cycle_t *cycle);
 static void ngx_autocert_order_complete(ngx_autocert_order_t *order,
     ngx_int_t rc);
+static void ngx_autocert_runtime_marker_write(ngx_cycle_t *cycle,
+    ngx_autocert_conf_t *acf, ngx_str_t *host);
+static void ngx_autocert_runtime_seed(ngx_cycle_t *cycle);
 
 
 /*
@@ -1874,6 +1886,13 @@ ngx_autocert_order_complete(ngx_autocert_order_t *order, ngx_int_t rc)
                 ngx_autocert_rt_fail_record(&order->domain, ngx_time());
             }
 
+            /* A6: on success, drop a marker beside the fullchain so a real
+             * process restart (fresh shm, cert survives on disk) can rebuild
+             * this node instead of losing the runtime request permanently. */
+            if (rc == NGX_OK) {
+                ngx_autocert_runtime_marker_write(cycle, &acf, &order->domain);
+            }
+
             /*
              * A3.3 MINOR (b): a failed set_state must not silently strand the
              * node PENDING (it would wedge — never re-drained). Alert-log and
@@ -1923,6 +1942,264 @@ ngx_autocert_order_complete(ngx_autocert_order_t *order, ngx_int_t rc)
     ngx_autocert_sched_pump(cycle);
 }
 
+
+/*
+ * A6: build "<container>/<seg>" (the same directory the store writer / freshness
+ * check / serve path already agree on) into `buf`, NUL-terminated. `container`
+ * is store_path, or store_path "/live" in certbot mode (order.c convention).
+ * Returns the length written, or 0 if it would not fit / the segment is invalid.
+ */
+static size_t
+ngx_autocert_runtime_dir(ngx_autocert_conf_t *acf, ngx_str_t *host,
+    u_char *buf, size_t cap)
+{
+    u_char    seg_buf[NGX_AUTOCERT_DOMAIN_SEG_MAX];
+    ngx_str_t seg;
+    size_t    need;
+    u_char   *p;
+
+    seg.data = seg_buf;
+    seg.len = ngx_autocert_fs_segment(seg_buf, sizeof(seg_buf), host);
+    if (seg.len == 0 || acf->path.len == 0) {
+        return 0;
+    }
+
+    need = acf->path.len
+         + (acf->store == NGX_HTTP_AUTOCERT_STORE_CERTBOT
+            ? sizeof("/live") - 1 : 0)
+         + 1 /* "/" */ + seg.len;
+    if (need >= cap) {
+        return 0;
+    }
+
+    p = ngx_cpymem(buf, acf->path.data, acf->path.len);
+    if (acf->store == NGX_HTTP_AUTOCERT_STORE_CERTBOT) {
+        p = ngx_cpymem(p, "/live", sizeof("/live") - 1);
+    }
+    *p++ = '/';
+    p = ngx_cpymem(p, seg.data, seg.len);
+    *p = '\0';
+
+    return need;
+}
+
+
+/*
+ * A6 persist (write side): after a runtime host is successfully issued, drop a
+ * small marker file <container>/<seg>/.autocert-runtime containing the literal
+ * (pre fs-segment-mangling) host bytes. On a real process restart the shm zone
+ * is fresh/empty (unlike a single-process reload, which inherits the old
+ * segment) — ngx_autocert_runtime_seed() reads these markers back at boot to
+ * reconstruct ISSUED nodes so the scheduler's renewal walk and the A4 serve
+ * gate keep working for a name the shm zone would otherwise have forgotten.
+ * Best-effort: a write failure only means a slower re-request via label
+ * re-discovery, not data loss (the cert itself is safely on disk already).
+ */
+static void
+ngx_autocert_runtime_marker_write(ngx_cycle_t *cycle, ngx_autocert_conf_t *acf,
+    ngx_str_t *host)
+{
+    u_char       dir[NGX_MAX_PATH];
+    size_t       dlen;
+    int          dfd, fd;
+    struct stat  st;
+
+    dlen = ngx_autocert_runtime_dir(acf, host, dir, sizeof(dir));
+    if (dlen == 0) {
+        return;
+    }
+    dir[dlen] = '\0';
+
+    /*
+     * Pin the per-host cert directory itself (every ancestor component walked
+     * with O_NOFOLLOW|O_DIRECTORY by ngx_autocert_open_dir_path — same fd-pin
+     * discipline as the store writer), then create/open the marker leaf
+     * relative to that pinned fd with an explicit mode and O_NOFOLLOW so a
+     * pre-planted symlink/FIFO/device at the leaf can't be followed or opened
+     * in a mode that blocks (Codex A6 audit: the shared open-file helper takes
+     * no mode arg, so O_CREAT through it left permissions undefined pending a
+     * later fchmod race).
+     */
+    dfd = ngx_autocert_open_dir_path((const char *) dir, 0, 0);
+    if (dfd == -1) {
+        ngx_log_error(NGX_LOG_ERR, cycle->log, ngx_errno,
+                      "autocert: A6 failed to pin store dir for \"%V\" "
+                      "(restart will not remember this name)", host);
+        return;
+    }
+
+    fd = openat(dfd, NGX_AUTOCERT_RUNTIME_MARKER,
+                O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW | O_CLOEXEC, 0644);
+    (void) close(dfd);
+    if (fd == -1) {
+        ngx_log_error(NGX_LOG_ERR, cycle->log, ngx_errno,
+                      "autocert: A6 failed to write runtime marker for \"%V\" "
+                      "(restart will not remember this name)", host);
+        return;
+    }
+
+    /* Refuse to write into anything but a regular file even post-open (e.g. a
+     * pre-existing FIFO O_TRUNC succeeds against but never blocks on write
+     * since we opened it, not followed a symlink to it — belt and suspenders). */
+    if (fstat(fd, &st) == -1 || !S_ISREG(st.st_mode)) {
+        (void) close(fd);
+        ngx_log_error(NGX_LOG_ERR, cycle->log, 0,
+                      "autocert: A6 refusing non-regular runtime marker path "
+                      "for \"%V\"", host);
+        return;
+    }
+
+    if (write(fd, host->data, host->len) != (ssize_t) host->len) {
+        ngx_log_error(NGX_LOG_ERR, cycle->log, ngx_errno,
+                      "autocert: A6 short/failed write of runtime marker "
+                      "for \"%V\"", host);
+    }
+
+    (void) close(fd);
+}
+
+
+/*
+ * A6 persist (read side): boot-time-only rebuild of the requests shm zone from
+ * on-disk markers. Called once from ngx_autocert_driver_init_process(), before
+ * the singleton lock is taken by THIS process's first-ever start — never from
+ * the single-process reload path (ngx_autocert_driver_reload), which already
+ * inherits the live shm segment and would just re-see its own markers as a
+ * no-op churn every reload.
+ *
+ * For each top-level directory entry in the store container that carries the
+ * marker: read the literal host, skip it if a config name now covers it (the
+ * config sweep owns it), otherwise re-insert it as ISSUED if a valid fullchain
+ * is still on disk (ngx_autocert_name_due == 0), or drop the stale marker
+ * (cert expired/missing while the process was down — a fresh label event will
+ * re-request it; there is nothing safe to seed for a nonexistent cert).
+ *
+ * Failure anywhere (open/read/enumerate) is logged and skipped per-entry —
+ * A6 is a best-effort warm start, never a hard boot dependency.
+ */
+static void
+ngx_autocert_runtime_seed(ngx_cycle_t *cycle)
+{
+    ngx_autocert_conf_t  acf;
+    u_char                container[NGX_MAX_PATH];
+    u_char               *p;
+    size_t                clen;
+    DIR                  *dh;
+    struct dirent        *de;
+    int                   dfd, mfd, cfd;
+    ssize_t               n;
+    struct stat           mst;
+    u_char                hostbuf[NGX_AUTOCERT_REQUEST_NAME_MAX];
+    ngx_str_t             host;
+    ngx_uint_t            key_type;
+
+    if (ngx_autocert_get_conf(cycle, &acf) != NGX_OK
+        || acf.requests_zone == NULL
+        || acf.path.len == 0)
+    {
+        return;
+    }
+
+    clen = acf.path.len
+         + (acf.store == NGX_HTTP_AUTOCERT_STORE_CERTBOT
+            ? sizeof("/live") - 1 : 0);
+    if (clen >= sizeof(container)) {
+        return;
+    }
+    p = ngx_cpymem(container, acf.path.data, acf.path.len);
+    if (acf.store == NGX_HTTP_AUTOCERT_STORE_CERTBOT) {
+        p = ngx_cpymem(p, "/live", sizeof("/live") - 1);
+    }
+    *p = '\0';
+
+    cfd = ngx_autocert_open_dir_path((const char *) container, 0, 0);
+    if (cfd == -1) {
+        return;                          /* no store yet: nothing to seed */
+    }
+
+    dh = fdopendir(cfd);
+    if (dh == NULL) {
+        (void) close(cfd);
+        return;
+    }
+
+    key_type = (acf.cert_key_types != NULL && acf.cert_key_types->nelts > 0)
+             ? ((ngx_uint_t *) acf.cert_key_types->elts)[0]
+             : NGX_HTTP_AUTOCERT_KEY_P256;
+
+    while ((de = readdir(dh)) != NULL) {
+        if (de->d_name[0] == '.') {
+            continue;                    /* skip ".", "..", any dotfile entry */
+        }
+
+        /* O_NOFOLLOW: a symlinked entry can't be used to read a marker from
+         * outside the pinned store dir. Non-directory entries fail harmlessly. */
+        dfd = openat(cfd, de->d_name,
+                     O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+        if (dfd == -1) {
+            continue;
+        }
+
+        /*
+         * O_NONBLOCK so a planted FIFO can't block worker-0 init while it
+         * holds the driver singleton lock (Codex A6 audit); the immediate
+         * fstat()+S_ISREG check below then refuses anything that isn't a
+         * plain file before reading (a FIFO opened O_NONBLOCK|O_RDONLY with
+         * no writer would otherwise return EOF/short-read, not hang — the
+         * type check is the actual gate, O_NONBLOCK just removes the hang
+         * as a possibility even before that check runs).
+         */
+        mfd = openat(dfd, NGX_AUTOCERT_RUNTIME_MARKER,
+                     O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
+        if (mfd == -1) {
+            (void) close(dfd);
+            continue;                    /* not a runtime dir (or config-only) */
+        }
+
+        if (fstat(mfd, &mst) == -1 || !S_ISREG(mst.st_mode)
+            || mst.st_size <= 0
+            || (size_t) mst.st_size > NGX_AUTOCERT_REQUEST_NAME_MAX)
+        {
+            (void) close(mfd);
+            (void) close(dfd);
+            continue;                    /* not a plain, right-sized marker */
+        }
+
+        n = read(mfd, hostbuf, sizeof(hostbuf));
+        (void) close(mfd);
+        (void) close(dfd);
+
+        if (n <= 0 || (size_t) n != (size_t) mst.st_size) {
+            continue;                    /* short read / raced truncate: ignore */
+        }
+
+        host.data = hostbuf;
+        host.len = (size_t) n;
+
+        if (ngx_autocert_name_is_config(&host, NULL)) {
+            continue;                    /* config sweep owns it now */
+        }
+
+        if (ngx_autocert_name_due(cycle, &acf, &host, key_type)) {
+            /* Cert gone/expired while the process was down. Nothing valid to
+             * seed; do not fabricate an ISSUED state. Next label-autoconf
+             * discovery re-enqueues it via a fresh ensure(). */
+            continue;
+        }
+
+        if (ngx_autocert_requests_ensure(acf.requests_zone, &host)
+            != NGX_AUTOCERT_REQ_DENIED)
+        {
+            (void) ngx_autocert_requests_set_state(acf.requests_zone, &host,
+                                                    NGX_AUTOCERT_REQ_ISSUED, 0);
+            ngx_log_error(NGX_LOG_NOTICE, cycle->log, 0,
+                          "autocert: A6 restored runtime name \"%V\" from disk",
+                          &host);
+        }
+    }
+
+    (void) closedir(dh);                 /* also closes cfd via fdopendir */
+}
 
 
 /*
@@ -2039,6 +2316,11 @@ ngx_autocert_relock_handler(ngx_event_t *ev)
     switch (ngx_autocert_driver_trylock(cycle)) {
 
     case NGX_OK:
+        /* A6: same seed-before-arm as the immediate-acquisition path in
+         * ngx_autocert_driver_init_process — the singleton was only just
+         * taken here, so this worker's shm view may still be missing markers
+         * a prior generation never got to (or a fresh restart never had). */
+        ngx_autocert_runtime_seed(cycle);
         ngx_autocert_driver_arm(cycle);
         return;                             /* acquired; stop retrying */
 
@@ -2068,6 +2350,12 @@ ngx_autocert_driver_init_process(ngx_cycle_t *cycle)
     switch (ngx_autocert_driver_trylock(cycle)) {
 
     case NGX_OK:
+        /* A6: rebuild requests-zone ISSUED nodes from on-disk markers before
+         * arming. Idempotent (ensure()+set_state() only fill/confirm gaps), so
+         * running it on every init_process — true boot AND a master+workers
+         * reload that spawned this worker — is safe and cheap (skipped by
+         * ngx_autocert_name_is_config/name_due for anything already settled). */
+        ngx_autocert_runtime_seed(cycle);
         ngx_autocert_driver_arm(cycle);
         break;
 
