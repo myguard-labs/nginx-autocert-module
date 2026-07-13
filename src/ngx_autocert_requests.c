@@ -362,6 +362,10 @@ ngx_autocert_requests_ensure(ngx_shm_zone_t *shm_zone, ngx_str_t *host)
 
     rn = ngx_autocert_requests_lookup(sh, &norm, hash);
     if (rn != NULL) {
+        /* Idle-TTL keep-alive: an ensure() hit is the consumer re-asserting
+         * the host is still wanted, so refresh last_seen or gc() would evict
+         * a live host the consumer keeps asking about. */
+        rn->last_seen = ngx_time();
         state = (ngx_int_t) rn->state;
         ngx_shmtx_unlock(&shpool->mutex);
         return state;
@@ -388,6 +392,7 @@ ngx_autocert_requests_ensure(ngx_shm_zone_t *shm_zone, ngx_str_t *host)
     rn->node.key = hash;
     rn->state = NGX_AUTOCERT_REQ_REQUESTED;
     rn->first_seen = ngx_time();
+    rn->last_seen = rn->first_seen;
     rn->last_attempt = 0;
     rn->next_eligible = 0;
     rn->fail_count = 0;
@@ -613,6 +618,119 @@ ngx_autocert_requests_list_issued(ngx_shm_zone_t *shm_zone, ngx_pool_t *pool,
 
 
 ngx_int_t
+ngx_autocert_requests_gc(ngx_shm_zone_t *shm_zone, time_t ttl,
+    ngx_pool_t *pool, ngx_array_t *out)
+{
+    ngx_slab_pool_t             *shpool;
+    ngx_autocert_requests_sh_t  *sh;
+    ngx_autocert_request_t      *rn;
+    ngx_autocert_request_t      *victims[NGX_AUTOCERT_REQUESTS_MAX];
+    ngx_rbtree_node_t           *node, *sentinel;
+    ngx_str_t                   *host;
+    u_char                      *data;
+    time_t                       now;
+    ngx_uint_t                   nvictims, i;
+    ngx_int_t                    evicted;
+
+    if (shm_zone == NULL || shm_zone->shm.addr == NULL
+        || pool == NULL || out == NULL)
+    {
+        return -1;
+    }
+
+    if (ttl <= 0) {
+        return 0;                       /* GC disabled */
+    }
+
+    shpool = (ngx_slab_pool_t *) shm_zone->shm.addr;
+    sh = shpool->data;
+
+    if (sh == NULL || sh->api_version != NGX_AUTOCERT_API_VERSION) {
+        return -1;
+    }
+
+    now = ngx_time();
+    evicted = 0;
+
+    ngx_shmtx_lock(&shpool->mutex);
+
+    sentinel = sh->rbtree.sentinel;
+
+    if (sh->rbtree.root == sentinel) {
+        ngx_shmtx_unlock(&shpool->mutex);
+        return 0;
+    }
+
+    /*
+     * Collect-then-delete: rbtree deletion relinks nodes, so deleting while
+     * iterating with ngx_rbtree_next is fragile. The tree is hard-bounded at
+     * NGX_AUTOCERT_REQUESTS_MAX nodes (sh->count gates insertion), so a fixed
+     * stack array always fits.
+     */
+    nvictims = 0;
+
+    for (node = ngx_rbtree_min(sh->rbtree.root, sentinel);
+         node != NULL && nvictims < NGX_AUTOCERT_REQUESTS_MAX;
+         node = ngx_rbtree_next(&sh->rbtree, node))
+    {
+        rn = (ngx_autocert_request_t *) node;
+
+        /* PENDING = an order is in flight; its completion set_state() will
+         * re-stamp last_seen. Evicting it would orphan that completion. */
+        if (rn->state == NGX_AUTOCERT_REQ_PENDING) {
+            continue;
+        }
+
+        if (now - rn->last_seen <= ttl) {
+            continue;
+        }
+
+        victims[nvictims++] = rn;
+    }
+
+    for (i = 0; i < nvictims; i++) {
+        rn = victims[i];
+
+        /* Copy the host out FIRST: the caller must be able to clean up the
+         * per-host residue (A6 marker). If the copy fails, keep the node —
+         * it just ages out again next sweep. */
+        host = ngx_array_push(out);
+        if (host == NULL) {
+            break;
+        }
+
+        data = ngx_pnalloc(pool, rn->host_len);
+        if (data == NULL) {
+            out->nelts--;               /* undo the push we can't fill */
+            break;
+        }
+
+        ngx_memcpy(data, rn->host, rn->host_len);
+        host->data = data;
+        host->len = rn->host_len;
+
+        ngx_rbtree_delete(&sh->rbtree, &rn->node);
+        ngx_slab_free_locked(shpool, rn);
+
+        if (sh->count > 0) {
+            sh->count--;
+        }
+
+        evicted++;
+
+        if (shm_zone->shm.log != NULL) {
+            ngx_log_error(NGX_LOG_NOTICE, shm_zone->shm.log, 0,
+                          "autocert: runtime request \"%V\" evicted "
+                          "(idle > %T s)", host, ttl);
+        }
+    }
+
+    ngx_shmtx_unlock(&shpool->mutex);
+    return evicted;
+}
+
+
+ngx_int_t
 ngx_autocert_requests_set_state(ngx_shm_zone_t *shm_zone, ngx_str_t *host,
     ngx_uint_t state, time_t next_eligible)
 {
@@ -659,6 +777,12 @@ ngx_autocert_requests_set_state(ngx_shm_zone_t *shm_zone, ngx_str_t *host,
 
     rn->state = state;
     rn->last_attempt = ngx_time();
+
+    /* Idle-TTL keep-alive: any driver-side transition (issuance outcome,
+     * renewal re-queue, rate-cap release) is activity — refresh last_seen so
+     * a live-but-low-traffic host is kept alive by its own renewal cycle,
+     * not only by consumer ensure() hits. */
+    rn->last_seen = rn->last_attempt;
 
     if (state == NGX_AUTOCERT_REQ_FAILED) {
         ngx_uint_t  n;

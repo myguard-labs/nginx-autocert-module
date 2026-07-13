@@ -90,7 +90,7 @@
 /* Bump on ANY change to the on-shm layout below or the state enum. Consumer
  * compares the zone-header `api_version` against its compiled value and disables
  * the feature on mismatch (fail safe, never mis-parse a foreign layout). */
-#define NGX_AUTOCERT_API_VERSION   1
+#define NGX_AUTOCERT_API_VERSION   2
 
 /* The shared zone's name. Both modules add/attach by this exact string. */
 #define NGX_AUTOCERT_REQUESTS_ZONE  "autocert_requests"
@@ -128,6 +128,14 @@ typedef struct {
     ngx_uint_t          state;         /* ngx_autocert_request_state_e */
     time_t              first_seen;
     time_t              last_attempt;
+    time_t              last_seen;      /* idle-TTL marker: stamped on insert, on
+                                           every ensure() hit (the consumer re-
+                                           asserting the host is still wanted) and
+                                           on every set_state() (driver activity:
+                                           issuance outcome, renewal re-queue).
+                                           gc() evicts nodes idle past the TTL.
+                                           NOT last_attempt, which tracks issuance
+                                           attempts only. ABI: added in version 2. */
     time_t              next_eligible;  /* backoff gate: driver skips until now >= this */
     ngx_uint_t          fail_count;
     u_short             host_len;
@@ -263,6 +271,39 @@ ngx_autocert_requests_drain(ngx_shm_zone_t *shm_zone, ngx_pool_t *pool,
 NGX_AUTOCERT_REQUESTS_API ngx_int_t
 ngx_autocert_requests_list_issued(ngx_shm_zone_t *shm_zone,
     ngx_pool_t *pool, ngx_array_t *out, ngx_uint_t max);
+
+
+/*
+ * Driver-side idle-TTL garbage collection (autocert worker-0 only). The
+ * registry is a bounded table (NGX_AUTOCERT_REQUESTS_MAX): without eviction a
+ * long-lived gateway churning distinct runtime hosts wedges at the cap
+ * (ensure() => REQ_DENIED forever). Eviction must be autocert-side — a
+ * consumer has no write path beyond ensure().
+ *
+ * Under the slab mutex, walks the tree and evicts every node whose
+ * `last_seen` is more than `ttl` seconds in the past — EXCEPT PENDING nodes
+ * (an ACME order is in flight for them; they are re-stamped by set_state()
+ * when the order completes, and evicting one would orphan the completion's
+ * set_state into a no-op that then re-inserts nothing). A node is kept alive
+ * by ensure() hits (the consumer re-asserting the host) and by set_state()
+ * (driver activity, including the renewal re-queue), so a live host never
+ * ages out while a de-labelled one does.
+ *
+ * For each evicted node a COPY of its host (allocated from `pool`) is
+ * appended to `out` so the caller can clean up per-host residue (the A6
+ * on-disk runtime marker — leaving it would resurrect the evicted node on
+ * the next true restart). `sh->count` is decremented per eviction, freeing
+ * cap slots. An allocation failure mid-walk stops the sweep and returns the
+ * evictions performed so far (all valid; the rest age out again next sweep).
+ * If the copy for a node cannot be allocated, that node is NOT evicted (the
+ * caller could never clean its marker).
+ *
+ * ttl <= 0 disables (returns 0, touches nothing). Returns the number of
+ * nodes evicted (== hosts appended to `out`), or -1 on bad zone/version/args.
+ */
+NGX_AUTOCERT_REQUESTS_API ngx_int_t
+ngx_autocert_requests_gc(ngx_shm_zone_t *shm_zone, time_t ttl,
+    ngx_pool_t *pool, ngx_array_t *out);
 
 
 #endif /* _NGX_AUTOCERT_REQUESTS_H_INCLUDED_ */

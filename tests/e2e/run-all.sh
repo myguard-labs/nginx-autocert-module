@@ -91,6 +91,7 @@ SCRIPTS=(
   wildcard-shared.sh
   runtime-issue.sh
   runtime-zero-static-names.sh
+  runtime-ttl-gc.sh
   multi-ca-grouping.sh
   multi-ca-srv-scope.sh
   multi-ca.sh:sudo

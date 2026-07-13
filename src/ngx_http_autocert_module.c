@@ -178,6 +178,16 @@ static ngx_command_t  ngx_http_autocert_commands[] = {
       offsetof(ngx_http_autocert_main_conf_t, renew_before),
       NULL },
 
+    /* autolabel GC: evict runtime registry nodes idle longer than this (the
+     * consumer's ensure() and the driver's set_state() both refresh a node's
+     * last_seen). 0 disables eviction. Default 7d (init_main_conf). */
+    { ngx_string("autocert_runtime_ttl"),
+      NGX_HTTP_MAIN_CONF|NGX_CONF_TAKE1,
+      ngx_conf_set_sec_slot,
+      NGX_HTTP_MAIN_CONF_OFFSET,
+      offsetof(ngx_http_autocert_main_conf_t, runtime_ttl),
+      NULL },
+
     { ngx_string("autocert_key_type"),
       NGX_HTTP_MAIN_CONF|NGX_CONF_1MORE,
       ngx_http_autocert_key_type,
@@ -450,6 +460,8 @@ ngx_http_autocert_create_main_conf(ngx_conf_t *cf)
     amcf->dns_propagation_delay = NGX_CONF_UNSET;
     amcf->dns_hook_timeout = NGX_CONF_UNSET;
 
+    amcf->runtime_ttl = NGX_CONF_UNSET;
+
     return amcf;
 }
 
@@ -482,6 +494,24 @@ ngx_http_autocert_init_main_conf(ngx_conf_t *cf, void *conf)
     if (amcf->renew_before <= 0 || amcf->renew_before > 89 * 24 * 60 * 60) {
         ngx_log_error(NGX_LOG_EMERG, cf->log, 0,
                       "autocert_renew_before must be > 0 and <= 89d");
+        return NGX_CONF_ERROR;
+    }
+
+    /*
+     * autolabel GC: default 7d idle TTL for runtime registry nodes. Live hosts
+     * are refreshed by the consumer's periodic ensure() (label re-discovery
+     * sweeps run at container-event cadence, far under 7d) and by the driver's
+     * own set_state() on renewal, so only genuinely de-labelled hosts age out.
+     * 0 = off (learned hosts persist forever — the pre-TTL behavior; the cap
+     * wedge is then back on the table, so it is opt-out, not the default).
+     * No lower clamp: sub-minute values are meaningless in production but the
+     * e2e suite needs them to exercise eviction without waiting days.
+     */
+    ngx_conf_init_value(amcf->runtime_ttl, 7 * 24 * 60 * 60);
+
+    if (amcf->runtime_ttl < 0) {
+        ngx_log_error(NGX_LOG_EMERG, cf->log, 0,
+                      "autocert_runtime_ttl must be >= 0 (0 = off)");
         return NGX_CONF_ERROR;
     }
 

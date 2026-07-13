@@ -79,6 +79,10 @@ typedef struct {
      * (host.len == 0 when unset). Lets the Pebble e2e exercise the runtime
      * issuance lifecycle without a real label-autoconf consumer. */
     ngx_str_t        test_runtime_host;
+
+    /* autolabel GC: idle TTL (seconds) for runtime registry nodes; the sched
+     * tick evicts nodes idle past it. 0 = GC off. */
+    time_t           runtime_ttl;
 } ngx_autocert_conf_t;
 
 

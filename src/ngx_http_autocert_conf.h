@@ -205,6 +205,14 @@ typedef struct {
      * (A3 drain/order -> A4 serve -> A6 persist) without a real consumer
      * module. host.len == 0 when unset. */
     ngx_str_t        test_runtime_host;
+
+    /* autolabel GC: idle TTL for runtime registry nodes. The registry is a
+     * bounded table (NGX_AUTOCERT_REQUESTS_MAX); without eviction a gateway
+     * churning distinct runtime hosts wedges at the cap. A node's last_seen is
+     * refreshed on every consumer ensure() and driver set_state(); the sched
+     * tick evicts nodes idle past this TTL (+ removes their A6 marker).
+     * 0 = GC off (pre-TTL behavior: learned hosts persist forever). */
+    time_t           runtime_ttl;
 } ngx_http_autocert_main_conf_t;
 
 

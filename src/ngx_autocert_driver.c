@@ -124,6 +124,8 @@ static void ngx_autocert_bootstrap_ca(ngx_cycle_t *cycle, ngx_uint_t ca_idx);
 static void ngx_autocert_start_order(ngx_cycle_t *cycle);
 static void ngx_autocert_order_complete(ngx_autocert_order_t *order,
     ngx_int_t rc);
+static void ngx_autocert_runtime_marker_remove(ngx_cycle_t *cycle,
+    ngx_autocert_conf_t *acf, ngx_str_t *host);
 static void ngx_autocert_runtime_marker_write(ngx_cycle_t *cycle,
     ngx_autocert_conf_t *acf, ngx_str_t *host);
 static void ngx_autocert_runtime_seed(ngx_cycle_t *cycle);
@@ -1102,6 +1104,20 @@ rearm:
             }
         }
 
+        /* Idle-TTL GC runs on this tick too: bound the interval to the TTL so
+         * eviction lag never exceeds one TTL period (a 12h tick would let a
+         * short TTL — e.g. the e2e's seconds-scale one — sit unevicted for
+         * hours). Same 64-bit-then-narrow discipline as renew_before above;
+         * the FLOOR below still applies, so a tiny TTL can't busy-loop. */
+        if (acf.configured && acf.runtime_ttl > 0
+            && acf.requests_zone != NULL)
+        {
+            uint64_t  ttl_ms = (uint64_t) acf.runtime_ttl * 1000;
+            if (ttl_ms < (uint64_t) interval) {
+                interval = (ngx_msec_t) ttl_ms;
+            }
+        }
+
         /* If any name under any CA is backing off, wake when the soonest hold
          * expires (so a 60s backoff isn't stuck behind a 12h sweep). */
         for (c = 0; c < ngx_autocert_ca_states_n; c++) {
@@ -1882,6 +1898,38 @@ ngx_autocert_sched_pump_runtime(ngx_cycle_t *cycle, ngx_autocert_conf_t *acf)
         }
     }
 
+    /*
+     * Idle-TTL GC: evict registry nodes whose last_seen is older than
+     * autocert_runtime_ttl (0 = off). The registry is a bounded table
+     * (NGX_AUTOCERT_REQUESTS_MAX); without eviction a gateway churning
+     * distinct runtime hosts wedges at the cap (ensure() => REQ_DENIED).
+     * Live hosts never age out: the consumer's ensure() and every driver
+     * set_state() (including the renewal re-queue above) refresh last_seen.
+     * PENDING nodes are skipped by gc() itself (order in flight).
+     *
+     * For each evicted host, remove its A6 marker — otherwise the next true
+     * restart's runtime_seed() would resurrect the node the GC just removed.
+     * The rearm clamp in the sched handler bounds the tick interval to the
+     * TTL so eviction lag never exceeds one TTL period.
+     */
+    if (acf->runtime_ttl > 0) {
+        ngx_array_t  *evicted;
+        ngx_str_t    *ev;
+        ngx_int_t     n_ev;
+        ngx_uint_t    j;
+
+        evicted = ngx_array_create(pool, 4, sizeof(ngx_str_t));
+        if (evicted != NULL) {
+            n_ev = ngx_autocert_requests_gc(acf->requests_zone,
+                                            acf->runtime_ttl, pool, evicted);
+            ev = evicted->elts;
+
+            for (j = 0; n_ev > 0 && j < (ngx_uint_t) n_ev; j++) {
+                ngx_autocert_runtime_marker_remove(cycle, acf, &ev[j]);
+            }
+        }
+    }
+
     ngx_destroy_pool(pool);             /* host copies no longer needed */
 }
 
@@ -2120,6 +2168,51 @@ ngx_autocert_runtime_marker_write(ngx_cycle_t *cycle, ngx_autocert_conf_t *acf,
     }
 
     (void) close(fd);
+}
+
+
+/*
+ * A6 persist (GC side): remove the runtime marker of a host the idle-TTL GC
+ * just evicted from the requests shm zone. Leaving the marker behind would
+ * resurrect the evicted node as ISSUED on the next true restart
+ * (ngx_autocert_runtime_seed reads markers back at boot), un-doing the
+ * eviction. The cert files themselves are NOT touched — they are harmless
+ * without a registry node (the A4 serve gate no longer admits the SNI) and
+ * a re-learned host reuses them via the freshness check.
+ *
+ * Best-effort: same fd-pin discipline as the writer (every ancestor walked
+ * O_NOFOLLOW|O_DIRECTORY), unlinkat() relative to the pinned dir fd. ENOENT
+ * is silent (nothing to clean); other failures are logged and the marker is
+ * re-seen by the next GC pass's eviction of the re-seeded node.
+ */
+static void
+ngx_autocert_runtime_marker_remove(ngx_cycle_t *cycle,
+    ngx_autocert_conf_t *acf, ngx_str_t *host)
+{
+    u_char  dir[NGX_MAX_PATH];
+    size_t  dlen;
+    int     dfd;
+
+    dlen = ngx_autocert_runtime_dir(acf, host, dir, sizeof(dir));
+    if (dlen == 0) {
+        return;
+    }
+    dir[dlen] = '\0';
+
+    dfd = ngx_autocert_open_dir_path((const char *) dir, 0, 0);
+    if (dfd == -1) {
+        return;                 /* no per-host dir => no marker to remove */
+    }
+
+    if (unlinkat(dfd, NGX_AUTOCERT_RUNTIME_MARKER, 0) == -1
+        && ngx_errno != NGX_ENOENT)
+    {
+        ngx_log_error(NGX_LOG_WARN, cycle->log, ngx_errno,
+                      "autocert: failed to remove runtime marker for evicted "
+                      "\"%V\" (restart may resurrect it)", host);
+    }
+
+    (void) close(dfd);
 }
 
 
