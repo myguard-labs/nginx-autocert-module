@@ -133,6 +133,23 @@ static ngx_uint_t           ngx_autocert_names_built;     /* 0 until first build
 static ngx_uint_t           ngx_autocert_names_failed;    /* give up building */
 
 
+/*
+ * cert_cb delegation slot (autolabel B3). A consumer module — which must NOT
+ * install its own cert_cb, because OpenSSL would silently replace ours — calls
+ * ngx_autocert_cert_cb_register() and we invoke it FIRST on every handshake,
+ * falling back to our store lookup when it declines. Full contract in the header.
+ *
+ * Read at HANDSHAKE time rather than copied into sctx at serve_init, so the
+ * consumer's config phase may run either before or after ours: whichever order,
+ * the handshake sees the final value. Stamped with the registering cycle so a
+ * reload that drops the consumer cannot leave us calling a stale pointer into an
+ * unloaded .so (a NULL/stale cycle simply means "no consumer this cycle").
+ */
+static ngx_int_t          (*ngx_autocert_cert_cb_next)(SSL *ssl_conn, void *arg);
+static void                *ngx_autocert_cert_cb_next_arg;
+static ngx_cycle_t         *ngx_autocert_cert_cb_next_cycle;
+
+
 static int ngx_http_autocert_cert_cb(SSL *ssl_conn, void *arg);
 static ngx_int_t ngx_http_autocert_cache_reload(ngx_autocert_cert_t *c,
     ngx_uint_t slot, ngx_str_t *host, ngx_str_t *verify,
@@ -557,6 +574,67 @@ ngx_autocert_serve_reload(void)
 }
 
 
+/*
+ * Register a consumer's cert callback. See the contract in ngx_autocert_serve.h.
+ * Exported (default visibility) — the only symbol this module exports; a consumer
+ * resolves it with dlsym(RTLD_DEFAULT, ...) so that autocert being absent is a
+ * NULL lookup rather than an unresolved symbol that would stop nginx booting.
+ *
+ * Called from the consumer's config phase, once per cycle. Stamping ngx_cycle
+ * here is what makes a dropped consumer safe across a reload: the handshake
+ * compares against the live cycle and ignores anything older.
+ */
+ngx_int_t
+ngx_autocert_cert_cb_register(ngx_int_t (*next)(SSL *ssl_conn, void *arg),
+    void *arg)
+{
+    if (next == NULL) {
+        return NGX_ERROR;
+    }
+
+    ngx_autocert_cert_cb_next       = next;
+    ngx_autocert_cert_cb_next_arg   = arg;
+    ngx_autocert_cert_cb_next_cycle = (ngx_cycle_t *) ngx_cycle;
+
+    return NGX_OK;
+}
+
+
+/*
+ * Invoke a registered consumer, if one registered for THIS cycle. Returns the
+ * consumer's verdict (NGX_OK = it installed a cert, NGX_DECLINED = we proceed,
+ * NGX_ERROR = fail the handshake), or NGX_DECLINED when no consumer is live.
+ */
+static ngx_int_t
+ngx_http_autocert_cert_cb_delegate(SSL *ssl_conn, ngx_connection_t *c)
+{
+    ngx_int_t  rc;
+
+    if (ngx_autocert_cert_cb_next == NULL
+        || ngx_autocert_cert_cb_next_cycle != (ngx_cycle_t *) ngx_cycle)
+    {
+        return NGX_DECLINED;              /* no consumer registered this cycle */
+    }
+
+    rc = ngx_autocert_cert_cb_next(ssl_conn, ngx_autocert_cert_cb_next_arg);
+
+    if (rc != NGX_OK && rc != NGX_DECLINED && rc != NGX_ERROR) {
+        /* A consumer that returns garbage must not be able to smuggle an
+         * unvetted certificate onto the connection, nor silently suppress our
+         * own lookup. Treat anything off-contract as "declined" and say so. */
+        ngx_log_error(NGX_LOG_ERR, c->log, 0,
+                      "autocert: cert_cb consumer returned %i, expected "
+                      "NGX_OK/NGX_DECLINED/NGX_ERROR; ignoring it", rc);
+        return NGX_DECLINED;
+    }
+
+    ngx_log_debug1(NGX_LOG_DEBUG_HTTP, c->log, 0,
+                   "autocert: cert_cb consumer returned %i", rc);
+
+    return rc;
+}
+
+
 static int
 ngx_http_autocert_cert_cb(SSL *ssl_conn, void *arg)
 {
@@ -614,6 +692,29 @@ ngx_http_autocert_cert_cb(SSL *ssl_conn, void *arg)
                        "autocert: acme-tls/1 challenge for \"%V\"", &host);
 
         return ngx_http_autocert_serve_alpn_cert(c, ssl_conn, sctx, &host);
+    }
+
+    /*
+     * Consumer delegation (autolabel B3), BEFORE our own lookup but AFTER the
+     * acme-tls/1 branch above: an ACME validation handshake must present the
+     * challenge cert and nothing else, so a consumer never gets to answer it.
+     *
+     * A consumer installs no cert_cb of its own (OpenSSL would replace ours), so
+     * this call is the only way its per-container certs reach the handshake. It
+     * runs even when there is no SNI: that is our "keep the bootstrap cert" case,
+     * but a consumer may still legitimately decline it, and passing it through
+     * keeps the one entry point uniform.
+     */
+    switch (ngx_http_autocert_cert_cb_delegate(ssl_conn, c)) {
+
+    case NGX_OK:
+        return 1;                         /* consumer served it; hands off */
+
+    case NGX_ERROR:
+        return 0;                         /* consumer wants the handshake failed */
+
+    default:                              /* NGX_DECLINED: our turn */
+        break;
     }
 
     if (servername == NULL) {

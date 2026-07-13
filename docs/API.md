@@ -152,8 +152,85 @@ signal that the cert is servable. If your module needs to know *when* a name
 transitions to `ISSUED` (e.g. to flip a health check), poll on your own
 module's timer; there is no shm-side notification/callback mechanism.
 
+## 6. If your module ALSO serves certificates: delegate, never install
+
+**If your module has no certificates of its own to serve, skip this section — but
+then you must not call `SSL_CTX_set_cert_cb()` anywhere. Read the first bullet of
+"What you must NOT do".**
+
+OpenSSL keeps exactly **one** `cert_cb` per `SSL_CTX`, and
+`SSL_CTX_set_cert_cb()` **replaces** it. There is no `SSL_CTX_get_cert_cb()` to
+chain through. So a consumer that installs its own callback on an
+autocert-managed server silently **destroys autocert's serving**: certs still
+order, issue and land in the store, but every autocert name — runtime *and*
+ordinary config-time `server_name`s — is served the self-signed `CN=localhost`
+bootstrap cert instead. Nothing logs an error. (This is exactly what happened to
+the reference consumer; it is why this section exists.)
+
+autocert therefore **owns the OpenSSL slot** and calls you:
+
+```c
+#include <dlfcn.h>
+
+/* Your per-SNI cert logic. Return NGX_OK if you installed a cert on this SSL,
+ * NGX_DECLINED to let autocert serve it from its store, NGX_ERROR to fail the
+ * handshake. NOT OpenSSL's 1/0: "1" cannot distinguish "I installed a cert"
+ * from "I did nothing", and autocert must know which. */
+static ngx_int_t
+my_cert_serve(SSL *ssl_conn, void *arg)
+{
+    ...
+    if (nothing_for_this_sni) {
+        return NGX_DECLINED;      /* autocert's store lookup runs next */
+    }
+    /* SSL_use_certificate() / SSL_use_PrivateKey() / SSL_set1_chain() ... */
+    return NGX_OK;
+}
+
+/* In your postconfiguration, INSTEAD of SSL_CTX_set_cert_cb(): */
+ngx_int_t (*reg)(ngx_int_t (*)(SSL *, void *), void *);
+
+*(void **) &reg = dlsym(RTLD_DEFAULT, "ngx_autocert_cert_cb_register");
+
+if (reg != NULL) {
+    if (reg(my_cert_serve, my_conf) != NGX_OK) {
+        return NGX_ERROR;
+    }
+    /* Registered. Do NOT also call SSL_CTX_set_cert_cb(). */
+} else {
+    /* autocert is not loaded: you are the only cert_cb, install it yourself. */
+    SSL_CTX_set_cert_cb(sscf->ssl.ctx, my_cert_cb, my_conf);
+}
+```
+
+Your callback is invoked **first** on every handshake, and autocert falls back to
+its store whenever you return `NGX_DECLINED` — so an explicit per-container cert
+wins over an ACME-issued one, and everything else is autocert's.
+
+**Resolve it with `dlsym`, not a direct call.** nginx `dlopen()`s modules with
+`RTLD_NOW | RTLD_GLOBAL`. `RTLD_NOW` is *eager*: a direct reference to
+`ngx_autocert_cert_cb_register` makes nginx **refuse to start** whenever autocert
+is absent, turning an optional integration into a hard dependency.
+`RTLD_GLOBAL` puts the symbol in the global namespace, so `RTLD_DEFAULT` finds it
+whichever order the two `.so` files loaded in. A `NULL` result simply means
+"autocert is not there".
+
+Registration is per-cycle (autocert stamps it with the registering cycle and
+ignores anything older), so re-register from your config phase on every reload —
+the snippet above already does, being in `postconfiguration`.
+
+Note this is a **real exported symbol**, unlike the `ngx_autocert_requests_*`
+helpers you vendored in step 1: those are hidden-visibility code copies that share
+state through *shm*, whereas the cert callback's state is autocert's private
+per-worker cache and per-server config. A vendored copy of it would hold its own
+zeroed statics and could never serve autocert's certs.
+
 ## What you must NOT do
 
+- **Do not** call `SSL_CTX_set_cert_cb()` on a server that autocert manages. You
+  will replace autocert's callback and silently break TLS for every name it
+  serves (see section 6). If your module needs to serve certs, register via
+  `ngx_autocert_cert_cb_register()`; if it does not, install nothing.
 - **Do not** call `ngx_autocert_requests_set_state`, `_drain`, or
   `_list_issued` from a consumer module — those are the autocert worker-0
   driver's exclusive write path (state transitions, claiming, renewal
