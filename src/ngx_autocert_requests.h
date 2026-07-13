@@ -159,8 +159,9 @@ ngx_int_t ngx_autocert_requests_set_state(ngx_shm_zone_t *shm_zone,
 
 /*
  * Driver-side drain-and-claim (autocert worker-0 only). Under the slab mutex,
- * walks the tree and, for every REQUESTED node whose next_eligible has passed
- * (now >= next_eligible), flips it to PENDING and appends a COPY of its host
+ * walks the tree and, for every REQUESTED node — or FAILED node whose backoff has
+ * elapsed — whose next_eligible has passed (now >= next_eligible), flips it to
+ * PENDING and appends a COPY of its host
  * (allocated from `pool`) to `out`. Claiming under the same lock that reads the
  * node makes a concurrent re-drain see PENDING, so a host is handed out once.
  *
@@ -178,6 +179,29 @@ ngx_int_t ngx_autocert_requests_set_state(ngx_shm_zone_t *shm_zone,
  */
 ngx_int_t ngx_autocert_requests_drain(ngx_shm_zone_t *shm_zone, ngx_pool_t *pool,
     ngx_array_t *out, ngx_uint_t max);
+
+
+/*
+ * Driver-side renewal scan (autocert worker-0 only, A3.5). Under the slab mutex,
+ * walks the tree and appends a COPY of the host (allocated from `pool`) of every
+ * ISSUED node to `out`. This is a READ-ONLY walk: it does NOT change any node's
+ * state — unlike drain, it makes no claim. The caller decides, per host, whether
+ * the on-disk cert is inside its renew window (ngx_autocert_name_due) and only
+ * then flips the node back to REQUESTED via set_state, so the next drain re-orders
+ * it through the SAME global rate cap as a fresh request. Leaving the walk
+ * side-effect-free means a not-yet-due ISSUED node is untouched and a re-scan is
+ * idempotent.
+ *
+ * At most `max` hosts are copied per call (0 = no limit); the rest are seen on
+ * the next scan. Returns the number of hosts appended to `out`, or -1 on bad
+ * zone/version. An allocation failure MID-WALK returns the positive count copied
+ * so far (partial list, all valid) — same convention as drain(); only a failure
+ * on the very first copy returns -1. The renewal scan is idempotent, so a
+ * truncated list just re-lists the rest next scan. Host strings in `out` are
+ * pool-owned ngx_str_t, safe after unlock.
+ */
+ngx_int_t ngx_autocert_requests_list_issued(ngx_shm_zone_t *shm_zone,
+    ngx_pool_t *pool, ngx_array_t *out, ngx_uint_t max);
 
 
 #endif /* _NGX_AUTOCERT_REQUESTS_H_INCLUDED_ */

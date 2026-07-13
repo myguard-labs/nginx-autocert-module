@@ -454,6 +454,110 @@ test_drain(void)
     n = ngx_autocert_requests_drain(zone, pool, out, 0);
     CHECK(n == 0, "drain: re-drain sees no REQUESTED-eligible (no double claim)");
 
+    /* A3.5 BLOCKER: a FAILED node whose backoff has elapsed is drainable (else a
+     * transient renewal failure strands a runtime cert FAILED until it expires).
+     * A FAILED node still in backoff is NOT claimed. */
+    {
+        ngx_str_t  failnow  = S("drain-fail-elapsed.example.com");
+        ngx_str_t  failhold = S("drain-fail-held.example.com");
+
+        (void) ngx_autocert_requests_ensure(zone, &failnow);
+        (void) ngx_autocert_requests_set_state(zone, &failnow,
+                  NGX_AUTOCERT_REQ_FAILED, ngx_time() - 1);   /* backoff elapsed */
+        (void) ngx_autocert_requests_ensure(zone, &failhold);
+        (void) ngx_autocert_requests_set_state(zone, &failhold,
+                  NGX_AUTOCERT_REQ_FAILED, ngx_time() + 3600); /* still held */
+
+        out = ngx_array_create(pool, 8, sizeof(ngx_str_t));
+        n = ngx_autocert_requests_drain(zone, pool, out, 0);
+        CHECK(n == 1, "drain: FAILED-elapsed claimed, FAILED-held skipped");
+        CHECK(ngx_autocert_requests_state(zone, &failnow)
+                  == NGX_AUTOCERT_REQ_PENDING,
+              "drain: elapsed FAILED node flipped to PENDING");
+        CHECK(ngx_autocert_requests_state(zone, &failhold)
+                  == NGX_AUTOCERT_REQ_FAILED,
+              "drain: held FAILED node left FAILED");
+    }
+
+    ngx_destroy_pool(pool);
+    ngx_autocert_test_zone_destroy();
+}
+
+
+/* A3.5: list_issued yields exactly the ISSUED nodes, read-only, max-bounded. */
+static void
+test_list_issued(void)
+{
+    ngx_shm_zone_t  *zone;
+    ngx_pool_t      *pool;
+    ngx_array_t     *out;
+    ngx_str_t        iss1 = S("iss-a.example.com");
+    ngx_str_t        iss2 = S("iss-b.example.com");
+    ngx_str_t        iss3 = S("iss-c.example.com");
+    ngx_str_t        req  = S("li-requested.example.com");
+    ngx_str_t        pend = S("li-pending.example.com");
+    ngx_str_t        fail = S("li-failed.example.com");
+    ngx_int_t        n;
+
+    zone = ngx_autocert_test_zone_create();
+    if (zone == NULL
+        || ngx_autocert_requests_init_zone(zone, NULL) != NGX_OK)
+    {
+        CHECK(0, "list_issued: fresh zone");
+        return;
+    }
+
+    pool = ngx_create_pool(4096, ngx_cycle->log);
+    if (pool == NULL) {
+        CHECK(0, "list_issued: pool");
+        ngx_autocert_test_zone_destroy();
+        return;
+    }
+
+    /* empty tree => 0 listed */
+    out = ngx_array_create(pool, 8, sizeof(ngx_str_t));
+    n = ngx_autocert_requests_list_issued(zone, pool, out, 0);
+    CHECK(n == 0, "list_issued: empty tree lists nothing");
+
+    /* seed: 3 ISSUED + one each of REQUESTED / PENDING / FAILED (all skipped). */
+    (void) ngx_autocert_requests_ensure(zone, &iss1);
+    (void) ngx_autocert_requests_ensure(zone, &iss2);
+    (void) ngx_autocert_requests_ensure(zone, &iss3);
+    (void) ngx_autocert_requests_set_state(zone, &iss1,
+              NGX_AUTOCERT_REQ_ISSUED, 0);
+    (void) ngx_autocert_requests_set_state(zone, &iss2,
+              NGX_AUTOCERT_REQ_ISSUED, 0);
+    (void) ngx_autocert_requests_set_state(zone, &iss3,
+              NGX_AUTOCERT_REQ_ISSUED, 0);
+    (void) ngx_autocert_requests_ensure(zone, &req);   /* stays REQUESTED */
+    (void) ngx_autocert_requests_ensure(zone, &pend);
+    (void) ngx_autocert_requests_set_state(zone, &pend,
+              NGX_AUTOCERT_REQ_PENDING, 0);
+    (void) ngx_autocert_requests_ensure(zone, &fail);
+    (void) ngx_autocert_requests_set_state(zone, &fail,
+              NGX_AUTOCERT_REQ_FAILED, 0);
+
+    /* max=2 => only 2 of the 3 ISSUED listed. */
+    out = ngx_array_create(pool, 8, sizeof(ngx_str_t));
+    n = ngx_autocert_requests_list_issued(zone, pool, out, 2);
+    CHECK(n == 2, "list_issued: max bound caps the list at 2");
+    CHECK((ngx_uint_t) n == out->nelts, "list_issued: return count == out->nelts");
+
+    /* max=0 => all 3 ISSUED listed, nothing else. */
+    out = ngx_array_create(pool, 8, sizeof(ngx_str_t));
+    n = ngx_autocert_requests_list_issued(zone, pool, out, 0);
+    CHECK(n == 3, "list_issued: all ISSUED listed (non-ISSUED skipped)");
+
+    /* read-only: every node's state is unchanged by the walk. */
+    CHECK(ngx_autocert_requests_state(zone, &iss1) == NGX_AUTOCERT_REQ_ISSUED
+       && ngx_autocert_requests_state(zone, &iss2) == NGX_AUTOCERT_REQ_ISSUED
+       && ngx_autocert_requests_state(zone, &iss3) == NGX_AUTOCERT_REQ_ISSUED,
+          "list_issued: ISSUED nodes untouched (read-only)");
+    CHECK(ngx_autocert_requests_state(zone, &req) == NGX_AUTOCERT_REQ_REQUESTED
+       && ngx_autocert_requests_state(zone, &pend) == NGX_AUTOCERT_REQ_PENDING
+       && ngx_autocert_requests_state(zone, &fail) == NGX_AUTOCERT_REQ_FAILED,
+          "list_issued: non-ISSUED nodes untouched");
+
     ngx_destroy_pool(pool);
     ngx_autocert_test_zone_destroy();
 }
@@ -497,6 +601,7 @@ main(void)
     test_collision();
     test_version_mismatch_failsafe();
     test_drain();
+    test_list_issued();
 
     if (failures) {
         fprintf(stderr, "\n%d test(s) FAILED\n", failures);
