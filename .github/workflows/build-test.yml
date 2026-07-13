@@ -413,6 +413,16 @@ jobs:
             "$NGX/objs/src/core/ngx_string.o" -o test_ratecap
           ./test_ratecap
 
+          # A6 runtime-marker open semantics. Pure syscall-contract test (no nginx
+          # objects): plants a FIFO / symlink at <store>/<seg>/.autocert-runtime and
+          # asserts the driver's open flags refuse them WITHOUT blocking. A FIFO
+          # opened O_WRONLY without O_NONBLOCK blocks in openat() until a reader
+          # appears, which wedged the sole ACME driver loop (and its worker) after a
+          # successful runtime issuance; O_NOFOLLOW does not stop it.
+          gcc -Wall -Wextra -Werror \
+            "$GITHUB_WORKSPACE/tests/unit/test_marker_open.c" -o test_marker_open
+          ./test_marker_open
+
           # shellcheck disable=SC2086
           gcc -Wall -Werror $CORE_INC -c \
             "$GITHUB_WORKSPACE/src/ngx_autocert_alpn.c" -o alpn.o
