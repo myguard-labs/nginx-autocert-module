@@ -5,11 +5,18 @@
  * ask autocert to obtain a certificate for a host discovered at runtime (from a
  * Docker label `nda.tls.auto=true`), without either module linking the other.
  *
- * The two modules ship as distinct dlopen()ed .so files and nginx loads each
- * WITHOUT RTLD_GLOBAL, so they cannot cross-resolve C symbols (this is the same
- * wall documented in ngx_http_autocert_conf.h). The integration surface is
- * therefore NOT an exported function API but a NAMED shared-memory zone plus a
- * versioned on-shm layout that both sides agree on — exactly this header.
+ * The two modules ship as distinct dlopen()ed .so files. nginx opens them with
+ * RTLD_NOW|RTLD_GLOBAL (src/os/unix/ngx_dlopen.h), so a plain code-copy of the
+ * helpers below would export the SAME global symbol names from both .so files and
+ * ELF interposition would bind BOTH modules to whichever .so loaded first — one
+ * version's layout parsing another version's shm, defeating the api_version
+ * fail-safe on a skewed upgrade. Every definition in ngx_autocert_requests.c is
+ * therefore compiled with NGX_AUTOCERT_REQUESTS_API (hidden visibility): each .so
+ * binds its OWN copy, load order is irrelevant, and autocert being absent is not a
+ * link-time problem for the consumer. Consumers vendor BOTH the .h and the .c.
+ *
+ * The integration surface is thus not an exported function API but a NAMED
+ * shared-memory zone plus a versioned on-shm layout both sides agree on.
  *
  * Contract:
  *   - Zone name = NGX_AUTOCERT_REQUESTS_ZONE, size = NGX_AUTOCERT_REQUESTS_ZONE_SIZE,
@@ -19,12 +26,29 @@
  *     modules must also pass the SAME size (this macro) or nginx errors on mismatch.
  *   - Whichever module's postconfig runs first ngx_shared_memory_add()s it; the
  *     other attaches the same name (nginx dedups on name+tag). autocert registers
- *     ngx_autocert_requests_init_zone (stamps `api_version`); a consumer that may
- *     create the zone first registers ngx_autocert_requests_init_zone_consumer
- *     (stamps 0). Owner/consumer is decided by WHICH init callback runs, never by
- *     the callback's `data` arg (nginx passes the old cycle's data there, NULL on a
- *     fresh start, so it cannot identify the owner). A consumer reads the stamped
- *     `api_version` (0/absent => autocert not managing this zone => feature off).
+ *     ngx_autocert_requests_init_zone (owner: stamps `api_version`). A consumer
+ *     registers
+ *     ngx_autocert_requests_init_zone_consumer, but ONLY when `zone->init == NULL`
+ *     — an already-set init means autocert claimed the zone and must not be
+ *     overwritten. (`zone->data` is NOT the claim test: nginx leaves it NULL at
+ *     config time, so the old docs' `zone->data == NULL` check matched even when
+ *     autocert HAD claimed the zone, and the consumer then silently disabled it.)
+ *     A consumer reads the stamped `api_version` (0/absent => autocert not managing
+ *     this zone => feature off).
+ *   - RELOAD: nginx reuses the old mapping — it copies the old shm.addr onto the new
+ *     cycle's zone and calls init() WITHOUT setting shm.exists (ngx_cycle.c; that
+ *     flag only covers the platform/named-shm case and is always 0 on Linux). Since
+ *     the header lives IN the arena at `shpool->data`, which the reuse path carries
+ *     over untouched, a non-NULL `shpool->data` is the reuse signal and every
+ *     REQUESTED/PENDING/ISSUED/FAILED node survives a reconfigure. Keying off
+ *     `shm.exists` instead re-allocated a fresh header on every reload and orphaned
+ *     the whole tree. The init callback's `data` argument is unused.
+ *   - STAMP FOLLOWS THE CALLBACK, both directions. Each init RE-stamps the header it
+ *     inherits: owner => NGX_AUTOCERT_API_VERSION, consumer => 0. The callback that
+ *     runs is the claim, so enabling autocert on a reload promotes a consumer's
+ *     0-stamped zone to live, and DISABLING autocert (names removed / module
+ *     unloaded) demotes it back to 0 — leaving a stale nonzero stamp would tell the
+ *     consumer the feature is live while no driver exists to drain it.
  *   - The consumer inserts REQUESTED nodes itself via ngx_autocert_requests_ensure()
  *     (a shared helper compiled into both modules, operating on the same slab under
  *     the slab mutex). autocert's worker-0 driver polls REQUESTED nodes, orders,
@@ -45,6 +69,22 @@
 
 #include <ngx_config.h>
 #include <ngx_core.h>
+
+
+/*
+ * Visibility of the vendored helpers. nginx dlopen()s modules with RTLD_GLOBAL, so
+ * two .so files each carrying a copy of ngx_autocert_requests.c would export the
+ * same names and interpose on each other (first .so loaded wins for BOTH). Hiding
+ * them gives every module its own private copy: no interposition, no load-order
+ * dependency, no unresolved symbol when the other module is absent, and an N/N+1
+ * version skew degrades through the api_version check instead of silently parsing
+ * a foreign layout. Falls back to plain extern where the attribute is unsupported.
+ */
+#if defined(__GNUC__) || defined(__clang__)
+#define NGX_AUTOCERT_REQUESTS_API  __attribute__((visibility("hidden")))
+#else
+#define NGX_AUTOCERT_REQUESTS_API
+#endif
 
 
 /* Bump on ANY change to the on-shm layout below or the state enum. Consumer
@@ -106,24 +146,40 @@ typedef struct {
 
 
 /*
- * OWNER zone init callback (autocert side). Sets up the rbtree and stamps
- * `api_version = NGX_AUTOCERT_API_VERSION`. autocert registers this as
- * shm_zone->init. On reload the old cycle's tree (and its stamp) is inherited.
- * The `data` argument is IGNORED — nginx passes the old cycle's zone data there
- * (NULL on a fresh start), so it cannot indicate owner vs consumer; that is why
- * there are two distinct init callbacks rather than one branching on `data`.
+ * OWNER zone init callback (autocert side). autocert always registers this as
+ * shm_zone->init, overriding a consumer's callback if the consumer's postconfig
+ * ran first (the owner deliberately claims the zone).
+ *
+ * Fresh start: allocates the header at `shpool->data` and stamps
+ * `api_version = NGX_AUTOCERT_API_VERSION`.
+ * Reload: adopts the header already in the arena (see the RELOAD note at the top)
+ * — tree and all — and re-stamps it NGX_AUTOCERT_API_VERSION, so a zone a consumer
+ * created with stamp 0 while autocert was disabled becomes live the moment autocert
+ * is enabled. Owner/consumer is decided by WHICH callback runs; the `data` argument
+ * is unused.
  */
-ngx_int_t ngx_autocert_requests_init_zone(ngx_shm_zone_t *shm_zone, void *data);
+NGX_AUTOCERT_REQUESTS_API ngx_int_t
+ngx_autocert_requests_init_zone(ngx_shm_zone_t *shm_zone, void *data);
 
 
 /*
- * CONSUMER zone init callback. A consumer that may create the zone BEFORE autocert
- * attaches (autocert absent or later in load order) registers this instead; it
+ * CONSUMER zone init callback. A consumer registers this ONLY when
+ * `shm_zone->init == NULL` (i.e. autocert has not already claimed the zone); it
  * builds the same layout but stamps `api_version = 0`, so the version check reports
- * "not managed" and the consumer degrades gracefully. If autocert is present it
- * creates the zone first and this is never invoked. `data` ignored (see above).
+ * "not managed" and the consumer degrades gracefully. On reload it adopts the
+ * arena's existing header exactly like the owner callback (the tree survives) and
+ * re-stamps it 0.
+ *
+ * That re-stamp is deliberate and is the FAIL-SAFE direction: this callback runs
+ * only when autocert did NOT install its owner callback in this cycle, i.e. autocert
+ * is absent or has no issuable names. Leaving an inherited nonzero stamp in place
+ * would tell the consumer "autocert is managing this zone" when no driver exists to
+ * drain it — ensure() would keep accepting REQUESTED nodes up to the cap and serve.c
+ * would admit an SNI whose state can never advance. Stamping 0 makes the feature
+ * inert instead.
  */
-ngx_int_t ngx_autocert_requests_init_zone_consumer(ngx_shm_zone_t *shm_zone,
+NGX_AUTOCERT_REQUESTS_API ngx_int_t
+ngx_autocert_requests_init_zone_consumer(ngx_shm_zone_t *shm_zone,
     void *data);
 
 
@@ -135,7 +191,8 @@ ngx_int_t ngx_autocert_requests_init_zone_consumer(ngx_shm_zone_t *shm_zone,
  * allocating. Returns the resulting ngx_autocert_request_state_e as an ngx_int_t.
  * Callable from any worker (shm is mapped everywhere). Bad zone => REQ_UNKNOWN.
  */
-ngx_int_t ngx_autocert_requests_ensure(ngx_shm_zone_t *shm_zone,
+NGX_AUTOCERT_REQUESTS_API ngx_int_t
+ngx_autocert_requests_ensure(ngx_shm_zone_t *shm_zone,
     ngx_str_t *host);
 
 
@@ -144,7 +201,8 @@ ngx_int_t ngx_autocert_requests_ensure(ngx_shm_zone_t *shm_zone,
  * Returns the ngx_autocert_request_state_e; REQ_UNKNOWN if absent or bad input.
  * Lowercases + validates the same way as ensure so a hit is charset-consistent.
  */
-ngx_int_t ngx_autocert_requests_state(ngx_shm_zone_t *shm_zone,
+NGX_AUTOCERT_REQUESTS_API ngx_int_t
+ngx_autocert_requests_state(ngx_shm_zone_t *shm_zone,
     ngx_str_t *host);
 
 
@@ -153,7 +211,8 @@ ngx_int_t ngx_autocert_requests_state(ngx_shm_zone_t *shm_zone,
  * for FAILED, bumps fail_count + stamps next_eligible = now + backoff. No-op if
  * the host is absent. Under the slab mutex. Returns NGX_OK / NGX_ERROR (bad arg).
  */
-ngx_int_t ngx_autocert_requests_set_state(ngx_shm_zone_t *shm_zone,
+NGX_AUTOCERT_REQUESTS_API ngx_int_t
+ngx_autocert_requests_set_state(ngx_shm_zone_t *shm_zone,
     ngx_str_t *host, ngx_uint_t state, time_t next_eligible);
 
 
@@ -177,7 +236,8 @@ ngx_int_t ngx_autocert_requests_set_state(ngx_shm_zone_t *shm_zone,
  * `out` are valid and still owned by the caller). Host strings in `out` are
  * ngx_str_t with pool-owned data; safe to use after the lock is dropped.
  */
-ngx_int_t ngx_autocert_requests_drain(ngx_shm_zone_t *shm_zone, ngx_pool_t *pool,
+NGX_AUTOCERT_REQUESTS_API ngx_int_t
+ngx_autocert_requests_drain(ngx_shm_zone_t *shm_zone, ngx_pool_t *pool,
     ngx_array_t *out, ngx_uint_t max);
 
 
@@ -200,7 +260,8 @@ ngx_int_t ngx_autocert_requests_drain(ngx_shm_zone_t *shm_zone, ngx_pool_t *pool
  * truncated list just re-lists the rest next scan. Host strings in `out` are
  * pool-owned ngx_str_t, safe after unlock.
  */
-ngx_int_t ngx_autocert_requests_list_issued(ngx_shm_zone_t *shm_zone,
+NGX_AUTOCERT_REQUESTS_API ngx_int_t
+ngx_autocert_requests_list_issued(ngx_shm_zone_t *shm_zone,
     ngx_pool_t *pool, ngx_array_t *out, ngx_uint_t max);
 
 

@@ -62,14 +62,33 @@ ngx_autocert_challenge_init_zone(ngx_shm_zone_t *shm_zone, void *data)
     ngx_slab_pool_t              *shpool;
     ngx_autocert_challenge_sh_t  *sh;
 
-    /* Inherit the previous incarnation's tree across reload (noreuse off). */
-    if (shm_zone->shm.exists) {
+    (void) data;   /* unused: the inherited header lives in the arena, see below */
+
+    shpool = (ngx_slab_pool_t *) shm_zone->shm.addr;
+
+    /*
+     * Inherit the previous incarnation's tree across reload (noreuse off).
+     *
+     * The test is `shpool->data`, NOT `shm.exists`: nginx's zone-REUSE path
+     * (ngx_cycle.c) copies the old mapping's shm.addr onto the new cycle's zone
+     * and calls init() WITHOUT setting shm.exists — that flag only covers the
+     * platform/named-shm case and is always 0 here on Linux. Keying off it
+     * re-allocated a fresh header on EVERY reload, orphaning the whole tree (and
+     * leaking the old header into the slab). The arena itself is never re-inited
+     * on that path, so a non-NULL shpool->data is the reliable reuse signal.
+     * (The arena is freshly mmap'd zero-filled, so NULL really does mean "new".)
+     *
+     * Concretely: without this, an `nginx -s reload` (logrotate, any config
+     * change) during an in-flight order dropped the http-01 challenge token, the
+     * CA's validation GET then 404'd, and the order failed. `data` (the old
+     * zone's) is unused: this header lives at shpool->data, while shm_zone->data
+     * carries amcf for the module's own use.
+     */
+    if (shpool->data != NULL) {
         ngx_log_debug0(NGX_LOG_DEBUG_CORE, shm_zone->shm.log, 0,
                        "autocert: challenge zone inherited from old cycle");
         return NGX_OK;
     }
-
-    shpool = (ngx_slab_pool_t *) shm_zone->shm.addr;
 
     sh = ngx_slab_alloc(shpool, sizeof(ngx_autocert_challenge_sh_t));
     if (sh == NULL) {

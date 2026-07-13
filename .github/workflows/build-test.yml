@@ -236,6 +236,24 @@ jobs:
           # Full build: `nginx -t` below needs the server binary, not just the .so.
           make > /tmp/make.log 2>&1 || { tail -40 /tmp/make.log; exit 1; }
           test -f objs/ngx_http_autocert_module.so
+
+          # ABI guard: the runtime-cert helpers must NOT be dynamic symbols.
+          # nginx dlopen()s modules with RTLD_GLOBAL, and a consumer module
+          # vendors a COPY of ngx_autocert_requests.c — if both .so files export
+          # these names, ELF interposition binds BOTH modules to whichever loaded
+          # first, so an N/N+1 version skew would run one version's code against
+          # the other's shm layout and defeat the api_version fail-safe. They are
+          # declared NGX_AUTOCERT_REQUESTS_API (hidden visibility) to prevent it.
+          exported="$(nm -D objs/ngx_http_autocert_module.so \
+                      | grep -c ' T ngx_autocert_requests_' || true)"
+          if [ "$exported" != "0" ]; then
+            echo "✗ $exported ngx_autocert_requests_* helper(s) exported from the .so;" \
+                 "they must be hidden (NGX_AUTOCERT_REQUESTS_API)"
+            nm -D objs/ngx_http_autocert_module.so | grep ' T ngx_autocert_requests_'
+            exit 1
+          fi
+          echo "✓ runtime-cert helpers are hidden (0 exported, no interposition)"
+
           BIN=objs/nginx
           test -x "$BIN"
           PREFIX=/tmp/guard; mkdir -p "$PREFIX/conf" "$PREFIX/logs"
@@ -371,8 +389,9 @@ jobs:
           ./test_challenge
 
           # autolabel A1: runtime cert-request registry. Owner/consumer is
-          # selected by which init callback runs (not the `data` param, which is
-          # (void)-cast), so the TU builds clean under -Wextra -Werror.
+          # selected by which init callback runs; the `data` param carries the
+          # OLD cycle's shm header on nginx's zone-reuse (reload) path and is
+          # adopted, which the reload tests here exercise.
           # shellcheck disable=SC2086
           gcc -Wall -Wextra -Werror $CORE_INC -c \
             "$GITHUB_WORKSPACE/src/ngx_autocert_requests.c" -o requests.o

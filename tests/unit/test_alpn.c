@@ -212,6 +212,53 @@ test_three_and_collision(ngx_shm_zone_t *zone)
 }
 
 
+/*
+ * RELOAD. nginx's zone-REUSE path copies the old arena onto the new cycle's zone
+ * and calls init() WITHOUT setting shm.exists (that flag only covers the
+ * platform/named-shm case, and is always 0 on Linux). init_zone used to key off
+ * shm.exists, so EVERY reload re-allocated the header and orphaned the tree: an
+ * `nginx -s reload` during an in-flight order dropped the tls-alpn-01 challenge
+ * cert, the CA's validation handshake then found nothing, and the order failed.
+ */
+static void
+test_reload_preserves_certs(void)
+{
+    ngx_shm_zone_t          *old, *new_zone;
+    ngx_autocert_alpn_sh_t  *sh_before, *sh_after;
+    ngx_str_t                d = S("inflight.example.com");
+    ngx_str_t                c = S("-----BEGIN CERTIFICATE-----inflight");
+    ngx_str_t                k = S("-----BEGIN PRIVATE KEY-----inflight");
+    ngx_str_t                oc, ok;
+
+    old = ngx_autocert_test_zone_create();
+    CHECK(old != NULL, "reload: zone create");
+    CHECK(ngx_autocert_alpn_init_zone(old, NULL) == NGX_OK,
+          "reload: init (fresh start)");
+
+    sh_before = ((ngx_slab_pool_t *) old->shm.addr)->data;
+    CHECK(sh_before != NULL, "reload: fresh init allocates the header");
+
+    CHECK(ngx_autocert_alpn_set(old, &d, &c, &k) == NGX_OK,
+          "reload: challenge cert stored before the reload");
+
+    /* --- the reload --- */
+    new_zone = ngx_autocert_test_zone_reload(old);
+    CHECK(ngx_autocert_alpn_init_zone(new_zone, NULL) == NGX_OK,
+          "reload: init on the reused zone");
+
+    sh_after = ((ngx_slab_pool_t *) new_zone->shm.addr)->data;
+    CHECK(sh_after == sh_before,
+          "reload: header ADOPTED, not re-allocated (no orphaned tree, no leak)");
+
+    oc.len = 0; oc.data = NULL; ok.len = 0; ok.data = NULL;
+    CHECK(ngx_autocert_alpn_get(new_zone, &d, pool, &oc, &ok) == NGX_OK
+          && eq(&oc, &c) && eq(&ok, &k),
+          "reload: in-flight tls-alpn-01 cert still served after reload");
+
+    ngx_autocert_test_zone_destroy();
+}
+
+
 int
 main(void)
 {
@@ -249,6 +296,9 @@ main(void)
     test_three_and_collision(zone);
 
     ngx_autocert_test_zone_destroy();
+
+    test_reload_preserves_certs();   /* owns its own zone */
+
     ngx_destroy_pool(pool);
 
     if (failures) {

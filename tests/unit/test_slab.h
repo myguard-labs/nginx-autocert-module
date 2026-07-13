@@ -26,6 +26,7 @@
 
 static u_char       *ngx_autocert_test_arena;
 static ngx_shm_zone_t ngx_autocert_test_zone;
+static ngx_shm_zone_t ngx_autocert_test_zone_next;   /* the "new cycle" zone */
 
 /*
  * Build a usable shm zone over a malloc'd arena. Returns the zone pointer the
@@ -45,6 +46,10 @@ ngx_autocert_test_zone_create(void)
     memset(ngx_autocert_test_arena, 0, NGX_AUTOCERT_TEST_ARENA);
 
     ngx_memzero(&ngx_autocert_test_zone, sizeof(ngx_shm_zone_t));
+    /* also clear any "new cycle" zone a previous test left pointing at the arena
+     * we just freed, so a stale struct can never be reused by accident */
+    ngx_memzero(&ngx_autocert_test_zone_next, sizeof(ngx_shm_zone_t));
+
     ngx_autocert_test_zone.shm.addr = ngx_autocert_test_arena;
     ngx_autocert_test_zone.shm.size = NGX_AUTOCERT_TEST_ARENA;
     ngx_autocert_test_zone.shm.exists = 0;
@@ -64,6 +69,29 @@ ngx_autocert_test_zone_create(void)
     ngx_slab_init(sp);
 
     return &ngx_autocert_test_zone;
+}
+
+
+/*
+ * Simulate nginx's zone-REUSE path across `nginx -s reload` (ngx_cycle.c): the
+ * new cycle gets a FRESH, zeroed ngx_shm_zone_t whose shm.addr is copied from the
+ * old zone — shm.exists stays 0, no slab re-init — and whose init callback is
+ * invoked with the OLD zone's `data`. Returns the new cycle's zone; the caller
+ * then calls the init callback with `old->data` exactly as nginx would.
+ * The old zone struct stays valid (nothing frees the arena).
+ */
+static ngx_shm_zone_t *
+ngx_autocert_test_zone_reload(ngx_shm_zone_t *old)
+{
+    ngx_shm_t  shm = old->shm;   /* copy first: `old` may BE the struct we zero
+                                  * below when a test reloads twice in a row */
+
+    ngx_memzero(&ngx_autocert_test_zone_next, sizeof(ngx_shm_zone_t));
+
+    ngx_autocert_test_zone_next.shm = shm;
+    ngx_autocert_test_zone_next.shm.exists = 0;   /* nginx does NOT set this */
+
+    return &ngx_autocert_test_zone_next;
 }
 
 static void

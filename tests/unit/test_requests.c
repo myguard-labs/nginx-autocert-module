@@ -91,6 +91,158 @@ test_version_stamp(void)
 }
 
 
+/*
+ * RELOAD (the central regression for the 2026-07-13 MAJOR): nginx's zone-reuse
+ * path hands the new cycle's init callback the OLD zone's `data` and does NOT set
+ * shm.exists. Before the fix the callback keyed off shm.exists alone, re-allocated
+ * the header on every reload, and orphaned the entire request tree. Assert every
+ * state survives, plus the count, the backoff stamp, and both stamp-transition
+ * rules (owner promotes a consumer's 0; consumer never downgrades the owner's N).
+ */
+static void
+test_reload_preserves_tree(void)
+{
+    ngx_shm_zone_t              *old, *new_zone;
+    ngx_slab_pool_t             *shpool;
+    ngx_autocert_requests_sh_t  *sh, *sh_before;
+    ngx_str_t                    req = S("requested.example.com");
+    ngx_str_t                    pend = S("pending.example.com");
+    ngx_str_t                    iss = S("issued.example.com");
+    ngx_str_t                    fail = S("failed.example.com");
+    time_t                       held;
+
+    old = ngx_autocert_test_zone_create();
+    CHECK(old != NULL, "reload: zone create");
+    CHECK(ngx_autocert_requests_init_zone(old, NULL) == NGX_OK,
+          "reload: owner init (fresh start)");
+
+    shpool = (ngx_slab_pool_t *) old->shm.addr;
+    sh_before = shpool->data;
+
+    /* one node in every state the driver can leave behind */
+    (void) ngx_autocert_requests_ensure(old, &req);
+    (void) ngx_autocert_requests_ensure(old, &pend);
+    (void) ngx_autocert_requests_ensure(old, &iss);
+    (void) ngx_autocert_requests_ensure(old, &fail);
+
+    (void) ngx_autocert_requests_set_state(old, &pend,
+                                           NGX_AUTOCERT_REQ_PENDING, 0);
+    (void) ngx_autocert_requests_set_state(old, &iss,
+                                           NGX_AUTOCERT_REQ_ISSUED, 0);
+
+    /* a FAILED node still inside its backoff window (next_eligible in the future) */
+    held = ngx_time() + 3600;
+    (void) ngx_autocert_requests_set_state(old, &fail,
+                                           NGX_AUTOCERT_REQ_FAILED, held);
+
+    CHECK(sh_before->count == 4, "reload: 4 nodes before reload");
+
+    /* --- the reload --- */
+    new_zone = ngx_autocert_test_zone_reload(old);
+    CHECK(ngx_autocert_requests_init_zone(new_zone, NULL) == NGX_OK,
+          "reload: owner init on the reused zone");
+
+    sh = ((ngx_slab_pool_t *) new_zone->shm.addr)->data;
+    CHECK(sh == sh_before, "reload: header ADOPTED, not re-allocated");
+    CHECK(sh->api_version == NGX_AUTOCERT_API_VERSION,
+          "reload: api_version stamp survives");
+    CHECK(sh->count == 4, "reload: node count survives");
+
+    CHECK(ngx_autocert_requests_state(new_zone, &req)
+              == NGX_AUTOCERT_REQ_REQUESTED,
+          "reload: REQUESTED node survives");
+    CHECK(ngx_autocert_requests_state(new_zone, &pend)
+              == NGX_AUTOCERT_REQ_PENDING,
+          "reload: PENDING node survives");
+    CHECK(ngx_autocert_requests_state(new_zone, &iss)
+              == NGX_AUTOCERT_REQ_ISSUED,
+          "reload: ISSUED node survives");
+    CHECK(ngx_autocert_requests_state(new_zone, &fail)
+              == NGX_AUTOCERT_REQ_FAILED,
+          "reload: FAILED node survives");
+
+    /* the backoff gate must survive too, or a held FAILED node is re-ordered
+     * immediately on every reload (reload becomes a retry-storm amplifier) */
+    {
+        ngx_array_t  *out;
+        ngx_pool_t   *pool;
+        ngx_int_t     n;
+
+        pool = ngx_create_pool(1024, NULL);
+        CHECK(pool != NULL, "reload: drain pool");
+        out = ngx_array_create(pool, 4, sizeof(ngx_str_t));
+        CHECK(out != NULL, "reload: drain array");
+
+        n = ngx_autocert_requests_drain(new_zone, pool, out, 0);
+        CHECK(n == 1, "reload: drain claims only the REQUESTED node "
+                      "(FAILED still held by its backoff)");
+        CHECK(ngx_autocert_requests_state(new_zone, &fail)
+                  == NGX_AUTOCERT_REQ_FAILED,
+              "reload: held FAILED node not re-claimed");
+
+        ngx_destroy_pool(pool);
+    }
+
+    ngx_autocert_test_zone_destroy();
+}
+
+
+/*
+ * Stamp transitions across the owner/consumer boundary.
+ */
+static void
+test_reload_stamp_transitions(void)
+{
+    ngx_shm_zone_t              *old, *new_zone;
+    ngx_autocert_requests_sh_t  *sh;
+    ngx_str_t                    h = S("carried.example.com");
+
+    /* consumer created the zone (autocert absent) -> stamp 0, feature off */
+    old = ngx_autocert_test_zone_create();
+    CHECK(ngx_autocert_requests_init_zone_consumer(old, NULL) == NGX_OK,
+          "stamp: consumer init (fresh)");
+    sh = ((ngx_slab_pool_t *) old->shm.addr)->data;
+    CHECK(sh->api_version == 0, "stamp: consumer-created zone stamps 0");
+    CHECK(ngx_autocert_requests_ensure(old, &h) == NGX_AUTOCERT_REQ_UNKNOWN,
+          "stamp: helpers fail safe on a stamp-0 zone");
+
+    /* autocert is enabled and its postconfig now claims the zone: the owner
+     * callback runs on the reused arena and PROMOTES the 0 stamp */
+    new_zone = ngx_autocert_test_zone_reload(old);
+    CHECK(ngx_autocert_requests_init_zone(new_zone, NULL) == NGX_OK,
+          "stamp: owner init adopts the consumer's zone");
+    sh = ((ngx_slab_pool_t *) new_zone->shm.addr)->data;
+    CHECK(sh->api_version == NGX_AUTOCERT_API_VERSION,
+          "stamp: owner PROMOTES 0 -> NGX_AUTOCERT_API_VERSION");
+    CHECK(ngx_autocert_requests_ensure(new_zone, &h)
+              == NGX_AUTOCERT_REQ_REQUESTED,
+          "stamp: feature live after promotion");
+
+    /* ...and a consumer re-attaching on a LATER reload must not downgrade it
+     * back to 0 (that would disable a live tree mid-reload) */
+    /* ...and DISABLING autocert (names removed / module unloaded) must demote the
+     * zone back to 0 on the next reload: only the consumer callback runs, no driver
+     * exists to drain the tree, so leaving a live stamp would let ensure() keep
+     * accepting nodes that never advance (fail-OPEN). The tree itself survives. */
+    {
+        ngx_shm_zone_t  *third;
+
+        third = ngx_autocert_test_zone_reload(new_zone);
+        CHECK(ngx_autocert_requests_init_zone_consumer(third, NULL) == NGX_OK,
+              "stamp: consumer init on a previously-owned zone");
+        sh = ((ngx_slab_pool_t *) third->shm.addr)->data;
+        CHECK(sh->api_version == 0,
+              "stamp: autocert disabled -> stamp DEMOTED to 0 (fail-safe)");
+        CHECK(sh->count == 1, "stamp: the tree itself survives the demotion");
+        CHECK(ngx_autocert_requests_state(third, &h)
+                  == NGX_AUTOCERT_REQ_UNKNOWN,
+              "stamp: helpers inert again on the demoted zone");
+    }
+
+    ngx_autocert_test_zone_destroy();
+}
+
+
 static void
 test_ensure_idempotent(ngx_shm_zone_t *zone)
 {
@@ -602,6 +754,8 @@ main(void)
     test_version_mismatch_failsafe();
     test_drain();
     test_list_issued();
+    test_reload_preserves_tree();
+    test_reload_stamp_transitions();
 
     if (failures) {
         fprintf(stderr, "\n%d test(s) FAILED\n", failures);

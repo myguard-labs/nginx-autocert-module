@@ -1387,7 +1387,7 @@ ngx_http_autocert_postconfig(ngx_conf_t *cf)
 
         /* Tag = NULL, NOT a per-module address: this zone is shared by NAME
          * across two separately-dlopen()ed .so files, and each .so has its own
-         * &ngx_autocert_requests_zone_tag address, so a non-NULL tag would make
+         * address for any global, so a non-NULL tag would make
          * ngx_shared_memory_add() reject the second module's attach as a
          * different use of the same name. Both sides pass NULL; the on-shm
          * api_version stamp (checked in every helper) is the real compat gate. */
@@ -1396,9 +1396,13 @@ ngx_http_autocert_postconfig(ngx_conf_t *cf)
         if (amcf->requests_zone == NULL) {
             return NGX_ERROR;
         }
-        /* OWNER init: stamps NGX_AUTOCERT_API_VERSION (consumer registers the
-         * _consumer variant which stamps 0). Owner/consumer is decided by WHICH
-         * init callback runs, never by the callback's `data` arg (unreliable). */
+        /* OWNER init, installed UNCONDITIONALLY: autocert deliberately claims the
+         * zone even if a consumer's postconfig ran first and installed its own
+         * (stamp-0) callback — the owner's callback promotes that 0 stamp to
+         * NGX_AUTOCERT_API_VERSION. A consumer, conversely, may only install its
+         * callback when zone->init is still NULL. Owner/consumer is decided by
+         * WHICH init callback runs, never by zone->data — that field carries the
+         * reload handoff (the old cycle's shm header), not an ownership marker. */
         amcf->requests_zone->init = ngx_autocert_requests_init_zone;
     }
 

@@ -497,10 +497,13 @@ module.
 
 A separate nginx module can ask autocert to obtain and serve a certificate for a
 host it discovers at runtime (e.g. from a Docker label), without either module
-linking the other. nginx dlopens each module's `.so` without `RTLD_GLOBAL`, so
-C symbols never cross-resolve between them — the integration surface is a
-**named shared-memory zone** with a versioned on-shm layout, not an exported
-function API. The full contract (zone name/size, state enum, locking rule,
+linking the other. The integration surface is a **named shared-memory zone** with
+a versioned on-shm layout, not an exported function API: the consumer vendors
+`ngx_autocert_requests.{h,c}` and both modules operate on the same slab. The
+accessors are compiled with hidden visibility, so each `.so` binds its own copy —
+nginx loads modules with `RTLD_GLOBAL`, and without hiding, two copies of the same
+helper would interpose and one version's code would parse another version's shm.
+The full contract (zone name/size, state enum, locking rule,
 helper signatures) is documented in
 [`src/ngx_autocert_requests.h`](src/ngx_autocert_requests.h); summary below.
 A task-oriented consumer walkthrough (attach the zone, enqueue, poll, worked

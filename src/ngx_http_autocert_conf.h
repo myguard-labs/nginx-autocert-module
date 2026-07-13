@@ -4,11 +4,13 @@
  * (ngx_autocert_conf.c) that the CORE helper module links in.
  *
  * Why a shared header instead of a cross-.so symbol: the addon ships two
- * separate .so files (CORE process module, HTTP module). nginx dlopen()s each
- * without RTLD_GLOBAL, so the CORE module cannot resolve a symbol defined in
- * the HTTP module. The accessor is therefore compiled INTO the CORE module and
- * reads the HTTP main conf out of the shared cycle; both TUs must agree on the
- * struct layout, which lives here.
+ * separate .so files (CORE process module, HTTP module) and nginx does not
+ * guarantee their load order, so the CORE module must not depend on a symbol
+ * defined in the HTTP module's .so (an unresolved direct call would make the
+ * CORE .so fail to dlopen when it is loaded first, or the HTTP module absent).
+ * The accessor is therefore compiled INTO the CORE module and reads the HTTP
+ * main conf out of the shared cycle; both TUs must agree on the struct layout,
+ * which lives here.
  */
 
 #ifndef _NGX_HTTP_AUTOCERT_CONF_H_INCLUDED_
