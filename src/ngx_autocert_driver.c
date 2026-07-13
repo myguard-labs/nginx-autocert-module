@@ -2156,6 +2156,7 @@ ngx_autocert_runtime_seed(ngx_cycle_t *cycle)
     u_char                hostbuf[NGX_AUTOCERT_REQUEST_NAME_MAX];
     ngx_str_t             host;
     ngx_uint_t            key_type;
+    ngx_int_t             rc;
 
     if (ngx_autocert_get_conf(cycle, &acf) != NGX_OK
         || acf.requests_zone == NULL
@@ -2251,15 +2252,28 @@ ngx_autocert_runtime_seed(ngx_cycle_t *cycle)
             continue;
         }
 
-        if (ngx_autocert_requests_ensure(acf.requests_zone, &host)
-            != NGX_AUTOCERT_REQ_DENIED)
-        {
-            (void) ngx_autocert_requests_set_state(acf.requests_zone, &host,
-                                                    NGX_AUTOCERT_REQ_ISSUED, 0);
-            ngx_log_error(NGX_LOG_NOTICE, cycle->log, 0,
-                          "autocert: A6 restored runtime name \"%V\" from disk",
-                          &host);
+        /* REQ_UNKNOWN means the insert did not happen (bad zone/host), and
+         * REQ_DENIED is terminal — in neither case is there a node to move to
+         * ISSUED, so claiming a restore would be fail-open. Only log the
+         * restore once set_state() has actually committed it. */
+        rc = ngx_autocert_requests_ensure(acf.requests_zone, &host);
+        if (rc == NGX_AUTOCERT_REQ_UNKNOWN || rc == NGX_AUTOCERT_REQ_DENIED) {
+            continue;
         }
+
+        if (ngx_autocert_requests_set_state(acf.requests_zone, &host,
+                                            NGX_AUTOCERT_REQ_ISSUED, 0)
+            != NGX_OK)
+        {
+            ngx_log_error(NGX_LOG_WARN, cycle->log, 0,
+                          "autocert: A6 could not restore runtime name \"%V\"",
+                          &host);
+            continue;
+        }
+
+        ngx_log_error(NGX_LOG_NOTICE, cycle->log, 0,
+                      "autocert: A6 restored runtime name \"%V\" from disk",
+                      &host);
     }
 
     (void) closedir(dh);                 /* also closes cfd via fdopendir */
