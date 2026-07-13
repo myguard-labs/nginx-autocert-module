@@ -166,7 +166,7 @@ echo "✓ config accepted"
 
 echo "== start =="
 "$SERVER_BIN" -p "$PREFIX" -c "$PREFIX/conf/nginx.conf"
-for _ in $(seq 1 30); do [ -s "$PREFIX/logs/nginx.pid" ] && break; sleep 0.2; done
+for _ in $(seq 1 30); do [ -s "$PREFIX/logs/nginx.pid" ] && break; sleep 1; done
 MASTER=$(cat "$PREFIX/logs/nginx.pid" 2>/dev/null) || { echo "::error::no master pidfile"; exit 1; }
 
 echo "== wait: test host seeded into requests_zone =="
