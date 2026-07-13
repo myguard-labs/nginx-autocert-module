@@ -11,27 +11,39 @@ top of it. If the two disagree, the header wins.
 
 ## Why a shm zone and not a function call
 
-nginx loads each dynamic module's `.so` with `dlopen(..., RTLD_LOCAL)` (no
-`RTLD_GLOBAL`), so C symbols in autocert's `.so` are invisible to any other
-module's `.so` and vice versa — there is no cross-module `dlsym` to lean on
-(this is the same wall `ngx_http_autocert_conf.h` documents for autocert's own
-internal accessor). The only thing both modules can agree on without linking
-is a **named nginx shared-memory zone**, attached by both under the same
-name, with a versioned struct layout compiled into both `.so`s from the same
-header file (vendor/copy `ngx_autocert_requests.h` into the consumer module's
-tree — it has no other dependencies, just `ngx_core.h`).
+The state both modules must agree on lives in shared memory anyway (it is read
+and written from every worker), so the integration surface is a **named nginx
+shared-memory zone** plus a versioned on-shm layout, not an exported function
+API. Both modules attach the same zone by name and compile the same accessor
+code against the same struct layout.
 
-## 1. Compile the header into your module
+Crucially, this is **not** because the symbols are invisible to each other:
+nginx `dlopen()`s modules with `RTLD_NOW | RTLD_GLOBAL`
+(`src/os/unix/ngx_dlopen.h`), so every module's globals land in the process's
+global symbol scope. That is precisely why the accessors must be **hidden**
+(see below) — otherwise two `.so`s carrying a copy of the same helper would
+interpose on each other and whichever loaded first would serve both, so an
+N/N+1 version skew would parse one layout with the other's code.
 
-Copy `src/ngx_autocert_requests.h` into your module's source tree (no `.c` to
-copy — the functions are provided by whichever module's `.so` actually
-creates/owns the zone; declaring the prototypes is enough for the linker,
-since both `.so`s attach the same zone by name and only autocert's `.so`
-needs the implementation loaded into the process for the driver side to run).
-Bump-tracking: if autocert ever changes `NGX_AUTOCERT_API_VERSION`, re-vendor
-the header — a stale copy with an old version number will simply see the
-zone's stamped version compare unequal and label the integration "off",
-never mis-parse a foreign layout.
+## 1. Compile the header AND the .c into your module
+
+Vendor **both** `src/ngx_autocert_requests.h` and `src/ngx_autocert_requests.c`
+into your module's source tree and add the `.c` to your `config`'s
+`ngx_addon_srcs`. They have no dependencies beyond `ngx_core.h`.
+
+Every definition is declared `NGX_AUTOCERT_REQUESTS_API`
+(`__attribute__((visibility("hidden")))`), so your `.so` binds its **own private
+copy**:
+
+- load order between the two modules does not matter;
+- autocert being absent is not a link error (there are no unresolved symbols to
+  satisfy);
+- no ELF interposition, so a version skew degrades through the `api_version`
+  check instead of silently running the wrong layout's code.
+
+Bump-tracking: if autocert changes `NGX_AUTOCERT_API_VERSION`, re-vendor both
+files. A stale copy simply sees the zone's stamped version compare unequal and
+labels the integration "off" — it never mis-parses a foreign layout.
 
 ## 2. Attach the zone in your module's postconfig
 
@@ -47,10 +59,16 @@ my_module_postconfig(ngx_conf_t *cf)
         return NGX_ERROR;
     }
 
-    /* Only set init if nobody has claimed it yet — if autocert's postconfig
-     * ran first, zone->data already points at ITS init callback and you must
-     * not overwrite it. */
-    if (zone->data == NULL) {
+    /* Install the consumer callback ONLY if nobody has claimed the zone yet.
+     * A non-NULL init means autocert's postconfig already ran and installed its
+     * OWNER callback; overwriting it would stamp api_version 0 and disable
+     * runtime certs even though autocert is present.
+     *
+     * Do NOT test zone->data — nginx leaves it NULL at config time, and this
+     * module uses that field for the reload handoff (it carries the old cycle's
+     * shm header into the new cycle's init callback). It is not an ownership
+     * marker. */
+    if (zone->init == NULL) {
         zone->init = ngx_autocert_requests_init_zone_consumer;
     }
 
@@ -62,10 +80,14 @@ my_module_postconfig(ngx_conf_t *cf)
 Whichever module's postconfig runs first actually creates the zone; the other
 attaches the same name (nginx dedups by name+tag — hence the tag MUST be
 `NULL` on both sides, or `ngx_shared_memory_add()` will see two different
-"uses" of the same name and error out). Load-order between the two modules is
-NOT guaranteed by config file order alone in every nginx version, so always
-install a consumer-side init callback defensively as above rather than
-assuming autocert loads first.
+"uses" of the same name and error out). Load order between the two modules is
+NOT guaranteed by config file order alone, so both sides must be order-safe:
+
+| postconfig order | what happens |
+|---|---|
+| autocert first | autocert installs the owner init; your `zone->init == NULL` test fails, you leave it alone; zone stamps `NGX_AUTOCERT_API_VERSION`. |
+| consumer first | you install the consumer init; autocert then **overrides** it with the owner init (it deliberately claims the zone) and stamps `NGX_AUTOCERT_API_VERSION`. |
+| autocert absent (or no autocert names) | only your consumer init runs, stamps `0`; every helper fails safe and the runtime-cert feature is inert. |
 
 ## 3. Check the zone is actually live before using it
 

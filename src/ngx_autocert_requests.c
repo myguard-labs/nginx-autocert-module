@@ -132,14 +132,19 @@ ngx_autocert_requests_insert_value(ngx_rbtree_node_t *temp,
 /*
  * Shared init body. `api_version` selects the stamp: the OWNER (autocert) passes
  * NGX_AUTOCERT_API_VERSION, a CONSUMER-first creation passes 0 ("layout exists but
- * autocert is not managing it"). We do NOT derive owner/consumer from the callback
- * `data` argument: nginx passes the OLD cycle's zone data there (NULL on a fresh
- * start), so `data` never reliably identifies the owner. The two sides therefore
- * register two distinct init callbacks (owner_init / consumer_init) instead.
+ * autocert is not managing it"). Owner/consumer is decided by WHICH init callback
+ * runs (the two thin wrappers below), never by the `data` argument.
  *
- * On reload (shm.exists) the old incarnation's tree — including its stamped
- * api_version — is inherited untouched, so a consumer-first-then-autocert-attach
- * across a reconfigure keeps whatever the first owner stamped.
+ * RELOAD HANDOFF. nginx's zone-reuse path (ngx_cycle.c) copies the old mapping's
+ * shm.addr onto the new zone and calls init(new_zone, old_zone->data) WITHOUT
+ * setting shm.exists — that flag only covers the platform/named-shm case. So
+ * `data` (the old cycle's shm_zone->data, which is exactly the header we publish
+ * below) is the reliable reuse signal, and shm.exists alone is not: relying on it
+ * re-allocated a fresh header on every reload and orphaned the whole request tree.
+ * Adopt `data` when present, re-publish it on this cycle's zone, and RE-STAMP the
+ * inherited header with this cycle's api_version — in both directions. The callback
+ * that runs is the claim, so the stamp always reflects whether autocert is actually
+ * managing the zone in THIS cycle (see the adopt branch below).
  */
 static ngx_int_t
 ngx_autocert_requests_init_body(ngx_shm_zone_t *shm_zone, ngx_uint_t api_version)
@@ -147,14 +152,38 @@ ngx_autocert_requests_init_body(ngx_shm_zone_t *shm_zone, ngx_uint_t api_version
     ngx_slab_pool_t             *shpool;
     ngx_autocert_requests_sh_t  *sh;
 
-    /* Inherit the previous incarnation's tree across reload. */
-    if (shm_zone->shm.exists) {
-        ngx_log_debug0(NGX_LOG_DEBUG_CORE, shm_zone->shm.log, 0,
-                       "autocert: requests zone inherited from old cycle");
+    shpool = (ngx_slab_pool_t *) shm_zone->shm.addr;
+
+    /* Reuse across reload: adopt the existing header, never re-allocate. The
+     * header lives at shpool->data, i.e. INSIDE the arena that the reuse path
+     * carries over untouched — so a non-NULL shpool->data is itself the reliable
+     * reuse signal, and a fresh arena (mmap'd zero-filled) gives NULL. This is
+     * the same test the alpn and challenge zones use. */
+    sh = shpool->data;
+
+    if (sh != NULL) {
+        /*
+         * RE-STAMP to whatever THIS cycle's callback says, in both directions.
+         * The callback that runs IS the claim: the owner callback runs only when
+         * autocert's postconfig installed it (autocert enabled with issuable
+         * names), the consumer callback only when it did not.
+         *
+         * So a reload that DISABLES autocert (names removed, or its load_module
+         * dropped) leaves only the consumer callback, which must stamp the
+         * inherited header back to 0 — otherwise the stamp still says "autocert
+         * is managing this zone" while no driver exists to drain it: ensure()
+         * would keep returning REQUESTED, nodes would pile up to the cap, and
+         * serve.c would admit an SNI whose state can never advance. Re-stamping
+         * keeps the feature FAIL-SAFE (inert) exactly as it was before the zone
+         * was ever owned.
+         */
+        sh->api_version = api_version;
+
+        ngx_log_debug1(NGX_LOG_DEBUG_CORE, shm_zone->shm.log, 0,
+                       "autocert: requests zone inherited (api_version %ui)",
+                       sh->api_version);
         return NGX_OK;
     }
-
-    shpool = (ngx_slab_pool_t *) shm_zone->shm.addr;
 
     sh = ngx_slab_alloc(shpool, sizeof(ngx_autocert_requests_sh_t));
     if (sh == NULL) {
@@ -180,7 +209,10 @@ ngx_autocert_requests_init_body(ngx_shm_zone_t *shm_zone, ngx_uint_t api_version
 ngx_int_t
 ngx_autocert_requests_init_zone(ngx_shm_zone_t *shm_zone, void *data)
 {
-    (void) data;   /* see ngx_autocert_requests_init_body — `data` is unreliable */
+    /* `data` (the old cycle's shm_zone->data) is deliberately unused: the header
+     * we inherit lives in the ARENA, at shpool->data, which the reuse path carries
+     * over untouched. See ngx_autocert_requests_init_body. */
+    (void) data;
     return ngx_autocert_requests_init_body(shm_zone, NGX_AUTOCERT_API_VERSION);
 }
 

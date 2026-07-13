@@ -208,6 +208,54 @@ test_collision(ngx_shm_zone_t *zone)
 }
 
 
+/*
+ * RELOAD. nginx's zone-REUSE path copies the old arena onto the new cycle's zone
+ * and calls init() WITHOUT setting shm.exists (that flag only covers the
+ * platform/named-shm case, and is always 0 on Linux). init_zone used to key off
+ * shm.exists, so EVERY reload re-allocated the header and orphaned the token tree:
+ * an `nginx -s reload` (logrotate, any config change) during an in-flight order
+ * dropped the http-01 token, the CA's validation GET 404'd, and the order failed.
+ * The token store must survive a reconfigure.
+ */
+static void
+test_reload_preserves_tokens(void)
+{
+    ngx_shm_zone_t               *old, *new_zone;
+    ngx_autocert_challenge_sh_t  *sh_before, *sh_after;
+    ngx_str_t                     tok = S("inflight-token");
+    ngx_str_t                     ka  = S("inflight-token.thumbprint");
+    ngx_str_t                     out;
+
+    old = ngx_autocert_test_zone_create();
+    CHECK(old != NULL, "reload: zone create");
+    CHECK(ngx_autocert_challenge_init_zone(old, NULL) == NGX_OK,
+          "reload: init (fresh start)");
+
+    sh_before = ((ngx_slab_pool_t *) old->shm.addr)->data;
+    CHECK(sh_before != NULL, "reload: fresh init allocates the header");
+
+    CHECK(ngx_autocert_challenge_set(old, &tok, &ka) == NGX_OK,
+          "reload: token stored before the reload");
+
+    /* --- the reload --- */
+    new_zone = ngx_autocert_test_zone_reload(old);
+    CHECK(ngx_autocert_challenge_init_zone(new_zone, NULL) == NGX_OK,
+          "reload: init on the reused zone");
+
+    sh_after = ((ngx_slab_pool_t *) new_zone->shm.addr)->data;
+    CHECK(sh_after == sh_before,
+          "reload: header ADOPTED, not re-allocated (no orphaned tree, no leak)");
+
+    out.len = 0; out.data = NULL;
+    CHECK(ngx_autocert_challenge_get(new_zone, &tok, pool, &out) == NGX_OK
+          && out.len == ka.len
+          && ngx_memcmp(out.data, ka.data, ka.len) == 0,
+          "reload: in-flight http-01 token still served after reload");
+
+    ngx_autocert_test_zone_destroy();
+}
+
+
 int
 main(void)
 {
@@ -245,6 +293,9 @@ main(void)
     test_collision(zone);
 
     ngx_autocert_test_zone_destroy();
+
+    test_reload_preserves_tokens();   /* owns its own zone */
+
     ngx_destroy_pool(pool);
 
     if (failures) {
