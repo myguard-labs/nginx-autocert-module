@@ -244,15 +244,37 @@ jobs:
           # first, so an N/N+1 version skew would run one version's code against
           # the other's shm layout and defeat the api_version fail-safe. They are
           # declared NGX_AUTOCERT_REQUESTS_API (hidden visibility) to prevent it.
-          exported="$(nm -D objs/ngx_http_autocert_module.so \
-                      | grep -c ' T ngx_autocert_requests_' || true)"
+          # Dump the dynamic symbols ONCE, to a file, and check nm's OWN exit
+          # status. Piping nm straight into `grep -c ... || true` is unsound: if
+          # nm fails, grep reads empty stdin, prints "0", `|| true` masks the
+          # failure, and the gate reports "0 exported" having inspected NOTHING.
+          # Requiring a non-empty dump also catches a stripped/empty .so.
+          nm -D objs/ngx_http_autocert_module.so > /tmp/dynsyms.txt
+          test -s /tmp/dynsyms.txt
+
+          exported="$(grep -c ' T ngx_autocert_requests_' /tmp/dynsyms.txt || true)"
           if [ "$exported" != "0" ]; then
             echo "✗ $exported ngx_autocert_requests_* helper(s) exported from the .so;" \
                  "they must be hidden (NGX_AUTOCERT_REQUESTS_API)"
-            nm -D objs/ngx_http_autocert_module.so | grep ' T ngx_autocert_requests_'
+            grep ' T ngx_autocert_requests_' /tmp/dynsyms.txt
             exit 1
           fi
           echo "✓ runtime-cert helpers are hidden (0 exported, no interposition)"
+
+          # The inverse gate: the cert_cb delegation hook is a DELIBERATE export
+          # (default visibility). A consumer module resolves it with
+          # dlsym(RTLD_DEFAULT, "ngx_autocert_cert_cb_register") and FAILS SAFE to
+          # installing its own cert_cb when the lookup returns NULL. So losing this
+          # export breaks delegation SILENTLY -- every consumer stops chaining and
+          # starts clobbering our cert_cb again, which is exactly the bug the hook
+          # exists to fix, and nothing else in CI would notice.
+          if ! grep -q ' T ngx_autocert_cert_cb_register$' /tmp/dynsyms.txt; then
+            echo "✗ ngx_autocert_cert_cb_register is NOT exported from the .so;" \
+                 "consumer dlsym() would return NULL and delegation would silently" \
+                 "fall back to clobbering our cert_cb"
+            exit 1
+          fi
+          echo "✓ cert_cb delegation hook is exported (consumers can dlsym it)"
 
           BIN=objs/nginx
           test -x "$BIN"
