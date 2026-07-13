@@ -11,13 +11,17 @@
 #      SNI, sourced from requests_zone (NOT the config-time `names` set —
 #      the host is deliberately absent from any `server_name`/`autocert on;`
 #      block, so this is genuinely runtime-only);
-#   3. SIGKILL the worker (hard crash, not `-s stop`/`-s reload` — proves the
-#      shm state is gone, not gracefully preserved) and wait for the master
-#      to respawn a fresh worker;
-#   4. the fresh worker's ngx_autocert_runtime_seed() (A6) restores the
-#      ISSUED state from the on-disk `.autocert-runtime` marker, so the host
-#      is re-served immediately WITHOUT a new ACME order (asserted via the
-#      Pebble order count staying flat across the crash+respawn).
+#   3. a TRUE RESTART: stop the master outright, so the shm segment it owns is
+#      destroyed and the runtime registry genuinely ceases to exist (killing a
+#      worker is NOT enough — the master survives, owns the segment, and the
+#      respawned worker inherits the still-populated mapping, so A6 would pass
+#      without ever reading disk). The test seed directive is stripped from the
+#      config first, so nothing but the marker can repopulate the registry;
+#   4. a fresh master boots over the retained store and its
+#      ngx_autocert_runtime_seed() (A6) restores the ISSUED state from the
+#      on-disk `.autocert-runtime` marker, so the host is re-served immediately
+#      WITHOUT a new ACME order (asserted against a rotated log: any provision
+#      line after the restart is by definition a new order).
 #
 # DNS mock: same pattern as renewal.sh / wildcard-issue.sh — challtestsrv's
 # management API publishes an A record for the runtime host pointing at the
@@ -130,8 +134,9 @@ load_module $HTTP_SO;
 user root;   # worker-0 ACME driver writes the store; keep worker uid able to
 error_log $PREFIX/logs/error.log notice;
 # Explicit pid path: this script is the only one in the suite that reads the
-# master pidfile back (the SIGKILL-worker/master-survives/A6-restore
-# assertions below need \$MASTER). angie's compiled-in default pidfile name is
+# master pidfile back (the true-restart assertions below compare the pre- and
+# post-restart master pids to prove the master really died and a fresh one came
+# up over the retained store). angie's compiled-in default pidfile name is
 # logs/angie.pid, not logs/nginx.pid like nginx/mainline -- without an
 # explicit \`pid\` directive the master starts fine (config test passes, certs
 # get issued) but $PREFIX/logs/nginx.pid never appears on an angie build, so
@@ -209,11 +214,6 @@ MARKER="$PREFIX/store/${RUNTIME_HOST}/.autocert-runtime"
 [ -f "$MARKER" ] || { echo "::error::missing A6 marker $MARKER"; ls -la "$PREFIX/store" 2>&1; exit 1; }
 echo "✓ A6 runtime marker present on disk"
 
-# Count of "provisioned" log lines for the runtime host before the crash, so we
-# can prove the post-respawn re-serve does NOT enqueue a second order for it
-# (a fresh order would add another such line).
-orders_before=$(grep -oc "certificate provisioned for \"${RUNTIME_HOST}\"" "$PREFIX/logs/error.log" || true)
-
 echo "== serve: TLS SNI for ${RUNTIME_HOST} presents the issued (non-dummy) cert =="
 san=$(echo | openssl s_client -connect "127.0.0.1:${TLS_PORT}" \
         -servername "$RUNTIME_HOST" 2>/dev/null \
@@ -226,41 +226,93 @@ cn=$(echo | openssl s_client -connect "127.0.0.1:${TLS_PORT}" \
 echo "$cn" | grep -q "M7 dummy" && { echo "::error::runtime SNI served the M7 dummy cert, not the issued one"; exit 1; }
 echo "✓ ${RUNTIME_HOST} served the ACME-issued cert via cert_cb SNI fallback (A4)"
 
-echo "== hard crash: SIGKILL the worker (not -s stop/reload) =="
-# Find the worker (child of MASTER) actually bound to TLS_PORT.
-WORKER=$(ss -ltnp 2>/dev/null | grep ":$TLS_PORT " | grep -oP 'pid=\K[0-9]+' | head -1)
-[ -n "$WORKER" ] || { echo "::error::could not find worker pid bound to :$TLS_PORT"; ss -ltnp; exit 1; }
-kill -9 "$WORKER" 2>/dev/null || { echo "::error::could not SIGKILL worker $WORKER"; exit 1; }
-echo "  killed worker $WORKER"
-
+#
+# TRUE RESTART (not a worker crash).
+#
+# Killing only a worker leaves the master alive, and the master owns the shm
+# segment: the respawned worker inherits the SAME mapping, with the runtime
+# registry still fully populated. A6 would then "pass" without ever reading the
+# disk marker -- the state it claims to restore was never lost. To actually
+# exercise A6, the shm segment must be destroyed, which only happens when the
+# master itself is gone. So: stop the whole master, prove nothing is left
+# holding the ports, then boot a fresh master over the retained store.
+#
 alive() { kill -0 "$1" 2>/dev/null; }
-for _ in $(seq 1 50); do alive "$MASTER" || break; sleep 0.2; [ "$(cat "$PREFIX/logs/nginx.pid" 2>/dev/null)" = "$MASTER" ] && break; done
-alive "$MASTER" || { echo "::error::master $MASTER died on worker crash (should respawn, not exit)"; exit 1; }
-[ "$(cat "$PREFIX/logs/nginx.pid" 2>/dev/null)" = "$MASTER" ] || { echo "::error::master pid changed after crash"; exit 1; }
-echo "✓ master $MASTER survived, respawns a fresh worker"
 
-echo "== wait: fresh worker restores runtime state from the A6 disk marker =="
+echo "== true restart: stop the master (destroys the shm segment) =="
+# The test directive would re-seed RUNTIME_HOST as REQUESTED on the new master
+# and mask the A6 restore entirely, so strip it: after the restart the ONLY
+# thing that can put RUNTIME_HOST back into the registry is the disk marker.
+sed -i "/autocert_test_runtime_request/d" "$PREFIX/conf/nginx.conf"
+grep -q autocert_test_runtime_request "$PREFIX/conf/nginx.conf" \
+    && { echo "::error::failed to strip the test seed directive"; exit 1; }
+echo "✓ test seed directive stripped from the restart config"
+
+"$SERVER_BIN" -p "$PREFIX" -c "$PREFIX/conf/nginx.conf" -s stop
+for _ in $(seq 1 100); do alive "$MASTER" || break; sleep 0.2; done
+alive "$MASTER" && { echo "::error::master $MASTER did not exit on -s stop"; exit 1; }
+
+# Nothing may still hold the shm/ports: any surviving process would keep the
+# old mapping alive and invalidate the whole point of this restart.
+for _ in $(seq 1 50); do
+    ss -ltn 2>/dev/null | grep -q ":$TLS_PORT " || break
+    sleep 0.2
+done
+ss -ltn 2>/dev/null | grep -q ":$TLS_PORT " \
+    && { echo "::error::something still listens on :$TLS_PORT after stop"; ss -ltnp; exit 1; }
+echo "✓ master gone, no listener left: shm segment destroyed"
+
+# Everything the new master learns about RUNTIME_HOST must come off disk. The
+# marker + the issued cert are all that survive.
+[ -f "$MARKER" ] || { echo "::error::A6 marker vanished across the restart"; exit 1; }
+
+# Rotate the log so every post-restart assertion below reads ONLY new lines --
+# otherwise the pre-restart "provisioned"/"restored" lines would satisfy the
+# greps and the restart would prove nothing.
+mv "$PREFIX/logs/error.log" "$PREFIX/logs/error.pre-restart.log"
+: > "$PREFIX/logs/error.log"
+
+echo "== start a FRESH master over the retained store =="
+"$SERVER_BIN" -p "$PREFIX" -c "$PREFIX/conf/nginx.conf"
+for _ in $(seq 1 30); do
+    NEW_MASTER=$(cat "$PREFIX/logs/nginx.pid" 2>/dev/null) || true
+    [ -n "${NEW_MASTER:-}" ] && [ "$NEW_MASTER" != "$MASTER" ] && break
+    sleep 1
+done
+[ -n "${NEW_MASTER:-}" ] || { echo "::error::fresh master never wrote a pidfile"; exit 1; }
+[ "$NEW_MASTER" != "$MASTER" ] \
+    || { echo "::error::pid unchanged ($MASTER) -- the master never actually restarted"; exit 1; }
+echo "✓ fresh master $NEW_MASTER (was $MASTER)"
+
+echo "== A6 restores runtime state from the disk marker into the NEW shm =="
 for i in $(seq 1 60); do
     grep -q "A6 restored runtime name \"${RUNTIME_HOST}\"" "$PREFIX/logs/error.log" && break
-    sleep 0.3
-    [ "$i" = 60 ] && { echo "::error::A6 restore never logged after respawn"; grep autocert "$PREFIX/logs/error.log" | tail -30; exit 1; }
+    sleep 0.5
+    [ "$i" = 60 ] && { echo "::error::A6 restore never logged on the fresh master"; grep autocert "$PREFIX/logs/error.log" | tail -30; exit 1; }
 done
-echo "✓ A6 restored ${RUNTIME_HOST} into shm from disk marker after crash"
+echo "✓ A6 restored ${RUNTIME_HOST} into the new shm segment from the disk marker"
 
-echo "== re-served WITHOUT a new ACME order =="
+echo "== re-served on the fresh master WITHOUT a new ACME order =="
 for i in $(seq 1 60); do
     san=$(echo | openssl s_client -connect "127.0.0.1:${TLS_PORT}" \
             -servername "$RUNTIME_HOST" 2>/dev/null \
             | openssl x509 -noout -ext subjectAltName 2>/dev/null || true)
     echo "$san" | grep -qF "DNS:${RUNTIME_HOST}" && break
     sleep 0.5
-    [ "$i" = 60 ] && { echo "::error::${RUNTIME_HOST} not re-served after crash+respawn"; exit 1; }
+    [ "$i" = 60 ] && { echo "::error::${RUNTIME_HOST} not served after the restart"; exit 1; }
 done
-echo "✓ ${RUNTIME_HOST} re-served immediately after crash+respawn"
+cn=$(echo | openssl s_client -connect "127.0.0.1:${TLS_PORT}" \
+        -servername "$RUNTIME_HOST" 2>/dev/null \
+        | openssl x509 -noout -subject 2>/dev/null || true)
+echo "$cn" | grep -q "M7 dummy" \
+    && { echo "::error::post-restart SNI served the M7 dummy cert, not the restored one"; exit 1; }
+echo "✓ ${RUNTIME_HOST} re-served from the restored state"
 
-orders_after=$(grep -oc "certificate provisioned for \"${RUNTIME_HOST}\"" "$PREFIX/logs/error.log" || true)
-[ "$orders_after" -eq "$orders_before" ] \
-    || { echo "::error::a NEW order was placed for ${RUNTIME_HOST} after respawn (before=$orders_before after=$orders_after)"; exit 1; }
-echo "✓ no new ACME order placed for ${RUNTIME_HOST} across the crash+respawn ($orders_after provision(s) total)"
+# The pre-restart log was rotated away, so ANY provision line here is a new
+# order -- the restored ISSUED state must make the driver skip it entirely.
+orders_after=$(grep -c "certificate provisioned for \"${RUNTIME_HOST}\"" "$PREFIX/logs/error.log" || true)
+[ "$orders_after" -eq 0 ] \
+    || { echo "::error::a NEW ACME order was placed for ${RUNTIME_HOST} after the restart ($orders_after) -- A6 restore did not suppress it"; exit 1; }
+echo "✓ no new ACME order placed for ${RUNTIME_HOST} across the true restart"
 
-echo "✓✓ autolabel C: runtime issuance lifecycle (seed -> drain/order -> serve -> crash -> A6 restore -> re-serve, no re-order) verified end-to-end"
+echo "✓✓ autolabel C: runtime issuance lifecycle (seed -> drain/order -> serve -> TRUE RESTART -> A6 restore from disk -> re-serve, no re-order) verified end-to-end"
