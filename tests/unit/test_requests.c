@@ -284,6 +284,65 @@ test_case_fold(ngx_shm_zone_t *zone)
 }
 
 
+/*
+ * The runtime API is DNS-name-only: IP certificates are config-driven, never
+ * runtime-requested. An IP literal is LDH-clean (127.0.0.1 is nothing but digits
+ * and dots), so the charset gate accepted one and a label producer could enqueue
+ * an IP order — spending the bounded ledger/CA budget on something policy says it
+ * may not request. Every form must be DENIED, and names that merely LOOK numeric
+ * must still be accepted (they are legal DNS names).
+ */
+static void
+test_reject_ip_literals(ngx_shm_zone_t *zone)
+{
+    ngx_str_t  v4       = S("127.0.0.1");
+    ngx_str_t  v4_pub   = S("192.0.2.7");
+    ngx_str_t  v4_ones  = S("255.255.255.255");   /* ngx_inet_addr's INADDR_NONE */
+    ngx_str_t  v4_zero  = S("0.0.0.0");
+    ngx_str_t  v6       = S("2001:db8::1");       /* ':' also fails the LDH gate */
+    ngx_str_t  v6_loop  = S("::1");
+
+    /* legal DNS names that are numeric-ish and must NOT be swept up */
+    ngx_str_t  three    = S("1.2.3");             /* only 3 labels */
+    ngx_str_t  five     = S("1.2.3.4.5");         /* 5 labels */
+    ngx_str_t  oct_big  = S("1.2.3.256");         /* 256 is not an octet */
+    ngx_str_t  numeric  = S("12345.example.com");
+    ngx_str_t  alldig   = S("4.3.2.1a");          /* trailing letter */
+
+    CHECK(ngx_autocert_requests_ensure(zone, &v4) == NGX_AUTOCERT_REQ_DENIED,
+          "reject IPv4 literal 127.0.0.1");
+    CHECK(ngx_autocert_requests_state(zone, &v4) == NGX_AUTOCERT_REQ_UNKNOWN,
+          "rejected IPv4 literal was not stored");
+    CHECK(ngx_autocert_requests_ensure(zone, &v4_pub) == NGX_AUTOCERT_REQ_DENIED,
+          "reject IPv4 literal 192.0.2.7");
+    CHECK(ngx_autocert_requests_ensure(zone, &v4_ones) == NGX_AUTOCERT_REQ_DENIED,
+          "reject IPv4 literal 255.255.255.255 (the INADDR_NONE alias)");
+    CHECK(ngx_autocert_requests_ensure(zone, &v4_zero) == NGX_AUTOCERT_REQ_DENIED,
+          "reject IPv4 literal 0.0.0.0");
+
+    CHECK(ngx_autocert_requests_ensure(zone, &v6) == NGX_AUTOCERT_REQ_DENIED,
+          "reject IPv6 literal 2001:db8::1");
+    CHECK(ngx_autocert_requests_ensure(zone, &v6_loop) == NGX_AUTOCERT_REQ_DENIED,
+          "reject IPv6 literal ::1");
+
+    CHECK(ngx_autocert_requests_ensure(zone, &three)
+              == NGX_AUTOCERT_REQ_REQUESTED,
+          "accept 1.2.3 (3 labels, not a dotted quad)");
+    CHECK(ngx_autocert_requests_ensure(zone, &five)
+              == NGX_AUTOCERT_REQ_REQUESTED,
+          "accept 1.2.3.4.5 (5 labels)");
+    CHECK(ngx_autocert_requests_ensure(zone, &oct_big)
+              == NGX_AUTOCERT_REQ_REQUESTED,
+          "accept 1.2.3.256 (256 is not a valid octet)");
+    CHECK(ngx_autocert_requests_ensure(zone, &numeric)
+              == NGX_AUTOCERT_REQ_REQUESTED,
+          "accept 12345.example.com");
+    CHECK(ngx_autocert_requests_ensure(zone, &alldig)
+              == NGX_AUTOCERT_REQ_REQUESTED,
+          "accept 4.3.2.1a (trailing letter => DNS name)");
+}
+
+
 static void
 test_reject_charset(ngx_shm_zone_t *zone)
 {
@@ -744,6 +803,7 @@ main(void)
     test_absent_state(zone);
     test_case_fold(zone);
     test_reject_charset(zone);
+    test_reject_ip_literals(zone);
     test_set_state(zone);
 
     ngx_autocert_test_zone_destroy();

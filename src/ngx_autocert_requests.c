@@ -20,12 +20,65 @@ static ngx_autocert_request_t *ngx_autocert_requests_lookup(
 
 
 /*
+ * Is `buf`/`len` a dotted-quad IPv4 literal (a.b.c.d, each octet 0-255)?
+ *
+ * The runtime API is DNS-name-only: IP certificates are config-driven
+ * (`autocert` on a server whose name is a literal), never runtime-requested, so
+ * a label producer must not be able to enqueue one. This is a deliberately
+ * dependency-light parser rather than ngx_autocert_str_is_ip(): this TU is
+ * vendored verbatim into consumer modules and includes nothing beyond
+ * ngx_core.h, while str_is_ip lives in a header that drags in <openssl/x509v3.h>.
+ *
+ * IPv6 literals cannot reach here at all — the LDH gate below rejects ':' — but
+ * this stays correct if that charset is ever loosened, because a v6 literal has
+ * no dotted-quad shape either. Runs AFTER normalization, on the lowercased copy.
+ */
+static ngx_int_t
+ngx_autocert_requests_is_ipv4(const u_char *buf, size_t len)
+{
+    size_t      i;
+    ngx_uint_t  octet, digits, dots;
+
+    octet = 0;
+    digits = 0;
+    dots = 0;
+
+    for (i = 0; i < len; i++) {
+        if (buf[i] == '.') {
+            if (digits == 0) {
+                return 0;
+            }
+            dots++;
+            octet = 0;
+            digits = 0;
+            continue;
+        }
+
+        if (buf[i] < '0' || buf[i] > '9') {
+            return 0;              /* any non-digit => a DNS name */
+        }
+
+        octet = octet * 10 + (ngx_uint_t) (buf[i] - '0');
+        digits++;
+
+        if (digits > 3 || octet > 255) {
+            return 0;
+        }
+    }
+
+    /* exactly four octets, the last one non-empty */
+    return (dots == 3 && digits > 0) ? 1 : 0;
+}
+
+
+/*
  * Validate + normalize a runtime host into `buf` (caller supplies
  * NGX_AUTOCERT_REQUEST_NAME_MAX bytes). Rules: non-empty, within cap, LDH per
  * label (letters/digits/hyphen), dot-separated, no leading/trailing dot, no
- * wildcard, no empty label. Lowercases into buf. Returns the length, or 0 on
- * reject. This is the single gate both ensure() and state() share so a stored
- * key and a lookup key always normalize identically.
+ * wildcard, no empty label, and NOT an IP literal (the runtime API is
+ * DNS-name-only — IP certs are config-driven). Lowercases into buf. Returns the
+ * length, or 0 on reject. This is the single gate both ensure() and state()
+ * share so a stored key and a lookup key always normalize identically.
  */
 static size_t
 ngx_autocert_requests_normalize(ngx_str_t *host, u_char *buf)
@@ -85,6 +138,14 @@ ngx_autocert_requests_normalize(ngx_str_t *host, u_char *buf)
     /* the final label cannot end in a hyphen either (the in-loop check only
      * fires at a dot boundary, so a trailing "-" reaches here unvalidated) */
     if (buf[host->len - 1] == '-') {
+        return 0;
+    }
+
+    /* An IP literal is LDH-clean (127.0.0.1 is all digits and dots), so the loop
+     * above happily accepts one. The runtime API is DNS-name-only — reject it,
+     * or a label producer could spend the bounded ledger/CA budget on an IP
+     * order that policy says must be config-driven. */
+    if (ngx_autocert_requests_is_ipv4(buf, host->len)) {
         return 0;
     }
 
