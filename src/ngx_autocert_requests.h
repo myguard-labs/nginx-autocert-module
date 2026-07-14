@@ -33,8 +33,10 @@
  *     overwritten. (`zone->data` is NOT the claim test: nginx leaves it NULL at
  *     config time, so the old docs' `zone->data == NULL` check matched even when
  *     autocert HAD claimed the zone, and the consumer then silently disabled it.)
- *     A consumer reads the stamped `api_version` (0/absent => autocert not managing
- *     this zone => feature off).
+ *     A consumer reads the stamped `api_version`: the exact current version means
+ *     autocert is active; NGX_AUTOCERT_API_INACTIVE_VERSION records the same layout
+ *     with no active owner, so the feature is off without forgetting which layout
+ *     is already stored in the arena.
  *   - RELOAD: nginx reuses the old mapping — it copies the old shm.addr onto the new
  *     cycle's zone and calls init() WITHOUT setting shm.exists (ngx_cycle.c; that
  *     flag only covers the platform/named-shm case and is always 0 on Linux). Since
@@ -43,12 +45,12 @@
  *     REQUESTED/PENDING/ISSUED/FAILED node survives a reconfigure. Keying off
  *     `shm.exists` instead re-allocated a fresh header on every reload and orphaned
  *     the whole tree. The init callback's `data` argument is unused.
- *   - STAMP FOLLOWS THE CALLBACK, both directions. Each init RE-stamps the header it
- *     inherits: owner => NGX_AUTOCERT_API_VERSION, consumer => 0. The callback that
- *     runs is the claim, so enabling autocert on a reload promotes a consumer's
- *     0-stamped zone to live, and DISABLING autocert (names removed / module
- *     unloaded) demotes it back to 0 — leaving a stale nonzero stamp would tell the
- *     consumer the feature is live while no driver exists to drain it.
+ *   - ACTIVITY AND LAYOUT ARE BOTH STAMPED. The owner uses the exact current API
+ *     version; a consumer-only cycle uses NGX_AUTOCERT_API_INACTIVE_VERSION. They
+ *     can toggle safely because both stamps identify the SAME layout. An inherited
+ *     arena with any other nonzero stamp is never relabelled: the owner rejects the
+ *     reload, because old workers may still populate or traverse that foreign layout.
+ *     A true stop/start supplies a fresh arena for an incompatible upgrade.
  *   - The consumer inserts REQUESTED nodes itself via ngx_autocert_requests_ensure()
  *     (a shared helper compiled into both modules, operating on the same slab under
  *     the slab mutex). autocert's worker-0 driver polls REQUESTED nodes, orders,
@@ -91,6 +93,18 @@
  * compares the zone-header `api_version` against its compiled value and disables
  * the feature on mismatch (fail safe, never mis-parse a foreign layout). */
 #define NGX_AUTOCERT_API_VERSION   2
+
+/* Reserve the high bit as the inactive marker. The low bits still identify the
+ * immutable on-shm layout, while an exact unflagged version means an autocert
+ * owner is active in this cycle. Existing consumers already require exact
+ * equality with NGX_AUTOCERT_API_VERSION, so the inactive form fails safe. */
+#define NGX_AUTOCERT_API_INACTIVE_FLAG                              \
+    ((ngx_uint_t) 1 << (sizeof(ngx_uint_t) * 8 - 1))
+#define NGX_AUTOCERT_API_INACTIVE_VERSION                           \
+    (NGX_AUTOCERT_API_INACTIVE_FLAG | NGX_AUTOCERT_API_VERSION)
+
+typedef char ngx_autocert_api_version_fits_activity_stamp[
+    (NGX_AUTOCERT_API_VERSION & NGX_AUTOCERT_API_INACTIVE_FLAG) == 0 ? 1 : -1];
 
 /* The shared zone's name. Both modules add/attach by this exact string. */
 #define NGX_AUTOCERT_REQUESTS_ZONE  "autocert_requests"
@@ -143,10 +157,11 @@ typedef struct {
 } ngx_autocert_request_t;
 
 
-/* Zone-wide shared header (lives at shpool->data). `api_version` is the presence/
- * compatibility cell the consumer checks; `count` bounds insertion. */
+/* Zone-wide shared header (lives at shpool->data). `api_version` carries both the
+ * immutable layout identity and whether an owner is active; `count` bounds
+ * insertion. */
 typedef struct {
-    ngx_uint_t          api_version;   /* NGX_AUTOCERT_API_VERSION, stamped by autocert */
+    ngx_uint_t          api_version;   /* active or inactive current-layout stamp */
     ngx_uint_t          count;         /* live node count, for the cap */
     ngx_rbtree_t        rbtree;
     ngx_rbtree_node_t   sentinel;
@@ -161,10 +176,11 @@ typedef struct {
  * Fresh start: allocates the header at `shpool->data` and stamps
  * `api_version = NGX_AUTOCERT_API_VERSION`.
  * Reload: adopts the header already in the arena (see the RELOAD note at the top)
- * — tree and all — and re-stamps it NGX_AUTOCERT_API_VERSION, so a zone a consumer
- * created with stamp 0 while autocert was disabled becomes live the moment autocert
- * is enabled. Owner/consumer is decided by WHICH callback runs; the `data` argument
- * is unused.
+ * — tree and all — and activates it only when its stamp proves the layout is
+ * current. A legacy zero-stamped EMPTY arena is also safe to activate. A non-empty
+ * zero-stamped or any foreign-version arena rejects the reload rather than risking
+ * a foreign node-layout parse. Owner/consumer is decided by WHICH callback runs;
+ * the `data` argument is unused.
  */
 NGX_AUTOCERT_REQUESTS_API ngx_int_t
 ngx_autocert_requests_init_zone(ngx_shm_zone_t *shm_zone, void *data);
@@ -173,18 +189,18 @@ ngx_autocert_requests_init_zone(ngx_shm_zone_t *shm_zone, void *data);
 /*
  * CONSUMER zone init callback. A consumer registers this ONLY when
  * `shm_zone->init == NULL` (i.e. autocert has not already claimed the zone); it
- * builds the same layout but stamps `api_version = 0`, so the version check reports
- * "not managed" and the consumer degrades gracefully. On reload it adopts the
- * arena's existing header exactly like the owner callback (the tree survives) and
- * re-stamps it 0.
+ * builds the same layout but stamps NGX_AUTOCERT_API_INACTIVE_VERSION, so the
+ * exact-version check reports "not managed" while retaining the layout identity.
+ * On reload it adopts the arena's existing header exactly like the owner callback
+ * (the tree survives) and changes only a proven-current layout to inactive.
  *
  * That re-stamp is deliberate and is the FAIL-SAFE direction: this callback runs
  * only when autocert did NOT install its owner callback in this cycle, i.e. autocert
- * is absent or has no issuable names. Leaving an inherited nonzero stamp in place
+ * is absent or disabled. Leaving an inherited active stamp in place
  * would tell the consumer "autocert is managing this zone" when no driver exists to
  * drain it — ensure() would keep accepting REQUESTED nodes up to the cap and serve.c
- * would admit an SNI whose state can never advance. Stamping 0 makes the feature
- * inert instead.
+ * would admit an SNI whose state can never advance. The inactive-current stamp
+ * makes the feature inert without making a later reload guess the stored layout.
  */
 NGX_AUTOCERT_REQUESTS_API ngx_int_t
 ngx_autocert_requests_init_zone_consumer(ngx_shm_zone_t *shm_zone,

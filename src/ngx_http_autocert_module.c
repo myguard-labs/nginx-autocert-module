@@ -1455,11 +1455,11 @@ ngx_http_autocert_postconfig(ngx_conf_t *cf)
      * can attach it and read the stamped api_version. A label-driven gateway
      * matches by regex/catch-all and has zero config names by construction;
      * gating this on names->nelts left it with no zone to attach, so the
-     * consumer's init stamped api_version 0 and runtime issuance was silently
-     * inert (autolabel C).
-     * autocert is the owner => init stamps NGX_AUTOCERT_API_VERSION (data
-     * non-NULL). Reuses its tree across reload (noreuse off) so pending runtime
-     * requests survive a reconfigure. A3 (driver pump) consumes REQUESTED nodes.
+     * consumer's init marked the current layout inactive and runtime issuance
+     * was silently inert (autolabel C).
+     * autocert is the owner => init stamps NGX_AUTOCERT_API_VERSION. Reuses its
+     * tree across reload (noreuse off) so pending runtime requests survive a
+     * reconfigure. A3 (driver pump) consumes REQUESTED nodes.
      */
     if (amcf->enabled_servers != 0) {
         ngx_str_set(&name, NGX_AUTOCERT_REQUESTS_ZONE);
@@ -1477,11 +1477,11 @@ ngx_http_autocert_postconfig(ngx_conf_t *cf)
         }
         /* OWNER init, installed UNCONDITIONALLY: autocert deliberately claims the
          * zone even if a consumer's postconfig ran first and installed its own
-         * (stamp-0) callback — the owner's callback promotes that 0 stamp to
-         * NGX_AUTOCERT_API_VERSION. A consumer, conversely, may only install its
-         * callback when zone->init is still NULL. Owner/consumer is decided by
-         * WHICH init callback runs, never by zone->data — that field carries the
-         * reload handoff (the old cycle's shm header), not an ownership marker. */
+         * inactive callback — the owner's callback activates the proven-current
+         * layout. A consumer, conversely, may only install its callback when
+         * zone->init is still NULL. Owner/consumer is decided by WHICH init
+         * callback runs, never by zone->data; the requests header is in the slab
+         * arena at shpool->data. */
         amcf->requests_zone->init = ngx_autocert_requests_init_zone;
     }
 
