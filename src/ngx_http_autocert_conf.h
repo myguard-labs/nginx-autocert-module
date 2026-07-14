@@ -163,7 +163,8 @@ typedef struct {
      * has zero config names. Gating on names->nelts left such a deployment with
      * no requests_zone to attach and no challenge surface to answer on, so
      * runtime issuance could never activate (it failed silently: the consumer's
-     * init stamped api_version 0 and every helper fail-safed to inert).
+     * init marked the current API layout inactive and every helper fail-safed
+     * to inert).
      */
     ngx_uint_t       enabled_servers;
 

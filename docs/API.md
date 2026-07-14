@@ -42,8 +42,11 @@ copy**:
   check instead of silently running the wrong layout's code.
 
 Bump-tracking: if autocert changes `NGX_AUTOCERT_API_VERSION`, re-vendor both
-files. A stale copy simply sees the zone's stamped version compare unequal and
-labels the integration "off" — it never mis-parses a foreign layout.
+files. A stale consumer sees the zone's stamped version compare unequal and
+labels the integration "off" — it never mis-parses a foreign layout. The new
+owner also rejects a graceful reload over a foreign layout. Perform a true
+stop/start for an ABI-changing upgrade so nginx allocates a fresh arena; retiring
+workers still share the old arena during an ordinary reload.
 
 ## 2. Attach the zone in your module's postconfig
 
@@ -61,13 +64,12 @@ my_module_postconfig(ngx_conf_t *cf)
 
     /* Install the consumer callback ONLY if nobody has claimed the zone yet.
      * A non-NULL init means autocert's postconfig already ran and installed its
-     * OWNER callback; overwriting it would stamp api_version 0 and disable
+     * OWNER callback; overwriting it would mark the API inactive and disable
      * runtime certs even though autocert is present.
      *
-     * Do NOT test zone->data — nginx leaves it NULL at config time, and this
-     * module uses that field for the reload handoff (it carries the old cycle's
-     * shm header into the new cycle's init callback). It is not an ownership
-     * marker. */
+     * Do NOT test zone->data — nginx leaves it NULL at config time. The requests
+     * header lives inside the slab arena at shpool->data; the init callback's
+     * data argument is unused. zone->data is not an ownership marker. */
     if (zone->init == NULL) {
         zone->init = ngx_autocert_requests_init_zone_consumer;
     }
@@ -87,7 +89,13 @@ NOT guaranteed by config file order alone, so both sides must be order-safe:
 |---|---|
 | autocert first | autocert installs the owner init; your `zone->init == NULL` test fails, you leave it alone; zone stamps `NGX_AUTOCERT_API_VERSION`. |
 | consumer first | you install the consumer init; autocert then **overrides** it with the owner init (it deliberately claims the zone) and stamps `NGX_AUTOCERT_API_VERSION`. |
-| autocert absent (or no autocert names) | only your consumer init runs, stamps `0`; every helper fails safe and the runtime-cert feature is inert. |
+| autocert absent (or disabled) | only your consumer init runs, stamps `NGX_AUTOCERT_API_INACTIVE_VERSION`; every helper fails safe and the runtime-cert feature is inert, while the current layout identity is retained. |
+
+On a reload, active version `N` and inactive version `N` can switch safely in
+either direction without touching the tree. A legacy zero stamp is accepted
+only when the tree is empty. A non-empty zero stamp or any foreign-version arena
+is never relabelled: the consumer remains inert, while the owner rejects the
+reload and asks for a full stop/start.
 
 ## 3. Check the zone is actually live before using it
 

@@ -5,7 +5,8 @@
  * Standalone harness (see test_slab.h): links the requests TU against an nginx
  * build tree over an in-process malloc'd slab arena. Single-process, so the slab
  * mutex takes its uncontended fast path. Verifies:
- *   - owner init stamps api_version = NGX_AUTOCERT_API_VERSION; attach init stamps 0
+ *   - owner init stamps the active API version; attach init stamps the same layout
+ *     inactive
  *   - ensure() on a new host inserts REQUESTED and returns it
  *   - ensure() is idempotent: a second ensure returns the existing state
  *   - state() reflects the stored state; UNKNOWN for an absent host
@@ -28,6 +29,20 @@
 
 
 static int          failures;
+
+
+/* Version-1 node layout, kept only to reproduce the exact graceful-upgrade
+ * hazard: v2 inserted last_seen before next_eligible, moving host_len/host. */
+typedef struct {
+    ngx_rbtree_node_t   node;
+    ngx_uint_t          state;
+    time_t              first_seen;
+    time_t              last_attempt;
+    time_t              next_eligible;
+    ngx_uint_t          fail_count;
+    u_short             host_len;
+    u_char              host[1];
+} ngx_autocert_request_v1_t;
 
 #define CHECK(cond, msg)                                                      \
     do {                                                                      \
@@ -69,6 +84,9 @@ test_version_stamp(void)
     /* owner init callback stamps the real version (data arg ignored) */
     owner = ngx_autocert_test_zone_create();
     CHECK(owner != NULL, "owner zone create");
+    if (owner == NULL) {
+        return;
+    }
     CHECK(ngx_autocert_requests_init_zone(owner, NULL) == NGX_OK,
           "owner init zone");
     shpool = (ngx_slab_pool_t *) owner->shm.addr;
@@ -78,15 +96,22 @@ test_version_stamp(void)
     CHECK(sh->count == 0, "owner init count 0");
     ngx_autocert_test_zone_destroy();
 
-    /* consumer init callback stamps 0 — consumer-created, autocert absent */
+    /* consumer init records the current layout as inactive */
     attach = ngx_autocert_test_zone_create();
     CHECK(attach != NULL, "attach zone create");
+    if (attach == NULL) {
+        return;
+    }
     CHECK(ngx_autocert_requests_init_zone_consumer(attach, NULL) == NGX_OK,
           "consumer init zone");
     shpool = (ngx_slab_pool_t *) attach->shm.addr;
     sh = shpool->data;
-    CHECK(sh->api_version == 0,
-          "attach init stamps api_version 0 (feature-off signal)");
+    CHECK(sh->api_version == NGX_AUTOCERT_API_INACTIVE_VERSION,
+          "attach init stamps current layout inactive (feature-off signal)");
+    CHECK(ngx_autocert_requests_ensure(attach,
+              &(ngx_str_t) ngx_string("inactive.example.com"))
+              == NGX_AUTOCERT_REQ_UNKNOWN,
+          "attach helpers fail safe on the inactive-current stamp");
     ngx_autocert_test_zone_destroy();
 }
 
@@ -96,8 +121,7 @@ test_version_stamp(void)
  * path hands the new cycle's init callback the OLD zone's `data` and does NOT set
  * shm.exists. Before the fix the callback keyed off shm.exists alone, re-allocated
  * the header on every reload, and orphaned the entire request tree. Assert every
- * state survives, plus the count, the backoff stamp, and both stamp-transition
- * rules (owner promotes a consumer's 0; consumer never downgrades the owner's N).
+ * state survives, plus the count and the backoff stamp.
  */
 static void
 test_reload_preserves_tree(void)
@@ -113,6 +137,9 @@ test_reload_preserves_tree(void)
 
     old = ngx_autocert_test_zone_create();
     CHECK(old != NULL, "reload: zone create");
+    if (old == NULL) {
+        return;
+    }
     CHECK(ngx_autocert_requests_init_zone(old, NULL) == NGX_OK,
           "reload: owner init (fresh start)");
 
@@ -197,33 +224,35 @@ test_reload_stamp_transitions(void)
     ngx_autocert_requests_sh_t  *sh;
     ngx_str_t                    h = S("carried.example.com");
 
-    /* consumer created the zone (autocert absent) -> stamp 0, feature off */
+    /* consumer created the zone (autocert absent) -> current layout inactive */
     old = ngx_autocert_test_zone_create();
+    CHECK(old != NULL, "stamp: zone create");
+    if (old == NULL) {
+        return;
+    }
     CHECK(ngx_autocert_requests_init_zone_consumer(old, NULL) == NGX_OK,
           "stamp: consumer init (fresh)");
     sh = ((ngx_slab_pool_t *) old->shm.addr)->data;
-    CHECK(sh->api_version == 0, "stamp: consumer-created zone stamps 0");
+    CHECK(sh->api_version == NGX_AUTOCERT_API_INACTIVE_VERSION,
+          "stamp: consumer-created zone stamps current layout inactive");
     CHECK(ngx_autocert_requests_ensure(old, &h) == NGX_AUTOCERT_REQ_UNKNOWN,
-          "stamp: helpers fail safe on a stamp-0 zone");
+          "stamp: helpers fail safe on an inactive-current zone");
 
     /* autocert is enabled and its postconfig now claims the zone: the owner
-     * callback runs on the reused arena and PROMOTES the 0 stamp */
+     * callback runs on the reused arena and activates the known layout */
     new_zone = ngx_autocert_test_zone_reload(old);
     CHECK(ngx_autocert_requests_init_zone(new_zone, NULL) == NGX_OK,
           "stamp: owner init adopts the consumer's zone");
     sh = ((ngx_slab_pool_t *) new_zone->shm.addr)->data;
     CHECK(sh->api_version == NGX_AUTOCERT_API_VERSION,
-          "stamp: owner PROMOTES 0 -> NGX_AUTOCERT_API_VERSION");
+          "stamp: owner activates the known current layout");
     CHECK(ngx_autocert_requests_ensure(new_zone, &h)
               == NGX_AUTOCERT_REQ_REQUESTED,
           "stamp: feature live after promotion");
 
-    /* ...and a consumer re-attaching on a LATER reload must not downgrade it
-     * back to 0 (that would disable a live tree mid-reload) */
-    /* ...and DISABLING autocert (names removed / module unloaded) must demote the
-     * zone back to 0 on the next reload: only the consumer callback runs, no driver
-     * exists to drain the tree, so leaving a live stamp would let ensure() keep
-     * accepting nodes that never advance (fail-OPEN). The tree itself survives. */
+    /* DISABLING autocert (names removed / module unloaded) must make the zone
+     * inactive on the next reload: only the consumer callback runs, no driver
+     * exists to drain the tree. The tree and its layout identity both survive. */
     {
         ngx_shm_zone_t  *third;
 
@@ -231,13 +260,135 @@ test_reload_stamp_transitions(void)
         CHECK(ngx_autocert_requests_init_zone_consumer(third, NULL) == NGX_OK,
               "stamp: consumer init on a previously-owned zone");
         sh = ((ngx_slab_pool_t *) third->shm.addr)->data;
-        CHECK(sh->api_version == 0,
-              "stamp: autocert disabled -> stamp DEMOTED to 0 (fail-safe)");
+        CHECK(sh->api_version == NGX_AUTOCERT_API_INACTIVE_VERSION,
+              "stamp: autocert disabled -> current layout inactive");
         CHECK(sh->count == 1, "stamp: the tree itself survives the demotion");
         CHECK(ngx_autocert_requests_state(third, &h)
                   == NGX_AUTOCERT_REQ_UNKNOWN,
               "stamp: helpers inert again on the demoted zone");
+
+        /* Re-enabling the SAME layout is safe: the owner can activate the tree
+         * without touching any node representation. */
+        third = ngx_autocert_test_zone_reload(third);
+        CHECK(ngx_autocert_requests_init_zone(third, NULL) == NGX_OK,
+              "stamp: owner can re-enable the inactive current layout");
+        sh = ((ngx_slab_pool_t *) third->shm.addr)->data;
+        CHECK(sh->api_version == NGX_AUTOCERT_API_VERSION,
+              "stamp: re-enabled zone is active");
+        CHECK(ngx_autocert_requests_state(third, &h)
+                  == NGX_AUTOCERT_REQ_REQUESTED,
+              "stamp: carried node survives disable/re-enable");
     }
+
+    ngx_autocert_test_zone_destroy();
+}
+
+
+/*
+ * Graceful ABI upgrade regression. A v1 node is shorter than v2 and has
+ * host_len at a different offset. The v2 owner must reject the inherited arena
+ * without changing its stamp; otherwise later v2 GC/tree walks parse host_len
+ * from v1 host bytes and read beyond the slab allocation.
+ */
+static void
+test_reload_rejects_foreign_layout(void)
+{
+    static const char            hostname[] = "upgrade.example.com";
+    ngx_shm_zone_t              *old, *new_zone;
+    ngx_slab_pool_t             *shpool;
+    ngx_autocert_requests_sh_t  *sh;
+    ngx_autocert_request_v1_t   *v1;
+    ngx_rbtree_node_t           *root_before;
+    size_t                       host_len, size;
+
+    old = ngx_autocert_test_zone_create();
+    CHECK(old != NULL, "abi-upgrade: zone create");
+    if (old == NULL) {
+        return;
+    }
+    CHECK(ngx_autocert_requests_init_zone(old, NULL) == NGX_OK,
+          "abi-upgrade: initialize shared header");
+
+    shpool = (ngx_slab_pool_t *) old->shm.addr;
+    sh = shpool->data;
+    host_len = ngx_strlen(hostname);
+    size = offsetof(ngx_autocert_request_v1_t, host) + host_len;
+
+    ngx_shmtx_lock(&shpool->mutex);
+    v1 = ngx_slab_alloc_locked(shpool, size);
+    CHECK(v1 != NULL, "abi-upgrade: allocate a real v1-sized node");
+    if (v1 != NULL) {
+        ngx_memzero(v1, size);
+        v1->node.key = ngx_crc32_long((u_char *) hostname, host_len);
+        v1->state = NGX_AUTOCERT_REQ_ISSUED;
+        v1->first_seen = ngx_time();
+        v1->last_attempt = ngx_time();
+        v1->next_eligible = 0;
+        v1->host_len = (u_short) host_len;
+        ngx_memcpy(v1->host, hostname, host_len);
+        /* The tree is empty, so the v2 insert callback does not inspect the
+         * shorter node. After this point no v2 tree walker may run. */
+        ngx_rbtree_insert(&sh->rbtree, &v1->node);
+        sh->count = 1;
+        sh->api_version = 1;
+    }
+    ngx_shmtx_unlock(&shpool->mutex);
+
+    if (v1 == NULL) {
+        ngx_autocert_test_zone_destroy();
+        return;
+    }
+
+    root_before = sh->rbtree.root;
+    new_zone = ngx_autocert_test_zone_reload(old);
+
+    CHECK(ngx_autocert_requests_init_zone_consumer(new_zone, NULL) == NGX_OK,
+          "abi-upgrade: consumer stays inert on a foreign layout");
+    CHECK(sh->api_version == 1,
+          "abi-upgrade: consumer does not relabel the v1 arena");
+    CHECK(ngx_autocert_requests_init_zone(new_zone, NULL) == NGX_ERROR,
+          "abi-upgrade: v2 owner rejects a non-empty v1 arena");
+    CHECK(sh->api_version == 1,
+          "abi-upgrade: failed owner reload leaves the v1 stamp intact");
+    CHECK(sh->rbtree.root == root_before && sh->count == 1,
+          "abi-upgrade: failed reload leaves the foreign tree untouched");
+
+    /* Zero was the old consumer-only marker and did not identify a layout.
+     * Once nodes exist it is equally unsafe to guess, even if the node happened
+     * to have been written by v2. */
+    sh->api_version = 0;
+    CHECK(ngx_autocert_requests_init_zone(new_zone, NULL) == NGX_ERROR,
+          "abi-upgrade: owner rejects an ambiguous non-empty legacy-zero arena");
+    CHECK(sh->api_version == 0 && sh->rbtree.root == root_before,
+          "abi-upgrade: legacy-zero rejection does not mutate the arena");
+
+    ngx_autocert_test_zone_destroy();
+}
+
+
+static void
+test_reload_accepts_empty_legacy_zone(void)
+{
+    ngx_shm_zone_t              *old, *new_zone;
+    ngx_autocert_requests_sh_t  *sh;
+
+    old = ngx_autocert_test_zone_create();
+    CHECK(old != NULL, "legacy-empty: zone create");
+    if (old == NULL) {
+        return;
+    }
+    CHECK(ngx_autocert_requests_init_zone_consumer(old, NULL) == NGX_OK,
+          "legacy-empty: initialize empty consumer zone");
+    sh = ((ngx_slab_pool_t *) old->shm.addr)->data;
+
+    /* Simulate the old callback's zero marker. With no nodes, both known legacy
+     * layouts have the same header and activation cannot expose a bad node. */
+    sh->api_version = 0;
+    new_zone = ngx_autocert_test_zone_reload(old);
+    CHECK(ngx_autocert_requests_init_zone(new_zone, NULL) == NGX_OK,
+          "legacy-empty: owner accepts an empty zero-stamped arena");
+    CHECK(sh->api_version == NGX_AUTOCERT_API_VERSION,
+          "legacy-empty: owner activates the empty arena");
 
     ngx_autocert_test_zone_destroy();
 }
@@ -544,8 +695,8 @@ test_collision(void)
 
 
 /*
- * Fail-safe: a zone whose header stamps a foreign api_version (e.g. a consumer
- * created it first, or a layout upgrade) must NOT be mutated/parsed. ensure/state
+ * Fail-safe: a zone whose header stamps a foreign api_version (e.g. a layout
+ * upgrade) must NOT be mutated/parsed. ensure/state
  * return UNKNOWN, set_state returns ERROR — never touch the tree.
  */
 static void
@@ -962,6 +1113,8 @@ main(void)
     test_gc();
     test_reload_preserves_tree();
     test_reload_stamp_transitions();
+    test_reload_rejects_foreign_layout();
+    test_reload_accepts_empty_legacy_zone();
 
     if (failures) {
         fprintf(stderr, "\n%d test(s) FAILED\n", failures);

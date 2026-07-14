@@ -236,7 +236,7 @@ set an instance-wide default in `http{}` that each `server{}` may override.
 | `autocert_key_type <type> [type …]` | http | `p384` | Key type(s) for issued leaf certs. Accepts `p384`, `p256`, `rsa2048`, `rsa3072` (alias `rsa`), `rsa4096` — case-insensitive, with the OpenSSL/long aliases (`secp384r1`, `prime256v1`/`secp256r1`, `ecdsa-p384`/`ecdsa-p256`, `rsa-2048`, …) also accepted. List up to **one EC + one RSA** type (max 2 effective; ≥3 args or two of the same family is rejected) to issue and serve a **dual** EC+RSA pair per vhost — OpenSSL then picks the cert each client's handshake supports. The ACME account key stays ECDSA P-384 regardless. |
 | `autocert_challenge http-01\|tls-alpn-01\|dns-01` | http | `http-01` | ACME challenge type. `dns-01` is required for wildcards and requires both DNS hooks. |
 | `autocert_renew_before <time>` | http | `7d` | Renew this long before a cert's `notAfter`. Must be `> 0` and `≤ 89d` — a larger value would push the renew point before issuance and reissue every sweep (self-DoS / CA rate-limit), so it is rejected at config load. |
-| `autocert_runtime_ttl <time>` | http | `7d` | Idle TTL for **runtime-requested** names (the bounded shared registry a consumer module fills — see [Runtime cert requests](#runtime-cert-requests-consumer-api)). A node idle longer than this is evicted, freeing its cap slot and closing its SNI serve gate; its on-disk cert is kept (a re-learned host reuses it). "Idle" means no consumer `ensure()` and no driver activity (issuance outcome / renewal) — a live host is refreshed by both, so only de-labelled hosts age out. `0` disables eviction (learned hosts persist until restart; the 64-name cap can then wedge). Config names are never swept. |
+| `autocert_runtime_ttl <time>` | http | `7d` | Idle TTL for **runtime-requested** names (the bounded shared registry a consumer module fills — see [Runtime cert requests](#runtime-cert-api-for-other-modules)). A node idle longer than this is evicted, freeing its cap slot and closing its SNI serve gate; its on-disk cert is kept (a re-learned host reuses it). "Idle" means no consumer `ensure()` and no driver activity (issuance outcome / renewal) — a live host is refreshed by both, so only de-labelled hosts age out. `0` disables eviction (learned hosts persist until restart; the 64-name cap can then wedge). Config names are never swept. |
 | `autocert_profile <name>` | http | (none) | ACME issuance profile requested in the order (ACME Profiles draft). Let's Encrypt requires `shortlived` to issue an IP-address certificate. Omitted when unset (CA default profile). Restricted to `A-Z a-z 0-9 . _ -`. |
 | `autocert_resolver <addr> [addr…]` | http | falls back to core `resolver` | DNS resolver(s) used to reach the CA host. Same `address[:port] valid= ipv6=` syntax as core `resolver`. |
 | `autocert_resolver_timeout <time>` | http | `30s` | Timeout for that DNS resolution. |
@@ -514,10 +514,13 @@ code) lives in [`docs/API.md`](docs/API.md).
 the zone with a NULL tag and the exact same size, or nginx rejects the mismatch
 on the side that attaches second). Whichever module's postconfig runs first
 creates it; autocert's init callback stamps a zone-header `api_version`
-(currently `1`) — a consumer checks that stamp against its compiled value and
-disables the integration on mismatch (`0`/absent = autocert isn't managing the
-zone, feature off). This never depends on nginx's `init` callback `data`
-argument, which is old-cycle-only and cannot distinguish owner from consumer.
+(currently `2`) — a consumer checks that stamp against its compiled value and
+disables the integration on mismatch. A consumer-only cycle records an
+inactive-current stamp: the feature is off, but the stored layout remains known
+for a later same-version reload. An owner rejects an inherited foreign layout;
+stop nginx completely before loading an ABI-incompatible module version so it
+receives a fresh arena. Ownership never depends on nginx's `init` callback `data`
+argument.
 
 **Request lifecycle** (`ngx_autocert_request_state_e`): `REQUESTED` (consumer
 enqueued) → `PENDING` (autocert's worker-0 driver has an ACME order in flight)
