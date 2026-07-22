@@ -445,6 +445,17 @@ jobs:
             "$GITHUB_WORKSPACE/tests/unit/test_marker_open.c" -o test_marker_open
           ./test_marker_open
 
+          # Store cert retrieval: ngx_autocert_open_file_path (ngx_autocert_shared.h)
+          # is the fd-pinned open the serve path uses to read a leaf out of the
+          # store at handshake. Plants real symlinks / traversal in a temp store
+          # and asserts the happy read plus that a symlinked leaf OR ancestor is
+          # refused (per-component O_NOFOLLOW). Header-only: needs the nginx
+          # include path but no nginx objects.
+          # shellcheck disable=SC2086
+          gcc -D_GNU_SOURCE -Wall -Wextra -Werror $CORE_INC \
+            "$GITHUB_WORKSPACE/tests/unit/test_store_open.c" -o test_store_open
+          ./test_store_open
+
           # shellcheck disable=SC2086
           gcc -Wall -Werror $CORE_INC -c \
             "$GITHUB_WORKSPACE/src/ngx_autocert_alpn.c" -o alpn.o
