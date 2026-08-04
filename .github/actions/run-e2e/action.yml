@@ -1,3 +1,4 @@
+# sync-sha: 258b5585d7d1a816523950691facd9ab64046f95a3240402f6289668440bebfd
 name: Run a Pebble e2e test
 description: >
   Shared setup for the Pebble end-to-end jobs: checkout is done by the caller,

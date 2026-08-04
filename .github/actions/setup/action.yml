@@ -1,3 +1,4 @@
+# sync-sha: ed45b353e65e1af0ec8ee7cee3182b5049764e8f64165c4e1d3fc776451d320f
 name: Setup build deps
 description: >
   Install apt packages and, optionally, restore a ccache. Factored out so every

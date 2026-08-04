@@ -1,3 +1,4 @@
+# sync-sha: d865c2c93e780eac0562a1e4c790bddd91f748f10eb569d224c7eb055f3918d4
 name: Build & Test
 
 # Third-party actions pinned to commit SHAs for supply-chain safety.
@@ -62,12 +63,30 @@ jobs:
       - name: Validate scripts and source
         run: |
           bash -n tests/e2e/*.sh fuzz/*.sh tests/unit/*.sh
-          shellcheck tests/e2e/*.sh fuzz/*.sh tests/unit/*.sh
+          shellcheck tests/e2e/*.sh fuzz/*.sh tests/unit/*.sh tools/sync-stamp.sh
+          # Each stamped .github/ file carries a `# sync-sha:` of its own
+          # content, so a `--list` diff against nginx-skeleton-module names
+          # exactly which copies have drifted. The stamps are only worth
+          # reading if they cannot go stale, hence this gate: edit a workflow
+          # or a composite action without running tools/sync-stamp.sh and the
+          # PR goes red here.
+          bash tools/sync-stamp.sh --check
           # Reject literal NUL bytes in tracked C sources: they make git/rg treat
           # the file as binary and silently drop it from source search / review.
           if LC_ALL=C grep -laP '\x00' src/*.c src/*.h; then
             echo "::error::NUL byte in tracked C source (listed above)"; exit 1
           fi
+          # intToPointerCast: `(void *) 1` in ngx_autocert_serve.c is a non-null
+          # sentinel for SSL_set_ex_data, which stores a void* and never
+          # dereferences it -- the value is only ever compared against NULL.
+          # The cast is idiomatic OpenSSL and portable in practice, so the
+          # portability warning is noise here. Suppressed rather than fixed
+          # because the alternative (a file-scope dummy object to take the
+          # address of) is more machinery than the warning is worth. The check
+          # arrived with a cppcheck upgrade on the self-hosted runners, not with
+          # a code change: cppcheck 2.17.1 does not report it, the runners'
+          # newer build does, and the line predates this workflow edit.
+          #
           # Tell cppcheck the OpenSSL version so it takes the satisfied branch
           # of the >= 3.0.0 floor guard instead of evaluating the intentional
           # `#error` with the macro undefined (cppcheck doesn't parse the system
@@ -79,6 +98,7 @@ jobs:
             --suppress=missingIncludeSystem \
             --suppress=normalCheckLevelMaxBranches \
             --suppress=unusedFunction \
+            --suppress=intToPointerCast \
             src/*.c
           git diff --check
 

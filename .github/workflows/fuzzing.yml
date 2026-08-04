@@ -1,3 +1,4 @@
+# sync-sha: d2d1d2af5b0b9c7f6d58c65aaf3b77ac620346137b4f28960aff4787d13fa180
 name: Fuzzing
 
 # Manual fast fuzz regression — 30s/target on the JSON + HTTP ACME parsers
