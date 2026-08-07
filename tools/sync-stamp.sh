@@ -40,6 +40,13 @@ set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
 
 MODE=stamp
+# Reject a second argument rather than ignoring it. `--check unexpected` would
+# otherwise run check and discard the rest, so a wrapper or CI line that passes
+# a path (or a misspelled flag after a good one) reads as a clean pass.
+if [ "$#" -gt 1 ]; then
+    echo "unexpected argument: $2" >&2
+    exit 2
+fi
 case "${1:-}" in
     --check) MODE=check ;;
     --list) MODE=list ;;
@@ -131,8 +138,26 @@ targets() {
 
 # The digest of a file with its own stamp line stripped -- see THE
 # SELF-REFERENCE above.
+# `|| true` on the grep, not laziness: grep exits 1 when it prints NOTHING, and
+# a file whose every line is a stamp line (an empty .github/scripts/*.sh that
+# has been stamped) is exactly that case. Under `pipefail` the bare pipeline
+# would abort the whole run at the first such file instead of hashing the empty
+# content it legitimately has. grep exits >1 only on a real error, and that
+# still has to be distinguishable, so test for it rather than swallowing both.
 content_sha() {
+    local rc=0
+    # NOT `out="$(grep ...)"` -- command substitution strips trailing newlines,
+    # which would change the digest of every already-stamped file and turn this
+    # fix into a mass re-stamp. The bytes must reach sha256sum exactly as grep
+    # emits them, so keep the pipe and recover grep's status via PIPESTATUS.
+    set +o pipefail
     grep -v '^# sync-sha: ' -- "$1" | sha256sum | cut -d' ' -f1
+    rc="${PIPESTATUS[0]}"
+    set -o pipefail
+    if [ "$rc" -gt 1 ]; then
+        echo "sync-stamp: cannot read $1" >&2
+        return 1
+    fi
 }
 
 stamp_of() {
@@ -185,7 +210,18 @@ insert_stamp() {
     # Write back through the original file rather than mv'ing over it: the mode,
     # owner and inode are kept with no chmod --reference (GNU-only) and no
     # cross-filesystem mv. .github/scripts/*.sh must stay executable.
-    cat "$tmp" >"$f"
+    #
+    # The redirection truncates $f before cat writes, so an ENOSPC or I/O error
+    # mid-copy leaves a workflow file truncated on disk -- and the content that
+    # would repair it is in $tmp, which the RETURN trap is about to delete. $tmp
+    # is therefore kept until the destination is confirmed byte-for-byte, and
+    # restored from it if not. In-place rewriting is the requirement here; this
+    # bounds its cost rather than trading the inode away for atomicity.
+    if ! cat "$tmp" >"$f" || [ "$(wc -c <"$f")" -ne "$(wc -c <"$tmp")" ]; then
+        cat "$tmp" >"$f" || true
+        echo "sync-stamp: short write to $f -- restored from $tmp" >&2
+        return 1
+    fi
 }
 
 # A process substitution discards the exit status of what runs inside it. With
@@ -201,8 +237,20 @@ if ! targets >"$raw_list"; then
     exit 2
 fi
 
+# Same reasoning as the discovery guard above, and it has to be applied twice:
+# a process substitution discards the exit status of what runs inside it, so a
+# `sort` that fails after emitting a prefix reaches mapfile as a plain EOF and
+# --check reports "all N file(s) current" over a truncated target set. Sort to
+# a file, check the status, then read.
+sorted_list="$(mktemp)"
+trap 'rm -f "$raw_list" "$sorted_list"' EXIT
+if ! LC_ALL=C sort -z -- "$raw_list" >"$sorted_list"; then
+    echo "sync-stamp: sorting the target list failed -- refusing to report a partial result" >&2
+    exit 2
+fi
+
 targets_list=()
-mapfile -t -d '' targets_list < <(LC_ALL=C sort -z -- "$raw_list")
+mapfile -t -d '' targets_list <"$sorted_list"
 
 rc=0
 count=0
