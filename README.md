@@ -128,6 +128,11 @@ http {
     # ---- instance-wide defaults (folded into every server) ----
     autocert            on;                      # http,server | default: off
     autocert_contact    admin@example.com;       # http,server | ACME account email (optional)
+                                                 #   BARE address -- the module prepends "mailto:".
+                                                 #   "mailto:admin@example.com" passes config parse
+                                                 #   (one '@', text both sides) and is then sent as
+                                                 #   "mailto:mailto:..." -> the CA rejects the account
+                                                 #   with a 400 invalidContact.
     autocert_ca         https://acme-v02.api.letsencrypt.org/directory;
                                                  # http,server | default: LE production (mutually exclusive with autocert_staging)
     autocert_staging    off;                     # http,server | default: off          (on = LE staging directory)
@@ -224,7 +229,7 @@ set an instance-wide default in `http{}` that each `server{}` may override.
 | Directive | Context | Default | Description |
 |---|---|---|---|
 | `autocert on\|off` | http, server | `off` | Master switch. A `server{}`-level `autocert on` is what seeds the empty cert arrays so a cert-less vhost still builds an SSL_CTX. |
-| `autocert_contact <email>` | http, server | (none) | ACME account contact email (one `@`, non-empty both sides). Picked per CA group — the first non-empty contact from a vhost in that group. (Was the optional 2nd arg of `autocert on`.) |
+| `autocert_contact <email>` | http, server | (none) | ACME account contact email — a **bare** address, no `mailto:` prefix (the module adds one). One `@`, non-empty both sides. Picked per CA group — the first non-empty contact from a vhost in that group. (Was the optional 2nd arg of `autocert on`.) |
 | `autocert_wildcard *.rest [*.rest …]` | http, server | (none) | Declare wildcard SAN(s) for this scope **without** putting `*.` in `server_name` (which would also make the vhost a subdomain catch-all). In `http{}` it applies to every enabled vhost; a `server{}` occurrence adds to that vhost. **dns-01 only.** A concrete `server_name` the wildcard covers (one leading label, e.g. `a.example.com` under `*.example.com`) is served from the wildcard cert, not issued separately. Repeatable; sole-leading-label form only. |
 | `autocert_ca <url>` | http, server | LE production `https://acme-v02.api.letsencrypt.org/directory` | ACME directory URL to issue against. Distinct effective URLs become distinct CA groups. Mutually exclusive with `autocert_staging`. |
 | `autocert_staging on\|off` | http, server | `off` | Shorthand for the LE staging directory (`https://acme-staging-v02.api.letsencrypt.org/directory`). For CI; no production rate limits. Mutually exclusive with `autocert_ca`. |
@@ -278,6 +283,34 @@ the token only when the resolved server has autocert enabled. The `:80` vhost th
 answers the CA must therefore be (or inherit) an autocert-enabled server — a bare
 `listen 80;` vhost with autocert disabled will decline the challenge. The `:80` /
 `:443` requirements above are the ACME protocol's, not enforced by the module.
+
+> **A content handler on the `:80` vhost shadows the challenge.** Because the
+> token is served from a phase *handler*, any `location` that sets a content
+> handler covering `/.well-known/acme-challenge/` wins instead — a catch-all
+> `location / { return 301 https://$host$request_uri; }`, a `root` plus the
+> static handler, or a `proxy_pass`. The CA then reads a redirect, the wrong
+> body, or a 404, and the order fails with *"authorization did not become
+> valid"* — with nothing logged by this module, since its handler never ran.
+> Either keep the `:80` vhost free of a catch-all, or carve the prefix out
+> ahead of it:
+>
+> ```nginx
+> server {
+>     listen 80;
+>     server_name example.com;
+>     autocert on;
+>
+>     # Empty block: it sets no content handler, so the phase handler above
+>     # stays reachable. Longest-prefix wins, so this beats `location /`
+>     # wherever it appears in the file.
+>     location ^~ /.well-known/acme-challenge/ { }
+>
+>     location / { return 301 https://$host$request_uri; }
+> }
+> ```
+>
+> `^~` additionally stops nginx from evaluating regex locations, which would
+> otherwise be tried after the prefix match and could take the request back.
 
 ### DNS-01 hook contract
 
