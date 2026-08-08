@@ -605,11 +605,11 @@ Consumer implementation reference:
 
 ## Build & test
 
-OpenSSL ≥ 3.0.0 required. **`--with-http_ssl_module` is mandatory** — this is an
-ACME client, so it opens its own TLS connections to the CA and serves per-SNI
-certificates, all of which needs nginx's SSL support. `configure` rejects a build
-without it. (`--with-http_v3_module` implies SSL support and satisfies the check
-on its own.)
+OpenSSL ≥ 3.0.0 required. **nginx must be built with HTTP SSL support**: this is
+an ACME client, so it opens its own TLS connections to the CA and serves per-SNI
+certificates. Either `--with-http_ssl_module` or `--with-http_v3_module` provides
+it (the latter turns SSL support on implicitly). `configure` rejects a build with
+neither.
 
 Build as a standard dynamic module:
 

@@ -12,8 +12,10 @@ ngx_addon_name=ngx_http_autocert_module
 # implies it too (auto/modules); either is a valid way to satisfy this module.
 if [ "${HTTP_SSL:-NO}" != YES ]; then
     echo
-    echo "$0: error: $ngx_addon_name requires SSL support. Reconfigure with:"
+    echo "$0: error: $ngx_addon_name requires nginx HTTP SSL support."
+    echo "Reconfigure with either:"
     echo "  --with-http_ssl_module"
+    echo "  --with-http_v3_module   (turns SSL support on implicitly)"
     echo
     exit 1
 fi
