@@ -1,4 +1,4 @@
-# sync-sha: 50a8c6bfec51e934ceb7e85fa34e79d841e569489f90f354322ebf3fe7e5629c
+# sync-sha: afe234dc82672d556d7d06cb756b498cde9fecae1c903d1490016bb6b3f4b767
 name: CI
 
 # Single entry point for the PR suite (skeleton standard, ci/PROMPT.md step 17).
@@ -48,6 +48,12 @@ jobs:
     permissions:
       contents: read
     uses: ./.github/workflows/security-scanners.yml
+
+  lint:
+    name: Lint
+    permissions:
+      contents: read
+    uses: ./.github/workflows/lint.yml
 
   codeql:
     name: CodeQL

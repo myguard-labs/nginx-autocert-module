@@ -1,0 +1,72 @@
+# sync-sha: aa1e7fa7b0473912c2f6aa9df1df7be4b28456bce0bd79edc7f7f93bb6d814fe
+name: Lint
+
+# The same ci/linter/ scripts a developer runs locally, run again on the PR --
+# so a clone that never enabled the hook (`git config core.hooksPath .githooks`)
+# cannot land nginx-convention, shell or workflow-syntax regressions. Local and
+# remote run the SAME entry point on purpose: a CI-only reimplementation drifts
+# from the hook and the two stop agreeing.
+#
+# LINT_ONLY includes every ci/linter/lint-*.sh checker in this repo -- unlike
+# the reference skeleton, which excludes "c" here because its C scanners
+# duplicate security-scanners.yml. This module's LINT_ONLY is kept a strict 1:1
+# match with the checker set instead (ci/linter/selftest.sh enforces it), so
+# lint-c.sh DOES run here even though flawfinder/clang-tidy/semgrep also run in
+# security-scanners.yml -- accepted duplication, see ci/linter/README.md.
+#
+# runs-on: ubuntu-latest, NOT the self-hosted pool. This job needs no nginx
+# build, and ci.yml deliberately caps peak self-hosted use; putting lint on a
+# hosted runner keeps that cap intact while giving the fastest feedback in the
+# suite.
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+on:
+  # Triggered by ci.yml, like every other member of the suite. No
+  # push/pull_request trigger here: two entry points would run it twice per PR.
+  workflow_call: {}
+
+concurrency:
+  group: lint-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: Linters
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout module
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          persist-credentials: false
+
+      - name: Install linters
+        # One installer for CI and for a fresh clone; a second apt list here
+        # would be the thing that goes stale.
+        run: ci/linter/install-linters.sh
+
+      - name: Verify the toolchain is complete
+        # A linter missing from PATH makes its check exit 2, which run-all.sh
+        # reports as a failure rather than skipping -- this step just surfaces
+        # WHICH one before the findings scroll past.
+        run: ci/linter/install-linters.sh --check
+
+      - name: Selftest the gate
+        # Before trusting the next step's verdict, prove the gate can still say
+        # no: a selector that matches nothing must exit 2, not report clean.
+        # The step below narrows the run with LINT_ONLY, so a silent selector
+        # is exactly the failure that would make this whole job vacuous.
+        run: ci/linter/selftest.sh
+
+      - name: Run linters
+        env:
+          # Every checker in ci/linter/lint-*.sh -- adding a lint-*.sh without
+          # adding its name here leaves it running locally and never in CI,
+          # which is the quieter half of a gate that is not really a gate.
+          LINT_ONLY: c ci-cadence ci-ports ci-runners ci-secrets docs-drift nginx sh spelling sync-stamp yaml
+        run: ci/linter/run-all.sh
