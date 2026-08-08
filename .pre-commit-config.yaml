@@ -211,26 +211,6 @@ repos:
       # cwd-guessing -- pre-commit hooks do not guarantee cwd the way a bare
       # `actionlint` invocation from a shell does.
       #
-      # -ignore runner-label: actionlint 1.7.7 ships a FIXED list of GitHub
-      # *hosted* runner images and flags anything newer as "unknown label".
-      # A config file cannot fix this one: its label list declares SELF-hosted
-      # labels, and there is no section for "GitHub-hosted images this
-      # actionlint release does not know yet". So this ignore is needed either
-      # way. Several
-      # repos legitimately target ubuntu-26.04 / ubuntu-26.04-arm, which that
-      # version has never heard of. Every such report is a false positive about
-      # the linter's age, not the workflow, and leaving it on lands this hook
-      # red on arrival. Drop this ignore once actionlint is new enough.
-      #
-      # The pattern matches HOSTED-IMAGE-SHAPED labels only, and that narrowness
-      # is the point. actionlint emits byte-identical text for an unknown hosted
-      # image and for a MISTYPED self-hosted label, so the obvious
-      # `label ".+" is unknown` suppresses both -- and a typo'd runner label is
-      # precisely what -config-file above exists to make reportable. Verified
-      # 2026-08-02 against 1.7.7: with this pattern, ubuntu-26.04, macos-16 and
-      # windows-2028 are silent while `buidler02` (a typo for a declared label)
-      # is still reported. Do not widen it back to `.+`.
-      #
       # SHELLCHECK_OPTS applies to the shellcheck actionlint runs over `run:`
       # blocks. Without it that embedded pass reports at INFO while the
       # standalone shellcheck hook below gates at warning -- so the same SC2086
@@ -238,7 +218,7 @@ repos:
       # in both places.
       - id: actionlint
         name: actionlint (workflow syntax)
-        entry: env SHELLCHECK_OPTS=-Swarning actionlint -config-file .github/actionlint.yaml -ignore 'label "(ubuntu|macos|windows)-[0-9]+(\.[0-9]+)?(-arm|-arm64|-large|-xlarge|-xl)?" is unknown'
+        entry: env SHELLCHECK_OPTS=-Swarning actionlint -config-file .github/actionlint.yaml
         language: system
         files: ^\.github/workflows/.*\.ya?ml$
         pass_filenames: true
