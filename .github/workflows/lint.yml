@@ -1,0 +1,95 @@
+# sync-sha: 478b2e993cc0c822ca3991adf5c770dbf84262f056210dad98936071e6ae2c5c
+name: Lint
+
+# The same ci/linter/ scripts a developer runs locally, run again on the PR --
+# so a clone that never enabled the hook (`git config core.hooksPath .githooks`)
+# cannot land nginx-convention, shell or workflow-syntax regressions. Local and
+# remote run the SAME entry point on purpose: a CI-only reimplementation drifts
+# from the hook and the two stop agreeing.
+#
+# LINT_ONLY is deliberately a SUBSET of the ci/linter/lint-*.sh set. Two
+# distinct reasons, and the difference matters:
+#
+#   "c"  -- permanently excluded. flawfinder / clang-tidy / semgrep already run
+#           over src/ in security-scanners.yml on every PR and push, so running
+#           lint-c.sh here would pay for the same scan twice and report each C
+#           finding in two places. This matches the reference skeleton.
+#
+#   yaml, nginx, spelling, ci-cadence, ci-runners -- excluded TEMPORARILY.
+#           Each is red against conditions that predate this gate, none of
+#           which this workflow introduced:
+#             yaml        line length / document-start across all 9 workflows
+#             nginx       80-column style across src/
+#             spelling    codespell hits
+#             ci-cadence  build-test / codeql / security-scanners each carry a
+#                         push: while also being workflow_call members
+#             ci-runners  every self-hosted runs-on is a plain label list, not
+#                         the fork-aware trust-split selector TRUST_SPLITS
+#                         accepts (see ci/linter/workflow_policy.py)
+#           Turning them on here before fixing those would make Lint a gate
+#           that is red on arrival and blocks every unrelated PR, which trains
+#           people to ignore it. Each has a row in issues.md; a checker is
+#           added back to this list in the same PR that makes it green, so the
+#           gate only ever ratchets forward.
+#
+# Every checker still runs locally and in the pre-commit hook via run-all.sh --
+# the exclusions are about what BLOCKS a PR, not about what is checked.
+#
+# runs-on: ubuntu-latest, NOT the self-hosted pool. This job needs no nginx
+# build, and ci.yml deliberately caps peak self-hosted use; putting lint on a
+# hosted runner keeps that cap intact while giving the fastest feedback in the
+# suite.
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+on:
+  # Triggered by ci.yml, like every other member of the suite. No
+  # push/pull_request trigger here: two entry points would run it twice per PR.
+  workflow_call: {}
+
+concurrency:
+  group: lint-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: Linters
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout module
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          persist-credentials: false
+
+      - name: Install linters
+        # One installer for CI and for a fresh clone; a second apt list here
+        # would be the thing that goes stale.
+        run: ci/linter/install-linters.sh
+
+      - name: Verify the toolchain is complete
+        # A linter missing from PATH makes its check exit 2, which run-all.sh
+        # reports as a failure rather than skipping -- this step just surfaces
+        # WHICH one before the findings scroll past.
+        run: ci/linter/install-linters.sh --check
+
+      - name: Selftest the gate
+        # Before trusting the next step's verdict, prove the gate can still say
+        # no: a selector that matches nothing must exit 2, not report clean.
+        # The step below narrows the run with LINT_ONLY, so a silent selector
+        # is exactly the failure that would make this whole job vacuous.
+        run: ci/linter/selftest.sh
+
+      - name: Run linters
+        env:
+          # A SUBSET of ci/linter/lint-*.sh -- see this file's header for the
+          # two reasons and the staged_out list in ci/linter/selftest.sh, which
+          # fails on any omission not named there. Adding a lint-*.sh without
+          # adding its name leaves it running locally and never in CI, which is
+          # the quieter half of a gate that is not really a gate.
+          LINT_ONLY: ci-ports ci-secrets docs-drift sh sync-stamp
+        run: ci/linter/run-all.sh
