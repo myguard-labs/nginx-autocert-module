@@ -1,4 +1,4 @@
-# sync-sha: fd6879e7c9c01aed24c117df19ac3fd7267228d51e6b02052e5eb86f6ca18b0e
+# sync-sha: 393e025b89fcc813d23ad54a0fb1f38078103965531dadc1dd36d747ac13ae13
 name: CI Deep
 
 # Exhaustive dynamic analysis — monthly cron, release, and on-demand only,
@@ -9,7 +9,13 @@ name: CI Deep
 # SARIF-upload path is removed too — the scanners still run and GATE on
 # findings, they just don't upload.
 #
-# Jobs: fuzz (14400s/target) · memcheck soak · helgrind soak · scanners.
+# Jobs: fuzz (14400s/target) · memcheck soak · helgrind soak · scanners ·
+#       e2e-angie (the Pebble suite on angie).
+#   * e2e-angie moved here out of build-test.yml: at ~11.5 minutes it was the
+#     per-PR wall-clock, while covering the same module logic as the nginx leg
+#     that still runs on every PR. build-test.yml keeps build-angie, so an angie
+#     compile/load break is still caught pre-merge; only the Pebble issuance/
+#     renewal run is deferred to this monthly/on-demand workflow.
 #   * memcheck AND helgrind both run tools/soak.sh, which passes
 #     --suppressions=tools/valgrind.supp and (helgrind) --error-exitcode=99 —
 #     the drift-fix baseline for every module.
@@ -289,3 +295,91 @@ jobs:
             ${{ github.workspace }}/clang-tidy.log
             ${{ github.workspace }}/semgrep.log
           retention-days: 14
+
+  # ------------------------------------------------------------------ angie e2e
+  # The full Pebble issuance/renewal suite against angie. Lives here rather than
+  # in build-test.yml because it costs ~11.5 minutes and duplicates the module
+  # coverage of the nginx leg that still gates every PR; build-test.yml keeps
+  # build-angie, so an angie compile/load/USR2 break is caught pre-merge.
+  #
+  # Self-contained (no cross-workflow artifact): it resolves the latest angie,
+  # builds the module against it with the same composite action build-test uses,
+  # then runs tests/e2e/run-all.sh against the freshly built tree.
+  e2e-angie:
+    name: e2e suite (Pebble) [angie]
+    runs-on: [self-hosted, builder02, docker]
+    timeout-minutes: 60
+    steps:
+      - name: Checkout module
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+
+      - name: Resolve latest angie
+        id: v
+        run: |
+          set -euo pipefail
+          angie=$(curl -fsSL https://download.angie.software/files/ \
+            | grep -oP 'angie-\K[0-9]+\.[0-9]+\.[0-9]+(?=\.tar\.gz)' \
+            | sort -V | tail -1)
+          if [ -z "$angie" ]; then
+            echo "::error::could not resolve latest angie version"; exit 1
+          fi
+          echo "Resolved angie: $angie"
+          {
+            echo "angie_version=$angie"
+            echo "angie_dir=angie-$angie"
+            echo "angie_url=https://download.angie.software/files/angie-$angie.tar.gz"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Build module + load/serve tests
+        uses: ./.github/actions/build-module
+        with:
+          flavor: angie
+          version: ${{ steps.v.outputs.angie_version }}
+          url: ${{ steps.v.outputs.angie_url }}
+          dir: ${{ steps.v.outputs.angie_dir }}
+
+      - name: Install python cryptography for the mock CAs
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y python3-cryptography
+
+      - name: Run the full e2e suite against angie
+        run: |
+          set -uo pipefail
+          NGX="$GITHUB_WORKSPACE/${{ steps.v.outputs.angie_dir }}"
+          BIN="$NGX/objs/angie"
+          [ -f "$BIN" ] || BIN="$NGX/objs/nginx"
+          chmod +x "$BIN"
+          # Same port-budget rule as build-test.yml's e2e job: every published
+          # host port MUST stay below the ephemeral range, or docker races the
+          # kernel's own outbound allocations and fails a RANDOM test with
+          # "port is already allocated" (exit 125). Keep run_offset small enough
+          # that max(PORT_BASES) + run_offset + 1000 + max_slot*100 < 32768.
+          run_offset=$(( (GITHUB_RUN_ID % 6) * 1500 ))
+          port_offset=$(( run_offset + 1000 ))
+          echo "e2e port offset: run_offset=${run_offset} flavor_offset=1000 port_offset=${port_offset}"
+
+          ephemeral_lo=$(cut -f1 < /proc/sys/net/ipv4/ip_local_port_range)
+          max_port=$(AC_PORT_OFFSET="$port_offset" bash tests/e2e/max-port.sh)
+          echo "e2e highest published port: ${max_port} (ephemeral floor ${ephemeral_lo})"
+          if [ "$max_port" -ge "$ephemeral_lo" ]; then
+              echo "::error::e2e port budget blown: highest published port ${max_port}" \
+                   ">= ephemeral floor ${ephemeral_lo}; shrink run_offset in ci-deep.yml"
+              exit 1
+          fi
+
+          SERVER_BIN="$BIN" NGX_BUILD_DIR="$NGX" FLAVOR="angie" AC_PORT_OFFSET="$port_offset" \
+            bash tests/e2e/run-all.sh
+
+      - name: Notify Discord on failure
+        if: failure() && github.event_name == 'schedule'
+        env:
+          DISCORD_BOT_TOKEN: ${{ secrets.DISCORD_BOT_TOKEN }}
+          DISCORD_CHANNEL_BUILDS: ${{ secrets.DISCORD_CHANNEL_BUILDS }}
+        run: |
+          [ -n "$DISCORD_BOT_TOKEN" ] || exit 0
+          curl -fsS -X POST -H "Authorization: Bot $DISCORD_BOT_TOKEN" \
+            -H "Content-Type: application/json" \
+            "https://discord.com/api/v10/channels/$DISCORD_CHANNEL_BUILDS/messages" \
+            -d "{\"content\":\"🔴 ${{ github.repository }} — CI Deep / e2e-angie FAILED. ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\"}" || true
