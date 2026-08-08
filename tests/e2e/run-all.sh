@@ -66,6 +66,13 @@ set_ports() {
 
 export AC_PORT_OFFSET
 
+# Run tag: identifies this job to distinguish it from concurrent sibling jobs
+# sharing a self-hosted runner. Used in container/network names to prevent one
+# job's cleanup from killing another job's live resources. Format: GITHUB_RUN_ID
+# (set by GitHub Actions) or local+PID for local test runs.
+AC_E2E_RUN_TAG="${GITHUB_RUN_ID:-local$$}"
+export AC_E2E_RUN_TAG
+
 set_ports 0
 echo "e2e ${FLAVOR}: AC_PORT_OFFSET=${AC_PORT_OFFSET} AC_PORT_14000=${AC_PORT_14000} AC_PORT_15000=${AC_PORT_15000}"
 
@@ -164,6 +171,7 @@ invoke() {   # invoke <use_sudo> <script-abs> [extra env KEY=VAL ...]
     local env_kv=("SERVER_BIN=$SERVER_BIN" "NGX_BUILD_DIR=$NGX_BUILD_DIR" \
                   "AC_PORT_OFFSET=$AC_PORT_OFFSET" \
                   "AC_EFFECTIVE_PORT_OFFSET=$AC_EFFECTIVE_PORT_OFFSET" \
+                  "AC_E2E_RUN_TAG=$AC_E2E_RUN_TAG" \
                   "PREFIX=$AC_E2E_PREFIX" "$@")
     local name
     while IFS='=' read -r name _; do
@@ -188,16 +196,21 @@ invoke() {   # invoke <use_sudo> <script-abs> [extra env KEY=VAL ...]
 # This runs ONCE, before the first task starts, so intra-job concurrency
 # (AC_E2E_JOBS>1) is unaffected - no task of ours is alive yet.
 #
-# It is name-pattern-wide, though, not scoped to this job: two e2e JOBS landing
-# on the same runner would have the later one reap the earlier one's live
-# containers. That is already true of the two flavor jobs today and has not
-# bitten, because they are dispatched to separate docker lanes. Sharding the
-# suite across more jobs than there are lanes would make it reachable - scope
-# the filter by GITHUB_RUN_ID before doing that.
+# Container names are scoped by AC_E2E_RUN_TAG to distinguish concurrent e2e
+# jobs on the same self-hosted runner. We reap only containers that DON'T match
+# our tag, preserving live sibling jobs' resources while cleaning up stale
+# containers from previous runs.
 for pat in 'ac-dns-' 'ac-pebble-'; do
-    docker ps -aq --filter "name=${pat}" | xargs -r docker rm -f >/dev/null 2>&1 || true
+    # Find all ac-* containers with this pattern, filter those that don't match our tag.
+    # Name format: ac-dns-${AC_E2E_RUN_TAG}-$$, ac-pebble-${AC_E2E_RUN_TAG}-$$, etc.
+    docker ps -a --filter "name=${pat}" --format "{{.Names}}" | \
+        grep -v -- "-${AC_E2E_RUN_TAG}-" | \
+        xargs -r docker rm -f >/dev/null 2>&1 || true
 done
-docker network ls -q --filter 'name=ac-net-' | xargs -r docker network rm >/dev/null 2>&1 || true
+# Reap networks that don't match our tag (format: ac-net-${AC_E2E_RUN_TAG}-$$).
+docker network ls --filter 'name=ac-net-' --format "{{.Name}}" | \
+    grep -v -- "-${AC_E2E_RUN_TAG}-" | \
+    xargs -r docker network rm >/dev/null 2>&1 || true
 
 chmod +x "$SERVER_BIN" 2>/dev/null || true
 

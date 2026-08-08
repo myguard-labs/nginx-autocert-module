@@ -30,9 +30,10 @@ HTTP_SO="$NGX_BUILD_DIR/objs/ngx_http_autocert_module.so"
 [ -f "$HTTP_SO" ] || { echo "missing $HTTP_SO"; exit 1; }
 
 PREFIX="${PREFIX:-/tmp/ac-renewal}"
-NET_NAME="ac-net-$$"
-PEBBLE_NAME="ac-pebble-$$"
-DNS_NAME="ac-dns-$$"
+AC_E2E_RUN_TAG="${AC_E2E_RUN_TAG:-local$$}"
+NET_NAME="ac-net-${AC_E2E_RUN_TAG}-$$"
+PEBBLE_NAME="ac-pebble-${AC_E2E_RUN_TAG}-$$"
+DNS_NAME="ac-dns-${AC_E2E_RUN_TAG}-$$"
 DOMAIN_A="a.example.com"
 DOMAIN_B="b.example.com"
 
