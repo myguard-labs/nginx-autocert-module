@@ -108,8 +108,12 @@ echo "== config test =="
 # binary, so it is where a load-time/config-time sanitizer report surfaces. A
 # bare invocation would abort the script with the report still sitting unread
 # in logs/asan* and the job naming nothing.
-if ! "$NGINX" -t -p "$WORK" -c "$WORK/conf/nginx.conf"; then
-    rc=$?
+# `rc` is captured from the command itself, not from an `if ! cmd` test: the
+# `!` negation resets `$?` to 0, so capturing inside the branch would report
+# success and `exit 0` would turn a failed config test green.
+rc=0
+"$NGINX" -t -p "$WORK" -c "$WORK/conf/nginx.conf" || rc=$?
+if [ "$rc" -ne 0 ]; then
     echo "FAIL: config test failed (exit $rc)"
     if ls "$WORK"/logs/asan* >/dev/null 2>&1; then
         echo "--- ASAN/UBSAN report from config test ---"
