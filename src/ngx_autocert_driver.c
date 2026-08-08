@@ -746,8 +746,15 @@ ngx_autocert_account_done(ngx_autocert_account_t *acct, ngx_int_t rc)
 
 /* Periodic check interval, capped so we re-examine within a renew window. */
 #define NGX_AUTOCERT_SCHED_INTERVAL  (12 * 60 * 60 * 1000)   /* 12h, ms ceiling */
-/* Never sweep faster than this, even for a tiny renew_before (avoid busy-loop). */
+/* Never sweep faster than this, even for a tiny renew_before (avoid busy-loop).
+ * Under NGX_AUTOCERT_TEST this is 5s instead of 60s so the Pebble e2e suite's
+ * polling loops (retry-after.sh / backoff.sh / runtime-ttl-gc.sh / renewal.sh)
+ * don't have to sit through a real-world 60s floor; production keeps 60s. */
+#if (NGX_AUTOCERT_TEST)
+#define NGX_AUTOCERT_SCHED_FLOOR     (5 * 1000)              /* 5s, ms (test) */
+#else
 #define NGX_AUTOCERT_SCHED_FLOOR     (60 * 1000)             /* 60s, ms */
+#endif
 /* First scan shortly after startup (account is registered by then). */
 #define NGX_AUTOCERT_SCHED_INITIAL   (1000)                  /* 1s, ms */
 
@@ -758,8 +765,17 @@ ngx_autocert_account_done(ngx_autocert_account_t *acct, ngx_int_t rc)
  * every sweep. A success clears it. (ngx_autocert_backoff_t is defined near the
  * top; each CA engine owns its own per-name array in ngx_autocert_ca_state_t.)
  */
+/* Under NGX_AUTOCERT_TEST the first hold is 5s instead of 60s so backoff.sh /
+ * retry-after.sh don't wait a real minute per observed attempt; MAXSHIFT/CAP
+ * keep their production semantics (only the base hold shrinks). */
+#if (NGX_AUTOCERT_TEST)
+#define NGX_AUTOCERT_BACKOFF_BASE    5           /* 5s first retry hold (test) */
+#else
 #define NGX_AUTOCERT_BACKOFF_BASE    60          /* 60s first retry hold */
-#define NGX_AUTOCERT_BACKOFF_MAXSHIFT 6          /* 60s..3840s growth */
+#endif
+#define NGX_AUTOCERT_BACKOFF_MAXSHIFT 6          /* growth is BASE<<min(fails-1,MAXSHIFT):
+                                                   * 60s..3840s in production (BASE=60),
+                                                   * 5s..320s under NGX_AUTOCERT_TEST (BASE=5) */
 #define NGX_AUTOCERT_BACKOFF_CAP     (60 * 60)   /* 1h ceiling, seconds */
 
 static ngx_event_t              ngx_autocert_sched_timer;

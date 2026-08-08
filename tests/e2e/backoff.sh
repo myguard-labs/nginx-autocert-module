@@ -10,10 +10,26 @@
 #                          every attempt.
 #
 # The scheduler must NOT re-order the failing name every sweep: after a failure
-# it holds the name off for an exponential backoff (60s first). With a small
-# autocert_renew_before the sweep period is short, so we can watch two attempts
-# for the bad name and assert the gap between them is >= ~60s (backoff held),
-# while the good name issued once and is not re-ordered.
+# it holds the name off for an exponential backoff (5s, then 10s, then 20s...
+# BASE=5, NGX_AUTOCERT_TEST build). The oracle only works if the sweep period is
+# SHORTER than the backoff step being measured -- otherwise the sweep, not the
+# backoff, sets the spacing between failures and a build with backoff deleted
+# would still pass. autocert_renew_before is set here to floor the sweep at the
+# 5s NGX_AUTOCERT_SCHED_FLOOR.
+#
+# Each failed order attempt against the unroutable BAD name also takes a fixed
+# ~15-20s (Pebble's own VA retry/give-up cadence, outside this module's
+# control) BEFORE the "ACME order failed" log line, so an absolute gap
+# threshold between two failures cannot discriminate: it is dominated by that
+# fixed order duration, not the backoff hold, and does not fall low enough to
+# fail even with backoff sabotaged to a no-op (measured: sabotaged gap ~21s,
+# clean gap ~21s for the FIRST retry -- indistinguishable). What DOES
+# discriminate is GROWTH: the backoff step doubles (5s -> 10s) between the
+# first and second retry, so the inter-attempt-START gap must grow by
+# approximately one backoff step across three attempts, while a no-op backoff
+# holds it flat. We therefore compare the two inter-start gaps (1st->2nd vs
+# 2nd->3rd) and require the second to exceed the first by a margin only the
+# growing backoff explains. The good name issued once and is not re-ordered.
 #
 # Inputs (env):
 #   SERVER_BIN   - path to the built nginx/angie binary (required)
@@ -110,8 +126,10 @@ done
 
 docker cp "$PEBBLE_NAME:/test/certs/pebble.minica.pem" "$PREFIX/ca.pem"
 
-# renew_before 130s => sweep period = renew_before/2 = 65s, just over the 60s
-# first backoff, so the failing name becomes eligible again on the next sweep.
+# renew_before 10s => sweep period = renew_before/2 = 5s, clamped at the 5s
+# NGX_AUTOCERT_TEST NGX_AUTOCERT_SCHED_FLOOR -- deliberately shorter than the
+# backoff step under measurement below (10s), so the backoff, not the sweep,
+# is what spaces out the failing name's retries.
 cat > "$PREFIX/conf/nginx.conf" <<EOF
 load_module $HTTP_SO;
 user root;   # worker-0 ACME driver writes the store; keep worker uid able to
@@ -125,7 +143,7 @@ http {
     autocert_resolver_timeout 5s;
     autocert_ca_trusted_certificate $PREFIX/ca.pem;
     autocert_store_path $PREFIX/store;
-    autocert_renew_before 130s;
+    autocert_renew_before 10s;
     server { listen ${AC_PORT_5002:-5002}; server_name ${GOOD}; }
     server { listen ${AC_PORT_5002:-5002}; server_name ${BAD}; }
 }
@@ -147,32 +165,42 @@ for i in $(seq 1 120); do
 done
 echo "✓ ${GOOD} provisioned"
 
-# Wait for two failures of the bad name, then check they are spaced by the
-# backoff (>= ~55s, allowing a little slack under the 60s floor).
-echo "== watching bad-name failures for backoff spacing (up to ~150s) =="
-deadline=$(( $(date +%s) + 160 ))
+# Wait for THREE order attempts (starts, not failures) of the bad name, so we
+# can measure two consecutive inter-attempt gaps and check they GROW -- see
+# the rationale above for why an absolute-threshold gap is not discriminating
+# here.
+echo "== watching bad-name order attempts for backoff growth (up to ~90s) =="
+deadline=$(( $(date +%s) + 90 ))
 while :; do
-    n=$(grep -c "ACME order failed for \"${BAD}\"" "$LOG" || true)
-    [ "$n" -ge 2 ] && break
-    [ "$(date +%s)" -ge "$deadline" ] && { echo "::error::did not observe 2 failures of ${BAD} (got $n)"; grep autocert "$LOG" | tail -40; exit 1; }
+    n=$(grep -c "starting ACME order for \"${BAD}\"" "$LOG" || true)
+    [ "$n" -ge 3 ] && break
+    [ "$(date +%s)" -ge "$deadline" ] && { echo "::error::did not observe 3 order attempts for ${BAD} (got $n)"; grep autocert "$LOG" | tail -40; exit 1; }
     sleep 2
 done
 
-# Extract epoch seconds of the first two failures (nginx log ts: YYYY/MM/DD HH:MM:SS).
-mapfile -t TS < <(grep "ACME order failed for \"${BAD}\"" "$LOG" \
+# Extract epoch seconds of the first three attempt starts (nginx log ts: YYYY/MM/DD HH:MM:SS).
+mapfile -t TS < <(grep "starting ACME order for \"${BAD}\"" "$LOG" \
     | sed -E 's#^([0-9]{4})/([0-9]{2})/([0-9]{2}) ([0-9:]{8}).*#\1-\2-\3 \4#' \
-    | head -2)
+    | head -3)
 t1=$(date -d "${TS[0]}" +%s)
 t2=$(date -d "${TS[1]}" +%s)
-gap=$(( t2 - t1 ))
-echo "== bad-name failures at +0 and +${gap}s =="
+t3=$(date -d "${TS[2]}" +%s)
+gap1=$(( t2 - t1 ))
+gap2=$(( t3 - t2 ))
+growth=$(( gap2 - gap1 ))
+echo "== bad-name inter-attempt gaps: 1st->2nd=${gap1}s, 2nd->3rd=${gap2}s (growth ${growth}s) =="
 
-if [ "$gap" -lt 55 ]; then
-    echo "::error::failing name retried after ${gap}s (< 55s); backoff not held"
+# BASE=5, MAXSHIFT>=1: the backoff step doubles from 5s (fails=1) to 10s
+# (fails=2), so the second gap must exceed the first by a margin only that
+# +5s step explains. A build with the backoff hold deleted retries on the
+# same fixed cadence every time (measured flat at ~21s in the negative
+# control), so growth stays near 0 and this fails.
+if [ "$growth" -lt 3 ]; then
+    echo "::error::inter-attempt gap did not grow (${gap1}s -> ${gap2}s, growth ${growth}s < 3s); backoff step-up not observed -- a flat retry cadence would explain this"
     grep autocert "$LOG" | tail -40
     exit 1
 fi
-echo "✓ failing name held off ${gap}s between attempts (backoff working)"
+echo "✓ inter-attempt gap grew ${gap1}s -> ${gap2}s (backoff step-up working, not a flat retry cadence)"
 
 # good must not have been re-ordered (single issuance, no churn).
 good_orders=$(grep -c "starting ACME order for \"${GOOD}\"" "$LOG" || true)
