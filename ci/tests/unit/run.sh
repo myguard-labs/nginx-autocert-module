@@ -22,6 +22,27 @@ if [ -z "${NGX_BUILD_DIR:-}" ]; then
 	exit 2
 fi
 
+# Both are baked into -I/-o/object arguments below, and this script cd's into
+# $BUILD_DIR before using them. A RELATIVE value would then re-resolve against
+# .build/unit and every path would miss -- so absolutize both here, while the
+# cwd is still the caller's. Failing loudly beats a confusing gcc error:
+# `NGX_BUILD_DIR=../nginx-1.31.3 ci/tests/unit/run.sh` is the natural local
+# invocation and used to break silently.
+# Assign via a temp: `X="$(cd "$X")" || echo "$X"` reports an EMPTY value,
+# because the failed substitution has already clobbered X by the time the
+# handler runs.
+if ! _abs="$(cd "$WORKSPACE" 2>/dev/null && pwd)"; then
+	echo "✗ WORKSPACE is not a readable directory: ${WORKSPACE}" >&2
+	exit 2
+fi
+WORKSPACE="$_abs"
+if ! _abs="$(cd "$NGX_BUILD_DIR" 2>/dev/null && pwd)"; then
+	echo "✗ NGX_BUILD_DIR is not a readable directory: ${NGX_BUILD_DIR}" >&2
+	exit 2
+fi
+NGX_BUILD_DIR="$_abs"
+unset _abs
+
 # Build directory for binaries (use scratch under repo root)
 BUILD_DIR="${WORKSPACE}/.build/unit"
 mkdir -p "$BUILD_DIR"
