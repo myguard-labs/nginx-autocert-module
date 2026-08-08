@@ -605,7 +605,13 @@ Consumer implementation reference:
 
 ## Build & test
 
-OpenSSL ≥ 3.0.0 required. Build as a standard dynamic module:
+OpenSSL ≥ 3.0.0 required. **`--with-http_ssl_module` is mandatory** — this is an
+ACME client, so it opens its own TLS connections to the CA and serves per-SNI
+certificates, all of which needs nginx's SSL support. `configure` rejects a build
+without it. (`--with-http_v3_module` implies SSL support and satisfies the check
+on its own.)
+
+Build as a standard dynamic module:
 
 ```sh
 cd nginx-<version>

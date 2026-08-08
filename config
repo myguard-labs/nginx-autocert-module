@@ -1,5 +1,23 @@
 ngx_addon_name=ngx_http_autocert_module
 
+# This module is an ACME client: it opens its own TLS connections to the CA
+# (ngx_ssl_create_connection / ngx_ssl_handshake / SSL_CTX_set_verify in
+# src/ngx_autocert_acme.c) and serves per-SNI certificates. All of that lives
+# behind nginx's NGX_HTTP_SSL guard, so without SSL support the build dies deep
+# in the compiler with "implicit declaration of function 'SSL_CTX_set_verify'"
+# and "invalid use of incomplete typedef 'ngx_ssl_connection_t'". Fail here
+# instead, with a message that names the flag.
+#
+# $HTTP_SSL is tested rather than the literal flag because --with-http_v3_module
+# implies it too (auto/modules); either is a valid way to satisfy this module.
+if [ "${HTTP_SSL:-NO}" != YES ]; then
+    echo
+    echo "$0: error: $ngx_addon_name requires SSL support. Reconfigure with:"
+    echo "  --with-http_ssl_module"
+    echo
+    exit 1
+fi
+
 # Test-only seed directives (autocert_test_challenge / autocert_test_alpn) are
 # compiled in ONLY when AUTOCERT_TEST=1 is exported at configure time (CI e2e
 # that needs to seed a challenge before the order flow runs). Production builds
