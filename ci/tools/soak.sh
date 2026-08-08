@@ -95,6 +95,15 @@ EOF
 # This disables ONLY the ODR check. Use-after-free, heap/stack overflow,
 # double-free, leaks and every UBSan check stay on, which is what this soak
 # exists to find.
+# Leak detection stays ON, with the config-load roots suppressed by frame --
+# nginx never frees its cycle pool, so LSan reports every config-time
+# allocation as leaked (137 blocks on the first run, all under ngx_init_cycle,
+# most from stock modules). detect_leaks=0 would be the blunt fix and would
+# also blind the soak to a leak PER REQUEST, which is the bug class a 30s
+# storm is here to find. See ci/tools/lsan.supp for the frame list, the
+# accepted blind spot, and the rules for adding to it.
+LSAN_SUPP="$(cd "$(dirname "$0")" && pwd)/lsan.supp"
+export LSAN_OPTIONS="${LSAN_OPTIONS:-}:suppressions=$LSAN_SUPP:print_suppressions=0"
 ASAN_OPTIONS="${ASAN_OPTIONS:-}:detect_leaks=1:detect_odr_violation=0:abort_on_error=0:exitcode=42:log_path=$WORK/logs/asan"
 export ASAN_OPTIONS
 export UBSAN_OPTIONS="${UBSAN_OPTIONS:-}:print_stacktrace=1:halt_on_error=0:log_path=$WORK/logs/asan"
