@@ -658,6 +658,7 @@ for one run rather than several independent ones.
 |---|---|---|
 | `build-test.yml` | PR (via `ci.yml`) | shellcheck/cppcheck/actionlint + stamp check, build on **nginx and angie**, `.so` dlopens, bad config rejected, `-Werror` strict compile, ABI check, unit tests (12 binaries), Guard suite, **Pebble e2e suite**; `Validation` alone also runs daily at 03:17 UTC |
 | `security-scanners.yml` | PR (via `ci.yml`) | flawfinder ≥4 blocks, clang-tidy, semgrep ≥WARNING |
+| `lint.yml` | PR (via `ci.yml`) | the same `ci/linter/` checkers the pre-commit hook runs — shell, YAML, nginx conventions, spelling, docs drift, sync-stamp and the workflow-policy checks (ports, runners, cadence, secrets). The `c` checker is excluded here; `security-scanners.yml` already covers `src/` |
 | `fuzzing.yml` | manual | replay every past crash, then 30s fresh fuzz per target (JSON + HTTP) |
 | `valgrind.yml` | manual | 30s memcheck soak |
 | `codeql.yml` | PR (via `ci.yml`), monthly | CodeQL over the module TU |

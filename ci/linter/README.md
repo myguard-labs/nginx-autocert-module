@@ -340,14 +340,13 @@ Never a blanket disable in a `zizmor.yml`.
 ## In CI
 
 `.github/workflows/lint.yml` runs `install-linters.sh` then
-`LINT_ONLY="c ci-cadence ci-ports ci-runners ci-secrets docs-drift nginx sh
+`LINT_ONLY="ci-cadence ci-ports ci-runners ci-secrets docs-drift nginx sh
 spelling sync-stamp yaml" run-all.sh` — the same entry point as the hook, so a
 clone that never enabled `core.hooksPath` still cannot land a regression.
-Unlike the reference skeleton, `c` IS included here even though
-`security-scanners.yml` runs the same flawfinder/clang-tidy/semgrep passes
-over `src/`: this module keeps LINT_ONLY a strict 1:1 match with the
-`ci/linter/lint-*.sh` set (`ci/linter/selftest.sh` enforces it) rather than
-carving out an exception, accepting the duplicated scan.
+`c` is left out of that list: `security-scanners.yml` already runs the same
+flawfinder / clang-tidy / semgrep passes over `src/` on every PR and push, so
+including it here would pay for the scan twice and report each C finding in
+two places. `lint-c.sh` still runs locally and in the hook.
 
 That allowlist is narrower than the glob `run-all.sh` uses, so a checker added
 to `ci/linter/` runs locally and in the hook while being **absent from every

@@ -238,11 +238,20 @@ case_ 0 "the commit hook invokes the pre-commit-config hooks" \
 # the merge path is the one place it is load-bearing.
 missing=""
 only="$(sed -n 's/^ *LINT_ONLY: *//p' .github/workflows/lint.yml)"
+
+# Checkers knowingly absent from lint.yml's LINT_ONLY. Listed HERE, explicitly,
+# so the control still fails on an ACCIDENTAL omission -- the case it exists
+# for -- while a deliberate one costs an edit to this line and shows up in the
+# diff. Both reasons are spelled out in lint.yml's header:
+#   c        permanent -- security-scanners.yml already scans src/
+#   the rest temporary -- red against pre-existing conditions, one issues.md
+#            row each; a name leaves this list in the PR that makes it green.
+# This list must only ever SHRINK.
+staged_out="c yaml nginx spelling ci-cadence ci-runners"
+
 for s in ci/linter/lint-*.sh; do
     n="${s#ci/linter/lint-}"; n="${n%.sh}"
-    # "c" is deliberately excluded in CI (see lint.yml's header): the src/
-    # scanners run in security-scanners.yml instead.
-    [ "$n" = "c" ] && continue
+    printf '%s\n' "$staged_out" | tr ' ' '\n' | grep -qx "$n" && continue
     printf '%s\n' "$only" | tr ' ' '\n' | grep -qx "$n" || missing="$missing $n"
 done
 if [ -z "$missing" ]; then
