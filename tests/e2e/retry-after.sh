@@ -12,10 +12,10 @@
 #
 # The helper must then:
 #   - log that it is honouring the Retry-After (parse + plumb proven), and
-#   - hold the failing name for ~90s before the next order attempt — longer
-#     than the 60s first-step exponential backoff, proving the CA's
-#     Retry-After overrides our own guess (ngx_autocert_backoff_hold takes the
-#     later of the two).
+#   - hold the failing name for ~15s before the next order attempt — longer
+#     than the 5s first-step exponential backoff (NGX_AUTOCERT_TEST build),
+#     proving the CA's Retry-After overrides our own guess
+#     (ngx_autocert_backoff_hold takes the later of the two).
 #
 # Inputs (env):
 #   SERVER_BIN   - path to the built nginx/angie binary (required)
@@ -35,7 +35,11 @@ CA_PORT="${CA_PORT:-${AC_PORT_14001:-14001}}"
 DNS_NAME="ac-ra-dns-$$"
 DNS_PORT="${DNS_PORT:-${AC_PORT_15453:-15453}}"
 NAME="rl.example.com"
-RETRY_AFTER=90
+# NGX_AUTOCERT_TEST shrinks the exponential first step to 5s (see
+# ngx_autocert_driver.c NGX_AUTOCERT_BACKOFF_BASE); 15s keeps a wide margin
+# above that so a gap >= 12s below can only be explained by Retry-After being
+# honoured, not the plain exponential backoff.
+RETRY_AFTER=15
 
 MOCK_PID=""
 cleanup() {
@@ -138,9 +142,10 @@ for i in $(seq 1 30); do
     [ "$i" = 30 ] && { echo "::error::mock CA did not come up"; exit 1; }
 done
 
-# renew_before 130s => sweep period = renew_before/2 = 65s, so the name becomes
-# eligible again shortly after the 60s exponential step but BEFORE the 90s
-# Retry-After — letting us prove the Retry-After hold wins.
+# renew_before 20s => sweep period = renew_before/2 = 10s, floored at the
+# NGX_AUTOCERT_TEST 5s floor => the name becomes eligible again shortly after
+# the 5s exponential step but BEFORE the 15s Retry-After — letting us prove
+# the Retry-After hold wins.
 cat > "$PREFIX/conf/nginx.conf" <<EOF
 load_module $HTTP_SO;
 user root;   # worker-0 ACME driver writes the store; keep worker uid able to
@@ -154,7 +159,7 @@ http {
     autocert_resolver_timeout 5s;
     autocert_ca_trusted_certificate $PREFIX/ca.pem;
     autocert_store_path $PREFIX/store;
-    autocert_renew_before 130s;
+    autocert_renew_before 20s;
     server { listen ${AC_PORT_5002:-5002}; server_name ${NAME}; }
 }
 EOF
@@ -178,10 +183,10 @@ for i in $(seq 1 60); do
 done
 echo "✓ helper logged honouring Retry-After ${RETRY_AFTER}s"
 
-# 2) The failing name must be held ~90s (the Retry-After) before the next order
-#    attempt, longer than the 60s exponential first step.
-echo "== watching for two order attempts to measure the hold (up to ~150s) =="
-deadline=$(( $(date +%s) + 160 ))
+# 2) The failing name must be held ~15s (the Retry-After) before the next order
+#    attempt, longer than the 5s exponential first step (NGX_AUTOCERT_TEST).
+echo "== watching for two order attempts to measure the hold (up to ~30s) =="
+deadline=$(( $(date +%s) + 40 ))
 while :; do
     n=$(grep -c "starting ACME order for \"${NAME}\"" "$LOG" || true)
     [ "$n" -ge 2 ] && break
@@ -197,11 +202,11 @@ t2=$(date -d "${TS[1]}" +%s)
 gap=$(( t2 - t1 ))
 echo "== order attempts at +0 and +${gap}s =="
 
-if [ "$gap" -lt 85 ]; then
-    echo "::error::name retried after ${gap}s (< 85s); Retry-After (${RETRY_AFTER}s) not honoured (would be 60s on plain backoff)"
+if [ "$gap" -lt 12 ]; then
+    echo "::error::name retried after ${gap}s (< 12s); Retry-After (${RETRY_AFTER}s) not honoured (would be ~5s on plain backoff)"
     grep autocert "$LOG" | tail -40
     exit 1
 fi
-echo "✓ name held off ${gap}s (>= Retry-After ${RETRY_AFTER}s, beats 60s backoff)"
+echo "✓ name held off ${gap}s (>= Retry-After ${RETRY_AFTER}s, beats 5s backoff)"
 
 echo "✓✓ M9c 429 / Retry-After rate-limit awareness verified"

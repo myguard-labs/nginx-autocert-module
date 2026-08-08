@@ -10,10 +10,10 @@
 #                          every attempt.
 #
 # The scheduler must NOT re-order the failing name every sweep: after a failure
-# it holds the name off for an exponential backoff (60s first). With a small
-# autocert_renew_before the sweep period is short, so we can watch two attempts
-# for the bad name and assert the gap between them is >= ~60s (backoff held),
-# while the good name issued once and is not re-ordered.
+# it holds the name off for an exponential backoff (5s first, NGX_AUTOCERT_TEST
+# build). With a small autocert_renew_before the sweep period is short, so we
+# can watch two attempts for the bad name and assert the gap between them is
+# >= ~5s (backoff held), while the good name issued once and is not re-ordered.
 #
 # Inputs (env):
 #   SERVER_BIN   - path to the built nginx/angie binary (required)
@@ -110,8 +110,9 @@ done
 
 docker cp "$PEBBLE_NAME:/test/certs/pebble.minica.pem" "$PREFIX/ca.pem"
 
-# renew_before 130s => sweep period = renew_before/2 = 65s, just over the 60s
-# first backoff, so the failing name becomes eligible again on the next sweep.
+# renew_before 20s => sweep period = renew_before/2 = 10s, just over the 5s
+# NGX_AUTOCERT_TEST first backoff, so the failing name becomes eligible again
+# on the next sweep.
 cat > "$PREFIX/conf/nginx.conf" <<EOF
 load_module $HTTP_SO;
 user root;   # worker-0 ACME driver writes the store; keep worker uid able to
@@ -125,7 +126,7 @@ http {
     autocert_resolver_timeout 5s;
     autocert_ca_trusted_certificate $PREFIX/ca.pem;
     autocert_store_path $PREFIX/store;
-    autocert_renew_before 130s;
+    autocert_renew_before 20s;
     server { listen ${AC_PORT_5002:-5002}; server_name ${GOOD}; }
     server { listen ${AC_PORT_5002:-5002}; server_name ${BAD}; }
 }
@@ -148,9 +149,10 @@ done
 echo "✓ ${GOOD} provisioned"
 
 # Wait for two failures of the bad name, then check they are spaced by the
-# backoff (>= ~55s, allowing a little slack under the 60s floor).
-echo "== watching bad-name failures for backoff spacing (up to ~150s) =="
-deadline=$(( $(date +%s) + 160 ))
+# backoff (>= ~4s, allowing a little slack under the 5s NGX_AUTOCERT_TEST
+# floor).
+echo "== watching bad-name failures for backoff spacing (up to ~40s) =="
+deadline=$(( $(date +%s) + 40 ))
 while :; do
     n=$(grep -c "ACME order failed for \"${BAD}\"" "$LOG" || true)
     [ "$n" -ge 2 ] && break
@@ -167,8 +169,8 @@ t2=$(date -d "${TS[1]}" +%s)
 gap=$(( t2 - t1 ))
 echo "== bad-name failures at +0 and +${gap}s =="
 
-if [ "$gap" -lt 55 ]; then
-    echo "::error::failing name retried after ${gap}s (< 55s); backoff not held"
+if [ "$gap" -lt 4 ]; then
+    echo "::error::failing name retried after ${gap}s (< 4s); backoff not held"
     grep autocert "$LOG" | tail -40
     exit 1
 fi

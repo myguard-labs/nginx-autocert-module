@@ -123,8 +123,9 @@ docker cp "$PEBBLE_NAME:/test/certs/pebble.minica.pem" "$PREFIX/ca.pem"
 
 # autocert_runtime_ttl 5s: production-meaningless, but the test seed is
 # one-shot and nothing else refreshes the node after issuance, so any TTL
-# comfortably under the 60s sched floor makes the FIRST post-issuance tick
-# evict it. The eviction wait below is bounded by that floor, not the TTL.
+# comfortably under the sched floor (5s under NGX_AUTOCERT_TEST, 60s in
+# production) makes the FIRST post-issuance tick evict it. The eviction wait
+# below is bounded by that floor, not the TTL.
 cat > "$PREFIX/conf/nginx.conf" <<EOF
 load_module $HTTP_SO;
 user root;
@@ -190,9 +191,10 @@ echo "$san" | grep -qF "DNS:${RUNTIME_HOST}" \
     || { echo "::error::SNI ${RUNTIME_HOST} did not serve the issued cert pre-eviction (SAN: $san)"; exit 1; }
 echo "✓ ${RUNTIME_HOST} served pre-eviction (A4 gate open)"
 
-# The sched rearm interval is clamped to the TTL but floored at 60s, so the
-# evicting tick lands ~60s after the last pump. Budget 3 minutes.
-echo "== wait: idle-TTL GC evicts the node (next sched tick, ~60s) =="
+# The sched rearm interval is clamped to the TTL but floored at 5s under
+# NGX_AUTOCERT_TEST (60s in production), so the evicting tick lands ~5s after
+# the last pump. Keep a generous ceiling for flake margin.
+echo "== wait: idle-TTL GC evicts the node (next sched tick, ~5s) =="
 for i in $(seq 1 360); do
     grep -q "runtime request \"${RUNTIME_HOST}\" evicted" "$PREFIX/logs/error.log" && break
     sleep 0.5
