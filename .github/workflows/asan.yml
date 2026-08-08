@@ -1,4 +1,4 @@
-# sync-sha: 2c07165d92c2418be7242cddcd6e8de726ec8a0e3362854f42968aff028ebc80
+# sync-sha: 91078e1b326a13b4dbdc05a8112f0334df30b6ce3d4aac8943874360164162ff
 name: ASan
 
 # Manual ASan+UBSan soak — 30s mixed-load soak of the HTTP-01 serve path with an
@@ -11,6 +11,14 @@ name: ASan
 # PR/release memory-debug coverage lives in ci-deep.yml + valgrind.yml so normal
 # pushes do not steal self-hosted runner lanes from Build & Test.
 #
+# Cadence: weekly, Sunday 03:45 UTC. Staggered against the two other scheduled
+# builder02 jobs so soaks don't pile up on the shared self-hosted pool:
+# build-test.yml's Validation tick is daily 03:17 UTC, ci-deep.yml is monthly
+# (day 2) 03:30 UTC. Weekly, not daily, because this is a from-scratch mainline
+# nginx build + ASan/UBSan compile + 30s soak on a single shared self-hosted
+# runner — daily would burn builder02 time disproportionate to the bug class
+# it catches (long-lived lifetime/UAF bugs, not per-commit regressions).
+#
 # Action pins (keep in sync with build-test.yml header):
 # actions/checkout@v5        -> 93cb6efe18208431cddfb8368fd83d5badbf9bfd
 
@@ -20,6 +28,8 @@ env:
 
 on:
   workflow_dispatch: {}
+  schedule:
+    - cron: '45 3 * * 0'
 
 concurrency:
   group: asan-${{ github.workflow }}-${{ github.ref }}
