@@ -1,0 +1,51 @@
+# LeakSanitizer suppressions for the ASan/UBSan soak (ci/tools/soak.sh).
+#
+# WHY THIS FILE IS NARROW
+#
+# nginx allocates its configuration out of the *cycle pool* and deliberately
+# never frees it: the pool lives until the process exits, and tearing it down
+# at shutdown would be pure work with no benefit. LeakSanitizer runs at exit
+# and cannot know that, so it reports every config-time allocation still held
+# by the cycle as leaked. The first soak run under LSan produced 137 blocks /
+# ~136 KB, ALL of them rooted in ngx_init_cycle -- including allocations from
+# stock modules this repo does not touch (ngx_http_fastcgi_create_loc_conf was
+# the largest single block). Zero came from the request path.
+#
+# The blunt fix is ASAN_OPTIONS=detect_leaks=0, which throws away the check
+# entirely. Leak detection over the REQUEST path is a large part of why this
+# soak exists -- a leak per request is exactly the bug class a 30s storm at
+# concurrency 4 is meant to expose -- so instead the config-load roots are
+# suppressed by frame and everything else keeps reporting.
+#
+# CONSEQUENCE, stated plainly: a genuine leak whose allocation happens during
+# configuration parsing is invisible here. That is the accepted cost. A leak
+# in a per-request or per-connection path -- the case that actually compounds
+# under load -- is still caught, because it does not pass through these frames.
+#
+# MAINTENANCE
+#   - Add a frame only after confirming the allocation is genuinely owned by
+#     the cycle pool and lives until exit. "It is noisy" is not a reason.
+#   - Never suppress a frame from the request path (ngx_http_*_handler,
+#     ngx_http_autocert_serve_*, anything below ngx_http_process_request).
+#   - Verify a change with:
+#       ci/tools/soak.sh <asan-nginx> 30 4
+#     and confirm the report is empty rather than merely smaller.
+
+# nginx's own cycle/config initialisation. Everything the config parser
+# allocates hangs off these, across all modules, built-in and dynamic.
+leak:ngx_init_cycle
+leak:ngx_conf_parse
+leak:ngx_conf_handler
+
+# The http{} block's per-module create/merge conf callbacks run under
+# ngx_http_block, still on the cycle pool. This covers this module's
+# ngx_http_autocert_postconfig / install_dummy config-time allocations and
+# every stock module's alongside them.
+leak:ngx_http_block
+
+# OpenSSL objects created at config time and owned by the SSL context for the
+# life of the cycle (SSL_CTX, its cert/key material, the dummy certificate
+# installed before the first real issuance).
+leak:ngx_ssl_create
+leak:ngx_http_ssl_merge_srv_conf
+leak:ngx_http_merge_servers

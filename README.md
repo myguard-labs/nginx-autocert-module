@@ -662,7 +662,7 @@ for one run rather than several independent ones.
 | `fuzzing.yml` | manual | replay every past crash, then 30s fresh fuzz per target (JSON + HTTP) |
 | `valgrind.yml` | manual | 30s memcheck soak |
 | `codeql.yml` | PR (via `ci.yml`), monthly | CodeQL over the module TU |
-| `asan.yml` | weekly (Sun 03:45 UTC), manual | 30s ASan+UBSan request-storm soak — **currently RED: aborts at config-test time before the soak starts; see `issues.md`** |
+| `asan.yml` | weekly (Sun 03:45 UTC), manual | 30s ASan+UBSan request-storm soak. Green since #160. Two nginx-inherent checks are off: ODR (nginx generates `ngx_module_names` into both the binary and the `.so`) and config-load leaks (the cycle pool is never freed) — see `ci/tools/lsan.supp`. Request-path leaks, UAF, overflow and all UBSan checks stay armed |
 | `ci-deep.yml` | monthly, manual | long fuzz, memcheck + helgrind soaks, security scanners, angie Pebble e2e |
 
 Port bands: the e2e jobs derive `AC_PORT_OFFSET` from the run ID plus a
