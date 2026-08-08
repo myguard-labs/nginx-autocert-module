@@ -1,4 +1,4 @@
-# sync-sha: de7ed7827f0b86e12127ea1b110cf131367413ffb637d714fa7ec65d53778c8d
+# sync-sha: ee45ee6afa16410ca706acc7d80619262a7aa3b631acf7080d33bc22a4df3586
 name: Build & Test
 
 # Third-party actions pinned to commit SHAs for supply-chain safety.
@@ -42,7 +42,9 @@ on:
   # Run just the Validation job daily so drift surfaces same-day against
   # master, not against whichever PR happens to open next. The other jobs
   # (build/unit/e2e matrices) stay PR-only to keep self-hosted runner cost
-  # down — see the `if:` guards below that skip them on a `schedule` event.
+  # down: `resolve` carries the only `schedule` guard, and every other job
+  # transitively `needs:` it, so they all cascade-skip. Validation has no
+  # `needs:` and no `if:`, which is what leaves it running on the tick.
   schedule:
     # 03:17 UTC daily — off-peak, staggered vs ci-deep's 03:30 monthly run.
     - cron: '17 3 * * *'
