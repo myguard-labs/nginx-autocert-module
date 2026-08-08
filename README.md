@@ -661,7 +661,7 @@ for one run rather than several independent ones.
 | `fuzzing.yml` | manual | replay every past crash, then 30s fresh fuzz per target (JSON + HTTP) |
 | `valgrind.yml` | manual | 30s memcheck soak |
 | `codeql.yml` | PR (via `ci.yml`), monthly | CodeQL over the module TU |
-| `asan.yml` | manual | 30s ASan+UBSan request-storm soak — **never yet executed; see `issues.md`** |
+| `asan.yml` | weekly (Sun 03:45 UTC), manual | 30s ASan+UBSan request-storm soak — **currently RED: aborts at config-test time before the soak starts; see `issues.md`** |
 | `ci-deep.yml` | monthly, manual | long fuzz, memcheck + helgrind soaks, security scanners, angie Pebble e2e |
 
 Port bands: the e2e jobs derive `AC_PORT_OFFSET` from the run ID plus a
