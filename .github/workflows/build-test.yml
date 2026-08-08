@@ -1,4 +1,4 @@
-# sync-sha: ee45ee6afa16410ca706acc7d80619262a7aa3b631acf7080d33bc22a4df3586
+# sync-sha: a495ba36e53347a8bc7b653a4a413aab76063a35529d9b76a9d2b82543d745a7
 name: Build & Test
 
 # Third-party actions pinned to commit SHAs for supply-chain safety.
@@ -20,11 +20,13 @@ name: Build & Test
 #   - build-nginx and build-angie both fully build the flavor + the module, run
 #     the no-network load/serve/lifecycle/USR2 tests, and upload the tree as
 #     build-<flavor>. The unit jobs download build-nginx (the C they test is
-#     flavor-independent); the Pebble e2e suite runs against BOTH flavors via a
-#     matrix. angie ships its own native `acme` directive, but this module's
-#     `autocert` directive is independent and coexists with it — so the module
-#     is fully supported + tested on angie, not just compiled. (Reverses the
-#     earlier compile-only stance, PR #26 — see history.md 2026-06-20.)
+#     flavor-independent); the Pebble e2e suite runs against nginx here, and
+#     against angie monthly in ci-deep.yml (~7.5min/flavor after the #151 timer
+#     shrink, and still the longest PR job). angie ships its own native `acme`
+#     directive, but this module's `autocert` directive is independent and
+#     coexists with it — so the module is fully supported + tested on angie,
+#     not just compiled. (Reverses
+#     the earlier compile-only stance, PR #26 — see history.md 2026-06-20.)
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
@@ -523,10 +525,16 @@ jobs:
             "$GITHUB_WORKSPACE/tests/unit/test_account_jsonsafe.c"
           ./test_account_jsonsafe
 
-  # ------------------------------------------------------------ nginx+angie e2e
-  # The full Pebble issuance/renewal suite, run against BOTH flavors via a
-  # per-job matrix (needs build-nginx AND build-angie). fail-fast:false so an
-  # nginx-leg failure doesn't cancel the angie leg and vice versa.
+  # ------------------------------------------------------------------ nginx e2e
+  # The full Pebble issuance/renewal suite against nginx. Kept as a matrix (with
+  # fail-fast:false) even at one leg so re-adding a flavor is a list entry.
+  #
+  # The angie leg used to run here too. At ~11.5 minutes per flavor it WAS the
+  # wall-clock of every PR on this repo, and the two legs cover the same module
+  # logic — angie's divergence is in the surrounding server, which build-angie
+  # already exercises with the full no-network load/serve/lifecycle/USR2 suite.
+  # The angie Pebble e2e now runs monthly in ci-deep.yml (+ workflow_dispatch),
+  # so the flavor is still fully tested, just not on the per-PR path.
 
   # Batched Pebble e2e: the whole tests/e2e suite for one flavor runs in a
   # SINGLE job via tests/e2e/run-all.sh, so the build artifact is downloaded
@@ -550,7 +558,7 @@ jobs:
   # has somewhere to land if the timings justify splitting the suite.
   e2e:
     name: e2e suite (Pebble) [${{ matrix.flavor }}]
-    needs: [resolve, build-nginx, build-angie]
+    needs: [resolve, build-nginx]
     runs-on: [self-hosted, builder02, docker]
     timeout-minutes: 60
     strategy:
@@ -561,9 +569,6 @@ jobs:
           - flavor: nginx
             dir: ${{ needs.resolve.outputs.nginx_dir }}
             port_offset: 0
-          - flavor: angie
-            dir: ${{ needs.resolve.outputs.angie_dir }}
-            port_offset: 1000
     steps:
       - name: Checkout module
         uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
