@@ -1,4 +1,4 @@
-# sync-sha: bfb05505d0b459afc93462de796952ca47ae0f8ad84d9a68ad9ff71879b0aed7
+# sync-sha: aac7c35191f14eda378eee57fbade5468c4b4ba83f58b40e94b58c9846489756
 name: Build & Test
 
 # Third-party actions pinned to commit SHAs for supply-chain safety.
@@ -34,8 +34,9 @@ env:
 on:
   push:
     branches: [master, autolabel]
-  pull_request:
-    branches: [master, autolabel]
+  # No pull_request: — ci.yml is the sole PR entry point and calls this
+  # workflow. push: is kept so master and autolabel still get direct coverage,
+  # as does the daily Validation schedule below.
   workflow_dispatch: {}
   workflow_call: {}
   # This CI is otherwise PR-only, so a self-hosted-runner toolchain drift (e.g.

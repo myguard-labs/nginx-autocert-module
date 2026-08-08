@@ -1,4 +1,4 @@
-# sync-sha: f41971ccfaec51956272e00a9c9f5485369d2be17cc541c5733c6fd053287d9b
+# sync-sha: c36611b57c17f1ca17bcce79ffa6fbe11f271fbb0ad464bd4f34b0fbd33dc125
 name: CodeQL
 
 env:
@@ -7,8 +7,8 @@ env:
 on:
   push:
     branches: [master]
-  pull_request:
-    branches: [master]
+  # No pull_request: — ci.yml is the sole PR entry point and calls this
+  # workflow. push: and the monthly schedule below are unaffected.
   schedule:
     # Monthly, day 2 @ 04:47 UTC (staggered per repo like ci-deep).
     - cron: "47 4 2 * *"
