@@ -27,8 +27,9 @@ HTTP_SO="$NGX_BUILD_DIR/objs/ngx_http_autocert_module.so"
 [ -f "$HTTP_SO" ] || { echo "missing $HTTP_SO"; exit 1; }
 
 PREFIX="${PREFIX:-/tmp/ac-eab}"
-PEBBLE_NAME="ac-pebble-eab-$$"
-DNS_NAME="ac-dns-eab-$$"
+AC_E2E_RUN_TAG="${AC_E2E_RUN_TAG:-local$$}"
+PEBBLE_NAME="ac-pebble-eab-${AC_E2E_RUN_TAG}-$$"
+DNS_NAME="ac-dns-eab-${AC_E2E_RUN_TAG}-$$"
 DNS_PORT="${DNS_PORT:-${AC_PORT_15354:-15354}}"
 
 EAB_KID="kid-1"
