@@ -234,11 +234,28 @@ fi
 # Concurrency. Default 1 = the historical sequential behaviour, so this is inert
 # until a caller opts in.
 #
-# Everything a script touches is already slot-scoped: set_ports gives it a
-# disjoint 100-port band, AC_E2E_PREFIX a disjoint /tmp dir, and the scripts name
-# their containers/networks with $$ (acip4-pebble-$$, ac-wc-net-$$), which is
-# unique per invocation. So concurrency needs no new isolation - only a bound on
-# how many slots are live at once.
+# !! NOT SAFE ABOVE 1 YET - the port scheme has to be fixed first. !!
+#
+# AC_E2E_PREFIX and the $$-named containers/networks (acip4-pebble-$$,
+# ac-wc-net-$$) really are per-task. Ports are NOT:
+#
+#   - set_ports strides 100 per slot, but PORT_BASES spans 5001..18190 = 13189
+#     ports, so slot N's high bases land on slot N+1's low bases. AC_PORT_15353
+#     at slot 1 IS AC_PORT_15453 at slot 0.
+#   - AC_PORT_15456 (ipv4-issue.sh) is not in PORT_BASES at all, so it is never
+#     offset and every concurrent task publishes the same literal 15456.
+#   - Bases are shared across scripts by design (21 scripts use AC_PORT_5002,
+#     17 use AC_PORT_14000). Harmless sequentially, a collision when they
+#     overlap: tls-alpn-issue.sh and retry-after.sh both take AC_PORT_15453.
+#
+# Observed in CI at AC_E2E_JOBS=4: "Bind for 0.0.0.0:17053 failed: port is
+# already allocated", plus backoff.sh (nginx) and tls-alpn-issue.sh +
+# retry-after.sh (angie) failing together.
+#
+# A stride wider than the span would have to exceed 13189 per slot, which blows
+# past the ephemeral floor at 4 slots. The fix is dynamic port allocation per
+# task (or a container-network-only scheme with no host publishing), not a
+# bigger stride. Until then this stays at 1.
 #
 # Slots are RECYCLED from a free list of size AC_E2E_JOBS rather than handed out
 # one per task. The port ceiling is max(PORT_BASES) + offset + slot*100 and it

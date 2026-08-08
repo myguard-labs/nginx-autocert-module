@@ -1,4 +1,4 @@
-# sync-sha: ca24b943feed20f984628b9b26159f719e37f6e674513b69e4ef4471c084f9ca
+# sync-sha: 7c756047aedb395e28134ae9415829b452b1c33b38646c72876134aa3f7cdf3b
 name: Build & Test
 
 # Third-party actions pinned to commit SHAs for supply-chain safety.
@@ -601,16 +601,15 @@ jobs:
               exit 1
           fi
 
-          # Run several scripts at once. Everything a script touches is already
-          # slot-scoped (ports, /tmp prefix, $$-named containers), so this needs
-          # no new isolation - see run-all.sh's AC_E2E_JOBS block.
-          #
-          # 4 is deliberately conservative: each script runs 2-3 containers, so
-          # this is ~8-12 per job and ~24 across both flavor jobs. Raise it once
-          # the timings artifact shows where the long pole actually is; the
-          # slot free-list keeps the port ceiling flat as it goes up.
+          # Deliberately sequential (AC_E2E_JOBS unset = 1). run-all.sh supports
+          # concurrency, but the suite's PORT_BASES are not disjoint per slot:
+          # the bases span 13189 ports while a slot only strides 100, so slot N's
+          # high ports land on slot N+1's low ports. Turning it on failed exactly
+          # there ("Bind for 0.0.0.0:17053 failed: port is already allocated",
+          # and tls-alpn-issue.sh/retry-after.sh, which share AC_PORT_15453).
+          # A stride wider than the span would need >13189 per slot and blow the
+          # ephemeral ceiling, so the port scheme has to change first.
           SERVER_BIN="$BIN" NGX_BUILD_DIR="$NGX" FLAVOR="${{ matrix.flavor }}" AC_PORT_OFFSET="$port_offset" \
-            AC_E2E_JOBS="${AC_E2E_JOBS:-4}" \
             AC_E2E_TIMINGS="$GITHUB_WORKSPACE/e2e-timings-${{ matrix.flavor }}.tsv" \
             bash tests/e2e/run-all.sh
 
