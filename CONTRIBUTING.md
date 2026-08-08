@@ -58,7 +58,7 @@ Your PR merges when **all** checks are green. If a gate fails and you
 believe the gate is wrong, say so in the PR — with evidence, not vibes.
 
 Before pushing a parser or fuzz-harness change, fuzz locally first:
-`fuzz/build.sh` compiles every `fuzz/fuzz_*.c` with `-Werror`, so a stale
+`ci/fuzz/build.sh` compiles every `ci/fuzz/fuzz_*.c` with `-Werror`, so a stale
 harness signature fails right there instead of in CI.
 
 ## Coding conventions
@@ -88,10 +88,10 @@ it. Not a follow-up PR. Not "later". Same PR.
   the ugly inputs (empty, oversized, malformed, truncated).
 - Bug fix → a regression test that **fails before the fix and passes
   after**. That's the proof the test actually tests something.
-- New input parser → a libFuzzer target in `fuzz/`.
+- New input parser → a libFuzzer target in `ci/fuzz/`.
 
 Where tests live varies slightly per module (unit suites, `t/*.t`
-Test::Nginx files, runtime suites under `tools/`) — look at the existing
+Test::Nginx files, runtime suites under `ci/tools/`) — look at the existing
 tests in this repo and put yours next to them. A PR that adds code without
 a test will not be merged, and yes, we check.
 

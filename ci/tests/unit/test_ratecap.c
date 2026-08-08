@@ -15,7 +15,7 @@
  * Exit 0 = all pass; non-zero on first failure.
  */
 
-#include "../../src/ngx_autocert_ratecap.h"
+#include "../../../src/ngx_autocert_ratecap.h"
 
 #include <stdio.h>
 

@@ -16,8 +16,8 @@ name: CI Deep
 #     that still runs on every PR. build-test.yml keeps build-angie, so an angie
 #     compile/load break is still caught pre-merge; only the Pebble issuance/
 #     renewal run is deferred to this monthly/on-demand workflow.
-#   * memcheck AND helgrind both run tools/soak.sh, which passes
-#     --suppressions=tools/valgrind.supp and (helgrind) --error-exitcode=99 —
+#   * memcheck AND helgrind both run ci/tools/soak.sh, which passes
+#     --suppressions=ci/tools/valgrind.supp and (helgrind) --error-exitcode=99 —
 #     the drift-fix baseline for every module.
 #
 # Action pins (keep in sync with build-test.yml header):
@@ -72,7 +72,7 @@ jobs:
           fi
 
       - name: Build fuzz targets
-        run: bash fuzz/build.sh "$GITHUB_WORKSPACE/fuzz"
+        run: bash ci/fuzz/build.sh "$GITHUB_WORKSPACE/fuzz"
 
       - name: Fuzz each target
         run: |
@@ -103,7 +103,7 @@ jobs:
         uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
         with:
           name: fuzz-deep-crashes
-          path: ${{ github.workspace }}/fuzz/crash-*
+          path: ${{ github.workspace }}/ci/fuzz/crash-*
           retention-days: 30
 
       - name: Upload minimized corpus
@@ -112,8 +112,8 @@ jobs:
         with:
           name: fuzz-corpus
           path: |
-            ${{ github.workspace }}/fuzz/corpus-min
-            ${{ github.workspace }}/fuzz/corpus_http-min
+            ${{ github.workspace }}/ci/fuzz/corpus-min
+            ${{ github.workspace }}/ci/fuzz/corpus_http-min
           retention-days: 30
 
       - name: Notify Discord on failure
@@ -164,7 +164,7 @@ jobs:
           USE_VALGRIND: "1"
           NGX_BUILD_DIR: ${{ github.workspace }}/nginx-${{ env.NGINX_VERSION }}
         run: |
-          bash tools/soak.sh \
+          bash ci/tools/soak.sh \
             "$GITHUB_WORKSPACE/nginx-${NGINX_VERSION}/objs/nginx" 600 4
       - name: Notify Discord on failure
         if: failure() && github.event_name == 'schedule'
@@ -214,7 +214,7 @@ jobs:
           USE_HELGRIND: "1"
           NGX_BUILD_DIR: ${{ github.workspace }}/nginx-${{ env.NGINX_VERSION }}
         run: |
-          bash tools/soak.sh \
+          bash ci/tools/soak.sh \
             "$GITHUB_WORKSPACE/nginx-${NGINX_VERSION}/objs/nginx" 600 4
       - name: Notify Discord on failure
         if: failure() && github.event_name == 'schedule'
@@ -304,7 +304,7 @@ jobs:
   #
   # Self-contained (no cross-workflow artifact): it resolves the latest angie,
   # builds the module against it with the same composite action build-test uses,
-  # then runs tests/e2e/run-all.sh against the freshly built tree.
+  # then runs ci/tests/e2e/run-all.sh against the freshly built tree.
   e2e-angie:
     name: e2e suite (Pebble) [angie]
     runs-on: [self-hosted, builder02, docker]
@@ -361,7 +361,7 @@ jobs:
           echo "e2e port offset: run_offset=${run_offset} flavor_offset=1000 port_offset=${port_offset}"
 
           ephemeral_lo=$(cut -f1 < /proc/sys/net/ipv4/ip_local_port_range)
-          max_port=$(AC_PORT_OFFSET="$port_offset" bash tests/e2e/max-port.sh)
+          max_port=$(AC_PORT_OFFSET="$port_offset" bash ci/tests/e2e/max-port.sh)
           echo "e2e highest published port: ${max_port} (ephemeral floor ${ephemeral_lo})"
           if [ "$max_port" -ge "$ephemeral_lo" ]; then
               echo "::error::e2e port budget blown: highest published port ${max_port}" \
@@ -370,7 +370,7 @@ jobs:
           fi
 
           SERVER_BIN="$BIN" NGX_BUILD_DIR="$NGX" FLAVOR="angie" AC_PORT_OFFSET="$port_offset" \
-            bash tests/e2e/run-all.sh
+            bash ci/tests/e2e/run-all.sh
 
       - name: Notify Discord on failure
         if: failure() && github.event_name == 'schedule'

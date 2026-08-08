@@ -19,7 +19,7 @@
 set -euo pipefail
 
 ANGIE_URL="${ANGIE_URL:?set ANGIE_URL to the angie source tarball}"
-WORKSPACE="${WORKSPACE:-$(cd "$(dirname "$0")/../.." && pwd)}"
+WORKSPACE="${WORKSPACE:-$(cd "$(dirname "$0")/../../.." && pwd)}"
 WORK="${WORK:-/tmp/abi-check}"
 JOBS="${JOBS:-$(nproc)}"
 

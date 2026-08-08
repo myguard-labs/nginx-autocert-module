@@ -38,7 +38,7 @@
 #include <sys/types.h>
 #include <unistd.h>
 
-#include "../../src/ngx_autocert_shared.h"
+#include "../../../src/ngx_autocert_shared.h"
 
 
 static int   failures;

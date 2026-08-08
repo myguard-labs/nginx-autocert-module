@@ -22,8 +22,8 @@ receive `security-events: write`.
 ## Local validation
 
 ```bash
-bash -n tests/e2e/*.sh fuzz/*.sh tests/unit/*.sh
-shellcheck tests/e2e/*.sh fuzz/*.sh tests/unit/*.sh
+bash -n ci/tests/e2e/*.sh ci/fuzz/*.sh ci/tests/unit/*.sh
+shellcheck ci/tests/e2e/*.sh ci/fuzz/*.sh ci/tests/unit/*.sh
 cppcheck \
   --enable=warning,performance,portability \
   --error-exitcode=1 \

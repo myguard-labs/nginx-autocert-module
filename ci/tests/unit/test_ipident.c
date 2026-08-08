@@ -27,7 +27,7 @@ ngx_log_error_core(ngx_uint_t level, ngx_log_t *log, ngx_err_t err,
     (void) level; (void) log; (void) err; (void) fmt;
 }
 
-#include "../../src/ngx_http_autocert_conf.h"
+#include "../../../src/ngx_http_autocert_conf.h"
 
 #include <stdio.h>
 #include <string.h>
