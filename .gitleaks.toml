@@ -1,0 +1,55 @@
+# gitleaks configuration for nginx-autocert-module.
+#
+# This module's test surface is ACME (RFC 8555), so its fixtures are *shaped*
+# like credentials by construction: challenge tokens, key authorizations and
+# EC private keys are the protocol's own data types. gitleaks flags them on
+# shape alone, which is correct behaviour on its part and a false positive
+# here. Without this file the scan reports 7 findings in tracked files, and a
+# scanner that always reports findings is a scanner nobody reads -- the real
+# cost of leaving these unallowlisted is that a genuine leak arrives into
+# pre-existing noise.
+#
+# Scope rules for anything added below:
+#   - allowlist a PATH only when every secret-shaped value in it is a fixture;
+#   - never allowlist a directory that also holds real configuration;
+#   - a fixture value must be synthetic, published in a spec/example, or
+#     generated for tests -- never a redacted or rotated production value.
+#
+# Verify after editing:
+#   gitleaks dir . --no-banner --redact -v      # expect: no leaks found
+#
+# The default ruleset is inherited rather than redefined, so upstream rule
+# additions keep applying to real source.
+
+[extend]
+useDefault = true
+
+# The allowlist is global rather than per-rule because the same fixture values
+# trip both `generic-api-key` (token/keyauth strings) and `private-key` (PEM
+# test vectors).
+[allowlist]
+description = "ACME protocol test fixtures -- synthetic by construction."
+
+paths = [
+  # Unit-test vectors: P-256 keys and ALPN/crypto fixtures generated for tests.
+  # vec_p256_p8.pem is a PKCS#8 test vector; test_crypto.c and test_alpn.c
+  # embed PEM literals so the unit binaries need no filesystem fixtures.
+  '''^ci/tests/unit/''',
+
+  # Fuzz corpus: recorded ACME directory/authorization JSON. The "token"
+  # members are the parse surface being fuzzed, not credentials.
+  '''^ci/fuzz/corpus/''',
+
+  # Vendored nginx source, fetched at build time and untracked. Its QUIC code
+  # assigns to `client_key.len` / `server_key.len`, which trips generic-api-key.
+  '''^\.build/''',
+]
+
+regexes = [
+  # The single shared HTTP-01 challenge token and its key authorization, used
+  # by ci/tools/soak.sh and ci/tests/e2e/http01-challenge.sh. Pinned as exact
+  # literals rather than allowlisting those scripts wholesale, so a real secret
+  # added to either file is still reported.
+  '''evaGxfADs6pSRb2LMJ7rzMrXXX0123456789abcdefg''',
+  '''9jg46WB3rR_AHD-EBXdN7cBkH1WOu0tA3M9fm21mqTI''',
+]
