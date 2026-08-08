@@ -773,7 +773,9 @@ ngx_autocert_account_done(ngx_autocert_account_t *acct, ngx_int_t rc)
 #else
 #define NGX_AUTOCERT_BACKOFF_BASE    60          /* 60s first retry hold */
 #endif
-#define NGX_AUTOCERT_BACKOFF_MAXSHIFT 6          /* 60s..3840s growth (BASE<<shift) */
+#define NGX_AUTOCERT_BACKOFF_MAXSHIFT 6          /* growth is BASE<<min(fails-1,MAXSHIFT):
+                                                   * 60s..3840s in production (BASE=60),
+                                                   * 5s..320s under NGX_AUTOCERT_TEST (BASE=5) */
 #define NGX_AUTOCERT_BACKOFF_CAP     (60 * 60)   /* 1h ceiling, seconds */
 
 static ngx_event_t              ngx_autocert_sched_timer;

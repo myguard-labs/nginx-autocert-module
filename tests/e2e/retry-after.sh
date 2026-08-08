@@ -185,7 +185,7 @@ echo "✓ helper logged honouring Retry-After ${RETRY_AFTER}s"
 
 # 2) The failing name must be held ~15s (the Retry-After) before the next order
 #    attempt, longer than the 5s exponential first step (NGX_AUTOCERT_TEST).
-echo "== watching for two order attempts to measure the hold (up to ~30s) =="
+echo "== watching for two order attempts to measure the hold (up to ~40s) =="
 deadline=$(( $(date +%s) + 40 ))
 while :; do
     n=$(grep -c "starting ACME order for \"${NAME}\"" "$LOG" || true)
@@ -207,6 +207,6 @@ if [ "$gap" -lt 12 ]; then
     grep autocert "$LOG" | tail -40
     exit 1
 fi
-echo "✓ name held off ${gap}s (>= Retry-After ${RETRY_AFTER}s, beats 5s backoff)"
+echo "✓ name held off ${gap}s (>= 12s enforced floor, above the ~10s a plain 5s backoff + sweep would give)"
 
 echo "✓✓ M9c 429 / Retry-After rate-limit awareness verified"
