@@ -1,4 +1,4 @@
-# sync-sha: 866c4e9c7baa9c96165e26b2bf3f5f15f4695f08ce270d18a8472e6ae17417f9
+# sync-sha: 4fb1757a7fa21846eced5def6756e0f638cbf8447571ecc43bfba03fac741a38
 name: Security scanners
 
 # Static / security scanners gate on every PR/push — flawfinder, clang-tidy
@@ -60,7 +60,20 @@ jobs:
           echo "NGINX_SRC_TREE=$PWD" >> "$GITHUB_ENV"
       - name: flawfinder
         run: |
-          flawfinder --minlevel=1 "$GITHUB_WORKSPACE/src/" 2>&1 | tee flawfinder.log
+          set -u
+          # --minlevel=1 so the log keeps the low-severity hits for the uploaded
+          # report, --error-level=4 so only level >= 4 fails the job. Same floor
+          # as the local .pre-commit-config.yaml hook; if the two drift, local
+          # green stops predicting remote green.
+          #
+          # The status comes from PIPESTATUS[0], not the pipeline: piping into
+          # tee makes tee's exit status the pipeline's, which silently discarded
+          # flawfinder's for as long as this step has existed. `set -o pipefail`
+          # alone would not do either: the log must still be written for the
+          # "Upload reports" step when the tool fails.
+          flawfinder --minlevel=1 --error-level=4 \
+            "$GITHUB_WORKSPACE/src/" 2>&1 | tee flawfinder.log
+          exit "${PIPESTATUS[0]}"
       - name: clang-tidy (cert-*, security.*)
         run: |
           set -euo pipefail
@@ -82,8 +95,19 @@ jobs:
           exit "$status"
       - name: semgrep
         run: |
+          set -u
+          # --severity + --error mirror the local .pre-commit-config.yaml hook:
+          # block on WARNING and ERROR, ignore the INFO tier. Previously this
+          # step was advisory twice over -- `| tee` handed the pipeline tee's
+          # exit status, and a trailing `|| true` discarded even that -- so CI
+          # accepted findings the local hook rejects.
+          #
+          # Status via PIPESTATUS[0] rather than pipefail so semgrep.log is
+          # still written for "Upload reports" when the scan fails.
           semgrep scan --config p/c --config p/security-audit \
-            "$GITHUB_WORKSPACE/src/" 2>&1 | tee semgrep.log || true
+            --severity=WARNING --severity=ERROR --error \
+            "$GITHUB_WORKSPACE/src/" 2>&1 | tee semgrep.log
+          exit "${PIPESTATUS[0]}"
       - name: Upload reports
         if: always()
         uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
