@@ -44,9 +44,17 @@ for b in "${PORT_BASES[@]}"; do
     [ "$b" -gt "$max_base" ] && max_base="$b"
 done
 
-# Highest slot term. run_one() sets the per-test offset to slot*100; slots are
-# handed out in SCRIPTS order, then one per CERT_CASE (see run-all.sh), so the
-# last slot is (#SCRIPTS + #CERT_CASES - 1).
+# Highest slot term. run_one() sets the per-test offset to slot*100.
+#
+# Sequential (AC_E2E_JOBS=1) hands out one slot per task in SCRIPTS order, then
+# one per CERT_CASE, so the last slot is (#SCRIPTS + #CERT_CASES - 1).
+#
+# Concurrent (AC_E2E_JOBS=N) recycles slots from a free list of size N, so the
+# highest slot is only N-1 - far lower. Report the SEQUENTIAL ceiling regardless:
+# it is the larger of the two for any N below the task count, and a guard that
+# shrinks when someone sets AC_E2E_JOBS would stop protecting the default path.
+# Over-reserving costs nothing; under-reserving is the failure this file exists
+# to prevent.
 slots=$(( ${#SCRIPTS[@]} + ${#CERT_CASES[@]} ))
 max_slot_term=$(( (slots - 1) * 100 ))
 

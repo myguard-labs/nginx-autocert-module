@@ -184,6 +184,16 @@ invoke() {   # invoke <use_sudo> <script-abs> [extra env KEY=VAL ...]
 # collides with the next run's `-p ...:53/udp` and fails the whole script
 # with "address already in use" on an unrelated ephemeral port. Reap any
 # leftovers from a previous run before starting ours.
+#
+# This runs ONCE, before the first task starts, so intra-job concurrency
+# (AC_E2E_JOBS>1) is unaffected - no task of ours is alive yet.
+#
+# It is name-pattern-wide, though, not scoped to this job: two e2e JOBS landing
+# on the same runner would have the later one reap the earlier one's live
+# containers. That is already true of the two flavor jobs today and has not
+# bitten, because they are dispatched to separate docker lanes. Sharding the
+# suite across more jobs than there are lanes would make it reachable - scope
+# the filter by GITHUB_RUN_ID before doing that.
 for pat in 'ac-dns-' 'ac-pebble-'; do
     docker ps -aq --filter "name=${pat}" | xargs -r docker rm -f >/dev/null 2>&1 || true
 done
@@ -191,7 +201,11 @@ docker network ls -q --filter 'name=ac-net-' | xargs -r docker network rm >/dev/
 
 chmod +x "$SERVER_BIN" 2>/dev/null || true
 
-slot=0
+# Build the task list first (label, sudo mode, path, extra env), so the runner
+# below can be a plain pool over a flat array instead of two near-identical
+# loops. Skips are decided here, before any slot is spent on them.
+TASK_LABEL=(); TASK_MODE=(); TASK_PATH=(); TASK_ENV=()
+
 for entry in "${SCRIPTS[@]}"; do
     script="${entry%%:*}"
     mode="${entry#"$script"}"; mode="${mode#:}"   # "sudo" or ""
@@ -201,21 +215,99 @@ for entry in "${SCRIPTS[@]}"; do
         SKIP+=("$script (missing)")
         continue
     fi
-    run_one "$script" "$slot" invoke "${mode:-nosudo}" "$path"
-    slot=$((slot + 1))
+    TASK_LABEL+=("$script"); TASK_MODE+=("${mode:-nosudo}")
+    TASK_PATH+=("$path");    TASK_ENV+=("")
 done
 
 # cert-validate-reject: one run per fixture case.
 cvr="$HERE/cert-validate-reject.sh"
 if [ -f "$cvr" ]; then
     for case in "${CERT_CASES[@]}"; do
-        run_one "cert-validate-reject.sh [$case]" \
-            "$slot" invoke sudo "$cvr" "CERT_CASE=$case"
-        slot=$((slot + 1))
+        TASK_LABEL+=("cert-validate-reject.sh [$case]"); TASK_MODE+=("sudo")
+        TASK_PATH+=("$cvr");                             TASK_ENV+=("CERT_CASE=$case")
     done
 else
     echo "::warning::cert-validate-reject.sh missing — skipping"
     SKIP+=("cert-validate-reject.sh (missing)")
+fi
+
+# Concurrency. Default 1 = the historical sequential behaviour, so this is inert
+# until a caller opts in.
+#
+# Everything a script touches is already slot-scoped: set_ports gives it a
+# disjoint 100-port band, AC_E2E_PREFIX a disjoint /tmp dir, and the scripts name
+# their containers/networks with $$ (acip4-pebble-$$, ac-wc-net-$$), which is
+# unique per invocation. So concurrency needs no new isolation - only a bound on
+# how many slots are live at once.
+#
+# Slots are RECYCLED from a free list of size AC_E2E_JOBS rather than handed out
+# one per task. The port ceiling is max(PORT_BASES) + offset + slot*100 and it
+# has to stay under the ephemeral floor (max-port.sh enforces this); consuming a
+# fresh slot per task would make that ceiling grow with the suite instead of with
+# the concurrency.
+JOBS="${AC_E2E_JOBS:-1}"
+case "$JOBS" in ''|*[!0-9]*|0) JOBS=1 ;; esac
+[ "$JOBS" -gt "${#TASK_LABEL[@]}" ] && JOBS="${#TASK_LABEL[@]}"
+
+# PASS/FAIL/DURATIONS are appended by run_one. Under `&` that runs in a subshell,
+# where those appends are invisible to the parent - a lost FAIL would turn a red
+# suite green. Each task therefore writes its own result file and the parent
+# folds them in after wait.
+RESULT_DIR="$(mktemp -d "${TMPDIR:-/tmp}/ac-e2e-results-XXXXXX")"
+trap 'rm -rf "$RESULT_DIR"' EXIT
+
+echo "e2e ${FLAVOR}: ${#TASK_LABEL[@]} tasks, AC_E2E_JOBS=${JOBS}"
+
+if [ "$JOBS" -eq 1 ]; then
+    # Sequential: no subshell, so run_one's arrays are the real ones. Kept as a
+    # distinct path so the default behaviour is exactly what it always was.
+    slot=0
+    for i in "${!TASK_LABEL[@]}"; do
+        run_one "${TASK_LABEL[$i]}" "$slot" \
+            invoke "${TASK_MODE[$i]}" "${TASK_PATH[$i]}" ${TASK_ENV[$i]:+"${TASK_ENV[$i]}"}
+        slot=$((slot + 1))
+    done
+else
+    # Worker pool: at most JOBS live tasks, each pinned to a recycled slot.
+    declare -A SLOT_OF_PID=()
+    free_slots=(); for ((s = 0; s < JOBS; s++)); do free_slots+=("$s"); done
+
+    reap_one() {
+        local pid
+        wait -n -p pid 2>/dev/null || true
+        [ -n "${pid:-}" ] || return 0
+        free_slots+=("${SLOT_OF_PID[$pid]}")
+        unset "SLOT_OF_PID[$pid]"
+    }
+
+    for i in "${!TASK_LABEL[@]}"; do
+        while [ "${#free_slots[@]}" -eq 0 ]; do reap_one; done
+        slot="${free_slots[0]}"; free_slots=("${free_slots[@]:1}")
+        (
+            run_one "${TASK_LABEL[$i]}" "$slot" \
+                invoke "${TASK_MODE[$i]}" "${TASK_PATH[$i]}" ${TASK_ENV[$i]:+"${TASK_ENV[$i]}"}
+            # Subshell: report the verdict through the filesystem.
+            printf '%s\t%s\t%s\n' "${#FAIL[@]}" "${DURATIONS[0]%%	*}" "${TASK_LABEL[$i]}" \
+                > "$RESULT_DIR/$i"
+        ) &
+        SLOT_OF_PID[$!]="$slot"
+    done
+    while [ "${#SLOT_OF_PID[@]}" -gt 0 ]; do reap_one; done
+
+    # Fold the per-task verdicts back into the parent's arrays. A task whose
+    # result file is missing (killed, disk full, subshell died before the write)
+    # counts as a FAILURE, never as a pass - silence must not read as success.
+    PASS=(); FAIL=(); DURATIONS=()
+    for i in "${!TASK_LABEL[@]}"; do
+        if [ ! -s "$RESULT_DIR/$i" ]; then
+            echo "::error::e2e ${FLAVOR}: ${TASK_LABEL[$i]} produced no result (worker died?)"
+            FAIL+=("${TASK_LABEL[$i]} (no result)")
+            continue
+        fi
+        IFS=$'\t' read -r nfail secs label < "$RESULT_DIR/$i"
+        DURATIONS+=("${secs}	${label}")
+        if [ "$nfail" -eq 0 ]; then PASS+=("$label"); else FAIL+=("$label"); fi
+    done
 fi
 
 echo
