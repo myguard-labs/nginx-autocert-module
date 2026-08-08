@@ -1,4 +1,4 @@
-# sync-sha: d865c2c93e780eac0562a1e4c790bddd91f748f10eb569d224c7eb055f3918d4
+# sync-sha: 3bfa47f5dcb1c0c8f988746e7be051842c1b1d993db3b8e0fabc6f37250aca8c
 name: Build & Test
 
 # Third-party actions pinned to commit SHAs for supply-chain safety.
@@ -595,4 +595,19 @@ jobs:
           fi
 
           SERVER_BIN="$BIN" NGX_BUILD_DIR="$NGX" FLAVOR="${{ matrix.flavor }}" AC_PORT_OFFSET="$port_offset" \
+            AC_E2E_TIMINGS="$GITHUB_WORKSPACE/e2e-timings-${{ matrix.flavor }}.tsv" \
             bash tests/e2e/run-all.sh
+
+      # Per-script wall-clock, slowest first. Kept as an artifact so shard
+      # balancing reads measured numbers instead of re-deriving them from a log
+      # (job logs expire well before anyone gets round to the sharding work).
+      # if: always() — a failing suite still produces useful timings, and the
+      # slow script is often the one that failed.
+      - name: Upload e2e timings
+        if: always()
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        with:
+          name: e2e-timings-${{ matrix.flavor }}
+          path: e2e-timings-${{ matrix.flavor }}.tsv
+          if-no-files-found: warn
+          retention-days: 30

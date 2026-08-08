@@ -129,6 +129,12 @@ fi
 
 PASS=(); FAIL=(); SKIP=()
 
+# Per-script wall-clock, as "<seconds>\t<label>" rows. Recorded for every script
+# including failures: a script that fails slowly is exactly the one worth seeing.
+# Written to $AC_E2E_TIMINGS as a TSV when that is set, so CI can keep it as an
+# artifact instead of making the next reader re-derive it from a log.
+DURATIONS=()
+
 run_one() {
     local label="$1"; shift
     local slot="$1"; shift
@@ -139,14 +145,16 @@ run_one() {
     echo "e2e ${FLAVOR}: ${label}: AC_EFFECTIVE_PORT_OFFSET=${AC_EFFECTIVE_PORT_OFFSET} AC_PORT_8080=${AC_PORT_8080} AC_PORT_14000=${AC_PORT_14000} AC_PORT_15000=${AC_PORT_15000}"
     echo "e2e ${FLAVOR}: ${label}: PREFIX=${AC_E2E_PREFIX}"
     echo "::group::e2e ${FLAVOR}: ${label}"
-    local rc=0
+    local rc=0 started=$SECONDS
     "$@" || rc=$?
+    local elapsed=$((SECONDS - started))
     echo "::endgroup::"
+    DURATIONS+=("${elapsed}	${label}")
     if [ "$rc" -eq 0 ]; then
-        echo "✓ ${label}"
+        echo "✓ ${label} (${elapsed}s)"
         PASS+=("$label")
     else
-        echo "::error::e2e ${FLAVOR}: ${label} failed (exit ${rc})"
+        echo "::error::e2e ${FLAVOR}: ${label} failed (exit ${rc}, ${elapsed}s)"
         FAIL+=("$label")
     fi
 }
@@ -220,6 +228,21 @@ if [ "${#FAIL[@]}" -gt 0 ]; then
 fi
 if [ "${#SKIP[@]}" -gt 0 ]; then
     printf '  SKIP: %s\n' "${SKIP[@]}"
+fi
+
+# Slowest-first, because the only actionable question here is "what is the long
+# pole". Sequential total is the current wall-clock floor for this job; any
+# sharding or concurrency work is measured against it.
+if [ "${#DURATIONS[@]}" -gt 0 ]; then
+    echo
+    echo "---- per-script wall-clock (${FLAVOR}), slowest first ----"
+    printf '%s\n' "${DURATIONS[@]}" | sort -rn | awk -F'\t' '
+        { total += $1; printf "  %5ds  %s\n", $1, $2 }
+        END { printf "  ------\n  %5ds  TOTAL (%d scripts, sequential)\n", total, NR }'
+    if [ -n "${AC_E2E_TIMINGS:-}" ]; then
+        printf '%s\n' "${DURATIONS[@]}" | sort -rn > "$AC_E2E_TIMINGS"
+        echo "  timings TSV: $AC_E2E_TIMINGS"
+    fi
 fi
 echo "================================================================"
 
