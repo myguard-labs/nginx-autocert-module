@@ -40,7 +40,21 @@ TOKEN="evaGxfADs6pSRb2LMJ7rzMrXXX0123456789abcdefg"
 KEYAUTH="$TOKEN.9jg46WB3rR_AHD-EBXdN7cBkH1WOu0tA3M9fm21mqTI"
 
 WORK="$(mktemp -d)"
-trap 'rm -rf "$WORK"' EXIT
+
+# AC_SOAK_LOG_DIR: copy logs out before the WORK dir is wiped, so CI can upload
+# them as an artifact. Without this the sanitizer report exists only in the job
+# log, and only for as long as the job log is retained.
+save_logs() {
+    local rc=$?
+    if [ -n "${AC_SOAK_LOG_DIR:-}" ]; then
+        if mkdir -p "$AC_SOAK_LOG_DIR" 2>/dev/null; then
+            cp -a "$WORK"/logs/. "$AC_SOAK_LOG_DIR"/ 2>/dev/null || true
+        fi
+    fi
+    rm -rf "$WORK"
+    return $rc
+}
+trap save_logs EXIT
 mkdir -p "$WORK/conf" "$WORK/logs" "$WORK/store"
 
 cat > "$WORK/conf/nginx.conf" <<EOF
@@ -63,9 +77,15 @@ http {
 }
 EOF
 
-ASAN_OPTIONS="${ASAN_OPTIONS:-}:detect_leaks=1:abort_on_error=1:exitcode=42:log_path=$WORK/logs/asan"
+# abort_on_error=0 deliberately: with abort_on_error=1 the sanitizer raises
+# SIGABRT the instant it reports, which kills the process BEFORE the
+# cat-of-logs/asan* dump at the end of this script ever runs — the job goes red
+# naming nothing. exitcode=42 already makes a report fail the run, and the
+# report is still written to log_path, so failure is preserved while the
+# diagnostic survives. Same reasoning for UBSan's halt_on_error.
+ASAN_OPTIONS="${ASAN_OPTIONS:-}:detect_leaks=1:abort_on_error=0:exitcode=42:log_path=$WORK/logs/asan"
 export ASAN_OPTIONS
-export UBSAN_OPTIONS="${UBSAN_OPTIONS:-}:print_stacktrace=1:halt_on_error=1"
+export UBSAN_OPTIONS="${UBSAN_OPTIONS:-}:print_stacktrace=1:halt_on_error=0:log_path=$WORK/logs/asan"
 
 SUPP="$(cd "$(dirname "$0")" && pwd)/valgrind.supp"
 RUN=("$NGINX" -p "$WORK" -c "$WORK/conf/nginx.conf")
@@ -84,7 +104,24 @@ elif [ "${USE_HELGRIND:-0}" = "1" ]; then
 fi
 
 echo "== config test =="
-"$NGINX" -t -p "$WORK" -c "$WORK/conf/nginx.conf"
+# Not bare under `set -e`: nginx -t is the first thing to run the sanitized
+# binary, so it is where a load-time/config-time sanitizer report surfaces. A
+# bare invocation would abort the script with the report still sitting unread
+# in logs/asan* and the job naming nothing.
+if ! "$NGINX" -t -p "$WORK" -c "$WORK/conf/nginx.conf"; then
+    rc=$?
+    echo "FAIL: config test failed (exit $rc)"
+    if ls "$WORK"/logs/asan* >/dev/null 2>&1; then
+        echo "--- ASAN/UBSAN report from config test ---"
+        cat "$WORK"/logs/asan*
+    else
+        echo "(no sanitizer report written; failure is in nginx -t itself)"
+    fi
+    if [ -s "$WORK/logs/error.log" ]; then
+        echo "--- error.log ---"; cat "$WORK/logs/error.log"
+    fi
+    exit "$rc"
+fi
 
 "${RUN[@]}" &
 NGINX_PID=$!

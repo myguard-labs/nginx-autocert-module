@@ -1,4 +1,4 @@
-# sync-sha: 91078e1b326a13b4dbdc05a8112f0334df30b6ce3d4aac8943874360164162ff
+# sync-sha: 7b380c1c1d6966a4377802ffa87fee01eba360b35cc915c355ffeaa5978aecb8
 name: ASan
 
 # Manual ASan+UBSan soak — 30s mixed-load soak of the HTTP-01 serve path with an
@@ -21,6 +21,7 @@ name: ASan
 #
 # Action pins (keep in sync with build-test.yml header):
 # actions/checkout@v5        -> 93cb6efe18208431cddfb8368fd83d5badbf9bfd
+# actions/upload-artifact@v5 -> 330a01c490aca151604b8cf639adc76d48f6c5d4
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
@@ -83,6 +84,17 @@ jobs:
       - name: ASan+UBSan soak (30s)
         env:
           NGX_BUILD_DIR: ${{ github.workspace }}/nginx-${{ env.NGINX_VERSION }}
+          AC_SOAK_LOG_DIR: ${{ github.workspace }}/soak-logs
         run: |
           bash ci/tools/soak.sh \
             "$GITHUB_WORKSPACE/nginx-${NGINX_VERSION}/objs/nginx" 30 4
+
+      # if: always() — the whole point is to capture the logs of a FAILED soak.
+      - name: Upload soak logs (sanitizer reports, error.log)
+        if: always()
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        with:
+          name: asan-soak-logs
+          path: soak-logs/
+          if-no-files-found: warn
+          retention-days: 14
