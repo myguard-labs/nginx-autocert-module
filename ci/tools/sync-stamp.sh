@@ -23,9 +23,9 @@
 # makes it stable across re-stamping and lets `--check` recompute it in place.
 #
 # Usage:
-#   tools/sync-stamp.sh            # rewrite every stamp (use after editing)
-#   tools/sync-stamp.sh --check    # verify; exit 1 on any stale/missing stamp
-#   tools/sync-stamp.sh --list     # print path<TAB>sha, for a consuming repo
+#   ci/tools/sync-stamp.sh            # rewrite every stamp (use after editing)
+#   ci/tools/sync-stamp.sh --check    # verify; exit 1 on any stale/missing stamp
+#   ci/tools/sync-stamp.sh --list     # print path<TAB>sha, for a consuming repo
 #
 # --check is what CI runs: it fails when a tracked file was edited without
 # re-stamping, so the stamps cannot rot into decoration.

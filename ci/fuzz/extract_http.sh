@@ -27,7 +27,7 @@
 set -euo pipefail
 
 FUZZ_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SRC="$FUZZ_DIR/../src/ngx_autocert_acme.c"
+SRC="$FUZZ_DIR/../../src/ngx_autocert_acme.c"
 OUT="$FUZZ_DIR/generated_http.inc"
 
 if [ ! -f "$SRC" ]; then

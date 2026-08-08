@@ -24,7 +24,7 @@
 # Detected in this repo:
 #   C source dirs : src
 #   Python dirs   : (none)
-#   fuzz corpora  : fuzz/corpus, fuzz/corpus_http
+#   fuzz corpora  : ci/fuzz/corpus, ci/fuzz/corpus_http
 #
 # What is NOT here, and why:
 #   clang-tidy   -- needs ngx_auto_config.h, which only exists after nginx is
@@ -37,7 +37,7 @@
 #                   unrelated diff.
 #   codeql/asan/valgrind/fuzzing -- far too slow for a commit hook; CI-only.
 #
-# Fuzz harnesses (fuzz/, t/) are outside the lint scope: they deliberately do
+# Fuzz harnesses (ci/fuzz/, t/) are outside the lint scope: they deliberately do
 # unsafe things with untrusted input and would trip flawfinder forever.
 #
 # Install (once per clone):
@@ -69,7 +69,7 @@
 # Skipped" as probe.pem and "Private key found" as probe.txt. They are excluded
 # per-hook on the three fixers below instead, which is the only reason they were
 # ever in this list.
-exclude: '^fuzz/corpus/|^fuzz/corpus_http/|\.traefik-ref/|\.claude/worktrees/|\.build/|(^|/)objs/|(^|/)vendor/|(^|/)node_modules/|(^|/)\.venv/|\.(bin|gz|zip|png|ico|so|o|a)$'
+exclude: '^ci/fuzz/corpus/|^ci/fuzz/corpus_http/|\.traefik-ref/|\.claude/worktrees/|\.build/|(^|/)objs/|(^|/)vendor/|(^|/)node_modules/|(^|/)\.venv/|\.(bin|gz|zip|png|ico|so|o|a)$'
 
 repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
@@ -94,7 +94,7 @@ repos:
       # vector); gating on those is a pure false positive, while the hook still
       # guards every real path.
       - id: detect-private-key
-        exclude: '^tests?/'
+        exclude: '^(ci/)?tests?/'
 
   - repo: local
     hooks:

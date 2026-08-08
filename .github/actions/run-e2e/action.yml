@@ -1,9 +1,9 @@
-# sync-sha: 258b5585d7d1a816523950691facd9ab64046f95a3240402f6289668440bebfd
+# sync-sha: b8a4901e9199631364aa0d9a218a1681c5614ffe0bf6b29b77fb015b2242d975
 name: Run a Pebble e2e test
 description: >
   Shared setup for the Pebble end-to-end jobs: checkout is done by the caller,
   this restores the build-<flavor> artifact, makes the server binary executable,
-  and runs one tests/e2e/*.sh script with SERVER_BIN + NGX_BUILD_DIR set. Factored
+  and runs one ci/tests/e2e/*.sh script with SERVER_BIN + NGX_BUILD_DIR set. Factored
   out of build-test.yml so the e2e jobs share one definition instead of
   repeating the same download/chmod/run boilerplate (FLOW-4). Flavor-aware so
   the same jobs run against both nginx and angie.
@@ -16,7 +16,7 @@ inputs:
     description: Unpacked source dir name (e.g. nginx-1.31.2 / angie-1.11.8).
     required: true
   script:
-    description: Test script under tests/e2e/ to run (e.g. order-authz.sh).
+    description: Test script under ci/tests/e2e/ to run (e.g. order-authz.sh).
     required: true
   sudo:
     description: Run the script under sudo (needed when it binds :80). "true"/"false".
@@ -64,7 +64,7 @@ runs:
         BIN="$NGX/objs/${{ inputs.flavor }}"
         [ -f "$BIN" ] || BIN="$NGX/objs/nginx"
         chmod +x "$BIN"
-        script="$GITHUB_WORKSPACE/tests/e2e/${{ inputs.script }}"
+        script="$GITHUB_WORKSPACE/ci/tests/e2e/${{ inputs.script }}"
         if [ "${{ inputs.sudo }}" = "true" ]; then
           sudo env SERVER_BIN="$BIN" NGX_BUILD_DIR="$NGX" \
             CERT_CASE="${{ inputs.cert_case }}" bash "$script"

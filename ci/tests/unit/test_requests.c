@@ -23,7 +23,7 @@
 
 #include "test_slab.h"
 
-#include "../../src/ngx_autocert_requests.h"
+#include "../../../src/ngx_autocert_requests.h"
 
 #include <stdio.h>
 

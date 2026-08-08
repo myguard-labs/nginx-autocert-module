@@ -1,11 +1,12 @@
 # nginx-autocert-module
 
-[![Build & Test](https://github.com/myguard-labs/nginx-autocert-module/actions/workflows/build-test.yml/badge.svg)](https://github.com/myguard-labs/nginx-autocert-module/actions/workflows/build-test.yml)
-[![Security scanners](https://github.com/myguard-labs/nginx-autocert-module/actions/workflows/security-scanners.yml/badge.svg)](https://github.com/myguard-labs/nginx-autocert-module/actions/workflows/security-scanners.yml)
+[![Build&Test](https://github.com/myguard-labs/nginx-autocert-module/actions/workflows/build-test.yml/badge.svg)](https://github.com/myguard-labs/nginx-autocert-module/actions/workflows/build-test.yml)
+[![Security Scanners](https://github.com/myguard-labs/nginx-autocert-module/actions/workflows/security-scanners.yml/badge.svg)](https://github.com/myguard-labs/nginx-autocert-module/actions/workflows/security-scanners.yml)
 [![Fuzzing](https://github.com/myguard-labs/nginx-autocert-module/actions/workflows/fuzzing.yml/badge.svg)](https://github.com/myguard-labs/nginx-autocert-module/actions/workflows/fuzzing.yml)
 [![Valgrind](https://github.com/myguard-labs/nginx-autocert-module/actions/workflows/valgrind.yml/badge.svg)](https://github.com/myguard-labs/nginx-autocert-module/actions/workflows/valgrind.yml)
-[![CI Deep](https://github.com/myguard-labs/nginx-autocert-module/actions/workflows/ci-deep.yml/badge.svg)](https://github.com/myguard-labs/nginx-autocert-module/actions/workflows/ci-deep.yml)
 [![CodeQL](https://github.com/myguard-labs/nginx-autocert-module/actions/workflows/codeql.yml/badge.svg)](https://github.com/myguard-labs/nginx-autocert-module/actions/workflows/codeql.yml)
+[![A/UBSan](https://github.com/myguard-labs/nginx-autocert-module/actions/workflows/asan.yml/badge.svg)](https://github.com/myguard-labs/nginx-autocert-module/actions/workflows/asan.yml)
+[![CI Deep](https://github.com/myguard-labs/nginx-autocert-module/actions/workflows/ci-deep.yml/badge.svg)](https://github.com/myguard-labs/nginx-autocert-module/actions/workflows/ci-deep.yml)
 
 **Automatic TLS certificates for NGINX — built into the server.**
 
@@ -637,11 +638,36 @@ make
 `AUTOCERT_TEST=1` is consumed at configure time only (it bakes
 `-DNGX_AUTOCERT_TEST=1` into the generated Makefile), so it is set on `./configure`
 and not repeated on `make`. Use a full `make` here — not `make modules` — because
-the e2e suite under `tests/e2e/*.sh` runs the actual server binary (`objs/nginx` or
+the e2e suite under `ci/tests/e2e/*.sh` runs the actual server binary (`objs/nginx` or
 `objs/angie`), which `make modules` does not build.
 
 (The e2e harness uses [Pebble](https://github.com/letsencrypt/pebble) as a local
 ACME server.)
+
+---
+
+## CI
+
+A failure surfaces as a red run plus the uploaded artifact. `ci-deep.yml` also
+pings Discord on failure; nothing else notifies.
+
+`ci.yml` is the orchestrator and calls the PR-time members below, so a PR asks
+for one run rather than several independent ones.
+
+| Workflow | Trigger | Gates |
+|---|---|---|
+| `build-test.yml` | PR (via `ci.yml`) | shellcheck/cppcheck/actionlint + stamp check, build on **nginx and angie**, `.so` dlopens, bad config rejected, `-Werror` strict compile, ABI check, unit tests (12 binaries), Guard suite, **Pebble e2e suite**; `Validation` alone also runs daily at 03:17 UTC |
+| `security-scanners.yml` | PR (via `ci.yml`) | flawfinder ≥4 blocks, clang-tidy, semgrep ≥WARNING |
+| `fuzzing.yml` | manual | replay every past crash, then 30s fresh fuzz per target (JSON + HTTP) |
+| `valgrind.yml` | manual | 30s memcheck soak |
+| `codeql.yml` | PR (via `ci.yml`), monthly | CodeQL over the module TU |
+| `asan.yml` | manual | 30s ASan+UBSan request-storm soak — **never yet executed; see `issues.md`** |
+| `ci-deep.yml` | monthly, manual | long fuzz, memcheck + helgrind soaks, security scanners, angie Pebble e2e |
+
+Port bands: the e2e jobs derive `AC_PORT_OFFSET` from the run ID plus a
+per-flavour offset, and `ci/tests/e2e/max-port.sh` verifies the ceiling **before**
+`run-all.sh` binds anything, so two concurrent jobs on the same builder cannot
+collide on a port.
 
 ---
 

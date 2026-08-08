@@ -1,4 +1,4 @@
-# sync-sha: b9c999c5da4db6823361ac4c63262372aa2d4a519f43762398732890571a67dd
+# sync-sha: c36611b57c17f1ca17bcce79ffa6fbe11f271fbb0ad464bd4f34b0fbd33dc125
 name: CodeQL
 
 env:
@@ -7,15 +7,21 @@ env:
 on:
   push:
     branches: [master]
-  pull_request:
-    branches: [master]
+  # No pull_request: — ci.yml is the sole PR entry point and calls this
+  # workflow. push: and the monthly schedule below are unaffected.
   schedule:
     # Monthly, day 2 @ 04:47 UTC (staggered per repo like ci-deep).
     - cron: "47 4 2 * *"
   workflow_dispatch: {}
+  workflow_call: {}
 
 concurrency:
-  group: codeql-${{ github.ref }}
+  # github.workflow is part of the group deliberately: this workflow is also
+  # called from ci.yml, and a called workflow inherits the CALLER's
+  # github.workflow/github.ref. Without that component the standalone run and
+  # the called run compute an identical group string and cancel each other —
+  # observed on run 31277899356, cancelled one second after it started.
+  group: codeql-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 permissions:

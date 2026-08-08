@@ -1,4 +1,4 @@
-# sync-sha: 4fb1757a7fa21846eced5def6756e0f638cbf8447571ecc43bfba03fac741a38
+# sync-sha: 3709da1da1fe5f2f82aec8816092c9a03ef38df6286ef1667d485f374c537206
 name: Security scanners
 
 # Static / security scanners gate on every PR/push — flawfinder, clang-tidy
@@ -15,9 +15,10 @@ env:
 on:
   push:
     branches: [master, autolabel]
-  pull_request:
-    branches: [master, autolabel]
+  # No pull_request: — ci.yml is the sole PR entry point and calls this
+  # workflow. push: is kept so master and autolabel still get direct coverage.
   workflow_dispatch: {}
+  workflow_call: {}
 
 concurrency:
   group: security-scanners-${{ github.workflow }}-${{ github.ref }}

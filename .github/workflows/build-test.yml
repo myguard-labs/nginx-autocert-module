@@ -1,4 +1,4 @@
-# sync-sha: a495ba36e53347a8bc7b653a4a413aab76063a35529d9b76a9d2b82543d745a7
+# sync-sha: aac7c35191f14eda378eee57fbade5468c4b4ba83f58b40e94b58c9846489756
 name: Build & Test
 
 # Third-party actions pinned to commit SHAs for supply-chain safety.
@@ -12,7 +12,7 @@ name: Build & Test
 #   ./.github/actions/setup         apt deps + optional ccache restore.
 #   ./.github/actions/build-module  fetch+build one flavor, run the no-network
 #                                   load/serve tests, upload build-<flavor>.
-#   ./.github/actions/run-e2e       restore build-nginx + run one tests/e2e/*.sh
+#   ./.github/actions/run-e2e       restore build-nginx + run one e2e script
 #                                   Pebble e2e (optionally under sudo).
 
 # Neither nginx nor angie is pinned: the `resolve` job scrapes the current
@@ -34,9 +34,11 @@ env:
 on:
   push:
     branches: [master, autolabel]
-  pull_request:
-    branches: [master, autolabel]
+  # No pull_request: — ci.yml is the sole PR entry point and calls this
+  # workflow. push: is kept so master and autolabel still get direct coverage,
+  # as does the daily Validation schedule below.
   workflow_dispatch: {}
+  workflow_call: {}
   # This CI is otherwise PR-only, so a self-hosted-runner toolchain drift (e.g.
   # a cppcheck upgrade on builder02) goes unnoticed on master until the next
   # innocent PR eats the blame (#144/#145, 2026-08-08: a README-only PR failed
@@ -77,15 +79,16 @@ jobs:
 
       - name: Validate scripts and source
         run: |
-          bash -n tests/e2e/*.sh fuzz/*.sh tests/unit/*.sh
-          shellcheck tests/e2e/*.sh fuzz/*.sh tests/unit/*.sh tools/sync-stamp.sh
+          bash -n ci/tests/e2e/*.sh ci/fuzz/*.sh ci/tests/unit/*.sh
+          shellcheck ci/tests/e2e/*.sh ci/fuzz/*.sh ci/tests/unit/*.sh \
+            ci/tools/sync-stamp.sh
           # Each stamped .github/ file carries a `# sync-sha:` of its own
           # content, so a `--list` diff against nginx-skeleton-module names
           # exactly which copies have drifted. The stamps are only worth
           # reading if they cannot go stale, hence this gate: edit a workflow
-          # or a composite action without running tools/sync-stamp.sh and the
+          # or a composite action without running ci/tools/sync-stamp.sh and the
           # PR goes red here.
-          bash tools/sync-stamp.sh --check
+          bash ci/tools/sync-stamp.sh --check
           # Reject literal NUL bytes in tracked C sources: they make git/rg treat
           # the file as binary and silently drop it from source search / review.
           if LC_ALL=C grep -laP '\x00' src/*.c src/*.h; then
@@ -256,7 +259,7 @@ jobs:
           ANGIE_URL: ${{ needs.resolve.outputs.angie_url }}
         run: |
           set -euo pipefail
-          WORKSPACE="$GITHUB_WORKSPACE" bash tests/e2e/abi-build-and-check.sh
+          WORKSPACE="$GITHUB_WORKSPACE" bash ci/tests/e2e/abi-build-and-check.sh
 
       - name: Test-only directives rejected in prod build
         run: |
@@ -355,7 +358,7 @@ jobs:
             BIN=objs/${flavor}; [ -x "$BIN" ] || BIN=objs/nginx
             test -x "$BIN"
             SERVER_BIN="$PWD/$BIN" NGX_BUILD_DIR="$PWD" \
-              bash "$GITHUB_WORKSPACE/tests/e2e/slowloris-read.sh"
+              bash "$GITHUB_WORKSPACE/ci/tests/e2e/slowloris-read.sh"
             cd "$GITHUB_WORKSPACE"
             echo "✓ slowloris budget guard passed for ${flavor} ${version}"
           }
@@ -403,14 +406,14 @@ jobs:
           # which references ngx_inet_addr / ngx_inet6_addr.
           # shellcheck disable=SC2086
           gcc -Wall -Wextra -Werror $CORE_INC -o test_crypto \
-            "$GITHUB_WORKSPACE/tests/unit/test_crypto.c" \
+            "$GITHUB_WORKSPACE/ci/tests/unit/test_crypto.c" \
             "$GITHUB_WORKSPACE/src/ngx_http_autocert_crypto.c" \
             $INET_OBJS -lssl -lcrypto
           ./test_crypto
 
           # shellcheck disable=SC2086
           gcc -Wall -Wextra -Werror $CORE_INC -o test_json \
-            "$GITHUB_WORKSPACE/tests/unit/test_json.c" \
+            "$GITHUB_WORKSPACE/ci/tests/unit/test_json.c" \
             "$GITHUB_WORKSPACE/src/ngx_autocert_json.c" \
             $BASE_OBJS
           ./test_json
@@ -422,7 +425,7 @@ jobs:
                 $NGX/objs/src/core/ngx_palloc.o $NGX/objs/src/os/unix/ngx_alloc.o"
           # shellcheck disable=SC2086
           gcc -Wall -Wextra -Werror $HTTP_INC -o test_ipident \
-            "$GITHUB_WORKSPACE/tests/unit/test_ipident.c" \
+            "$GITHUB_WORKSPACE/ci/tests/unit/test_ipident.c" \
             $IPIDENT_OBJS -lssl -lcrypto
           ./test_ipident
 
@@ -430,9 +433,9 @@ jobs:
           # ngx_autocert_acme.c by extract_http.sh and compiled against the
           # fuzz shim — no nginx objects needed (the rest of that TU is
           # event/SSL/resolver machinery the parser does not touch).
-          bash fuzz/extract_http.sh
+          bash ci/fuzz/extract_http.sh
           gcc -Wall -Wextra -Werror -I"$GITHUB_WORKSPACE" \
-            -o test_http "$GITHUB_WORKSPACE/tests/unit/test_http.c"
+            -o test_http "$GITHUB_WORKSPACE/ci/tests/unit/test_http.c"
           ./test_http
 
           # The store source carries an (intentional) unused init-zone `data`
@@ -443,7 +446,8 @@ jobs:
             "$GITHUB_WORKSPACE/src/ngx_autocert_challenge.c" -o challenge.o
           # shellcheck disable=SC2086
           gcc -Wall -Wextra -Werror $CORE_INC -c \
-            "$GITHUB_WORKSPACE/tests/unit/test_challenge.c" -o test_challenge_tu.o
+            "$GITHUB_WORKSPACE/ci/tests/unit/test_challenge.c" \
+              -o test_challenge_tu.o
           # shellcheck disable=SC2086
           gcc -o test_challenge test_challenge_tu.o challenge.o $STORE_OBJS
           ./test_challenge
@@ -457,7 +461,8 @@ jobs:
             "$GITHUB_WORKSPACE/src/ngx_autocert_requests.c" -o requests.o
           # shellcheck disable=SC2086
           gcc -Wall -Wextra -Werror $CORE_INC -c \
-            "$GITHUB_WORKSPACE/tests/unit/test_requests.c" -o test_requests_tu.o
+            "$GITHUB_WORKSPACE/ci/tests/unit/test_requests.c" \
+              -o test_requests_tu.o
           # shellcheck disable=SC2086
           gcc -o test_requests test_requests_tu.o requests.o $STORE_OBJS
           ./test_requests
@@ -469,7 +474,7 @@ jobs:
           # (NOT $STORE_OBJS — ngx_palloc.o there would clash with the stubs).
           # shellcheck disable=SC2086
           gcc -Wall -Wextra -Werror $CORE_INC \
-            "$GITHUB_WORKSPACE/tests/unit/test_ratecap.c" \
+            "$GITHUB_WORKSPACE/ci/tests/unit/test_ratecap.c" \
             "$NGX/objs/src/core/ngx_string.o" -o test_ratecap
           ./test_ratecap
 
@@ -480,7 +485,8 @@ jobs:
           # appears, which wedged the sole ACME driver loop (and its worker) after a
           # successful runtime issuance; O_NOFOLLOW does not stop it.
           gcc -Wall -Wextra -Werror \
-            "$GITHUB_WORKSPACE/tests/unit/test_marker_open.c" -o test_marker_open
+            "$GITHUB_WORKSPACE/ci/tests/unit/test_marker_open.c" \
+              -o test_marker_open
           ./test_marker_open
 
           # Store cert retrieval: ngx_autocert_open_file_path (ngx_autocert_shared.h)
@@ -491,7 +497,8 @@ jobs:
           # include path but no nginx objects.
           # shellcheck disable=SC2086
           gcc -D_GNU_SOURCE -Wall -Wextra -Werror $CORE_INC \
-            "$GITHUB_WORKSPACE/tests/unit/test_store_open.c" -o test_store_open
+            "$GITHUB_WORKSPACE/ci/tests/unit/test_store_open.c" \
+              -o test_store_open
           ./test_store_open
 
           # shellcheck disable=SC2086
@@ -499,7 +506,7 @@ jobs:
             "$GITHUB_WORKSPACE/src/ngx_autocert_alpn.c" -o alpn.o
           # shellcheck disable=SC2086
           gcc -Wall -Wextra -Werror $CORE_INC -c \
-            "$GITHUB_WORKSPACE/tests/unit/test_alpn.c" -o test_alpn_tu.o
+            "$GITHUB_WORKSPACE/ci/tests/unit/test_alpn.c" -o test_alpn_tu.o
           # shellcheck disable=SC2086
           gcc -o test_alpn test_alpn_tu.o alpn.o $STORE_OBJS
           ./test_alpn
@@ -509,20 +516,21 @@ jobs:
           # _GNU_SOURCE: the test cross-checks ngx_autocert_timegm against libc
           # timegm(3). The test include-shims the crypto .c to reach the static
           # ngx_autocert_timegm, so run it from the repo root (relative fixture
-          # path tests/unit/fixture_leaf.pem).
+          # path ci/tests/unit/fixture_leaf.pem).
           # shellcheck disable=SC2086
           gcc -D_GNU_SOURCE -Wall -Wextra -Werror $CORE_INC -o test_cert_time \
-            "$GITHUB_WORKSPACE/tests/unit/test_cert_time.c" \
+            "$GITHUB_WORKSPACE/ci/tests/unit/test_cert_time.c" \
             $INET_OBJS -lssl -lcrypto
           ./test_cert_time
 
           # Slice just ngx_autocert_account_json_safe from the shipped account
           # source — the function depends only on ngx_str_t, so no nginx objects
           # are linked.
-          bash tests/unit/extract_jsonsafe.sh
+          bash ci/tests/unit/extract_jsonsafe.sh
           # shellcheck disable=SC2086
-          gcc -Wall -Wextra -Werror -Itests/unit $CORE_INC -o test_account_jsonsafe \
-            "$GITHUB_WORKSPACE/tests/unit/test_account_jsonsafe.c"
+          gcc -Wall -Wextra -Werror -Ici/tests/unit $CORE_INC \
+            -o test_account_jsonsafe \
+            "$GITHUB_WORKSPACE/ci/tests/unit/test_account_jsonsafe.c"
           ./test_account_jsonsafe
 
   # ------------------------------------------------------------------ nginx e2e
@@ -536,8 +544,8 @@ jobs:
   # The angie Pebble e2e now runs monthly in ci-deep.yml (+ workflow_dispatch),
   # so the flavor is still fully tested, just not on the per-PR path.
 
-  # Batched Pebble e2e: the whole tests/e2e suite for one flavor runs in a
-  # SINGLE job via tests/e2e/run-all.sh, so the build artifact is downloaded
+  # Batched Pebble e2e: the whole ci/tests/e2e suite for one flavor runs in a
+  # SINGLE job via ci/tests/e2e/run-all.sh, so the build artifact is downloaded
   # once and the scripts run against it AC_E2E_JOBS at a time. Flavor jobs run
   # in parallel because run-all.sh exports flavor-scoped host ports. This
   # replaced ~33 per-script x 2-flavor matrix jobs (66 total), each of which had
@@ -614,7 +622,8 @@ jobs:
           # Fail LOUDLY if the budget is ever blown — a silent overflow back into
           # the ephemeral range is exactly the failure this guard exists to stop.
           ephemeral_lo=$(cut -f1 < /proc/sys/net/ipv4/ip_local_port_range)
-          max_port=$(AC_PORT_OFFSET="$port_offset" bash tests/e2e/max-port.sh)
+          max_port=$(AC_PORT_OFFSET="$port_offset" \
+            bash ci/tests/e2e/max-port.sh)
           echo "e2e highest published port: ${max_port} (ephemeral floor ${ephemeral_lo})"
           if [ "$max_port" -ge "$ephemeral_lo" ]; then
               echo "::error::e2e port budget blown: highest published port ${max_port}" \
@@ -632,7 +641,7 @@ jobs:
           # ephemeral ceiling, so the port scheme has to change first.
           SERVER_BIN="$BIN" NGX_BUILD_DIR="$NGX" FLAVOR="${{ matrix.flavor }}" AC_PORT_OFFSET="$port_offset" \
             AC_E2E_TIMINGS="$GITHUB_WORKSPACE/e2e-timings-${{ matrix.flavor }}.tsv" \
-            bash tests/e2e/run-all.sh
+            bash ci/tests/e2e/run-all.sh
 
       # Per-script wall-clock, slowest first. Kept as an artifact so shard
       # balancing reads measured numbers instead of re-deriving them from a log

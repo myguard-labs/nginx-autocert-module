@@ -1,4 +1,4 @@
-# sync-sha: 9ad2ab1d09267793bcf1fd59d6b4b7e5b5f7da036cf3b3ced3f7e46a0e7e1e18
+# sync-sha: edc61361c27400998143f89c15f013ad7c64b3a3c6206d5cbd64c27a29728cc8
 name: Valgrind
 
 # Manual Valgrind memcheck lite soak — 30s soak of the HTTP-01 serve path, no
@@ -67,5 +67,5 @@ jobs:
           USE_VALGRIND: "1"
           NGX_BUILD_DIR: ${{ github.workspace }}/nginx-${{ env.NGINX_VERSION }}
         run: |
-          bash tools/soak.sh \
+          bash ci/tools/soak.sh \
             "$GITHUB_WORKSPACE/nginx-${NGINX_VERSION}/objs/nginx" 30 4
