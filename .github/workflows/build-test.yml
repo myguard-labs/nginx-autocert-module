@@ -1,4 +1,4 @@
-# sync-sha: d865c2c93e780eac0562a1e4c790bddd91f748f10eb569d224c7eb055f3918d4
+# sync-sha: 7c756047aedb395e28134ae9415829b452b1c33b38646c72876134aa3f7cdf3b
 name: Build & Test
 
 # Third-party actions pinned to commit SHAs for supply-chain safety.
@@ -514,17 +514,24 @@ jobs:
 
   # Batched Pebble e2e: the whole tests/e2e suite for one flavor runs in a
   # SINGLE job via tests/e2e/run-all.sh, so the build artifact is downloaded
-  # once and every script runs sequentially against it. Flavor jobs can run in
-  # parallel because run-all.sh exports flavor-scoped host ports. This replaced
-  # ~33
-  # per-script × 2-flavor matrix jobs (66 total), each of which had re-paid the
-  # checkout + download-artifact + apt boilerplate before a single ~90s test —
-  # with only ~2 runner lanes that serialized into a very long queue. run-all.sh
-  # carries the per-script sudo policy + the cert-validate-reject case fan-out
-  # and fails the job if ANY script fails (fail-fast off, summary at the end).
+  # once and the scripts run against it AC_E2E_JOBS at a time. Flavor jobs run
+  # in parallel because run-all.sh exports flavor-scoped host ports. This
+  # replaced ~33 per-script x 2-flavor matrix jobs (66 total), each of which had
+  # re-paid the checkout + download-artifact + apt boilerplate before a single
+  # test. run-all.sh carries the per-script sudo policy + the
+  # cert-validate-reject case fan-out and fails the job if ANY script fails
+  # (fail-fast off, summary at the end).
+  #
+  # Measured 2026-08-08, sequential: 41 scripts in 11m03s (nginx) / 11m58s
+  # (angie), so ~17s each rather than the ~90s an earlier version of this
+  # comment claimed. e2e is the critical path of the whole workflow (16m24s).
+  # The per-script timings artifact below is what to read before tuning further.
   #
   # Keep max-parallel above the current two-flavor matrix so future flavor/case
   # expansion does not accidentally serialize after the port namespacing work.
+  # The org has 15 self-hosted runners; [self-hosted, builder02, docker] matches
+  # 3 of them (builder02-docker-01/02, builder03-docker-01), so a third shard
+  # has somewhere to land if the timings justify splitting the suite.
   e2e:
     name: e2e suite (Pebble) [${{ matrix.flavor }}]
     needs: [resolve, build-nginx, build-angie]
@@ -594,5 +601,28 @@ jobs:
               exit 1
           fi
 
+          # Deliberately sequential (AC_E2E_JOBS unset = 1). run-all.sh supports
+          # concurrency, but the suite's PORT_BASES are not disjoint per slot:
+          # the bases span 13189 ports while a slot only strides 100, so slot N's
+          # high ports land on slot N+1's low ports. Turning it on failed exactly
+          # there ("Bind for 0.0.0.0:17053 failed: port is already allocated",
+          # and tls-alpn-issue.sh/retry-after.sh, which share AC_PORT_15453).
+          # A stride wider than the span would need >13189 per slot and blow the
+          # ephemeral ceiling, so the port scheme has to change first.
           SERVER_BIN="$BIN" NGX_BUILD_DIR="$NGX" FLAVOR="${{ matrix.flavor }}" AC_PORT_OFFSET="$port_offset" \
+            AC_E2E_TIMINGS="$GITHUB_WORKSPACE/e2e-timings-${{ matrix.flavor }}.tsv" \
             bash tests/e2e/run-all.sh
+
+      # Per-script wall-clock, slowest first. Kept as an artifact so shard
+      # balancing reads measured numbers instead of re-deriving them from a log
+      # (job logs expire well before anyone gets round to the sharding work).
+      # if: always() — a failing suite still produces useful timings, and the
+      # slow script is often the one that failed.
+      - name: Upload e2e timings
+        if: always()
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        with:
+          name: e2e-timings-${{ matrix.flavor }}
+          path: e2e-timings-${{ matrix.flavor }}.tsv
+          if-no-files-found: warn
+          retention-days: 30
