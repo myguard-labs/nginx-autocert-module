@@ -1,0 +1,59 @@
+# sync-sha: 50a8c6bfec51e934ceb7e85fa34e79d841e569489f90f354322ebf3fe7e5629c
+name: CI
+
+# Single entry point for the PR suite (skeleton standard, ci/PROMPT.md step 17).
+#
+# The three members below each still carry their own `pull_request:` trigger at
+# this commit, so every one of them runs TWICE on a PR: once standalone, once
+# called from here. That is the expected intermediate state and it is the proof
+# the call graph is actually wired -- a member that runs only once was never
+# called, and `ci.yml` would be silently contributing nothing. Step 18 removes
+# the members' own `pull_request:` triggers, after that proof exists.
+#
+# No lane topology here yet, deliberately. The reference orchestrator arranges
+# its members into lanes shaped by ITS measured job durations and slot count;
+# this repo's numbers are very different (Build & Test is 9.7-14.5m and
+# dominates the suite, where the reference's is ~60s), so copying that shape
+# would encode the wrong critical path. Lanes are step 37's job, against
+# measurements taken on this repo.
+#
+# No `push:` trigger: the members keep theirs for now, and the merge commit is
+# identical to the tested PR head.
+
+on:
+  pull_request:
+    branches: [master, autolabel]
+  workflow_dispatch: {}
+
+concurrency:
+  # "orchestrator-", not "ci-": build-test.yml already uses
+  # ci-${{ github.workflow }}-${{ github.ref }}, and a called workflow inherits
+  # the caller's github.workflow/github.ref -- an identical group string would
+  # make the member cancel its own caller.
+  group: orchestrator-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build-test:
+    name: Build&Test
+    permissions:
+      contents: read
+    uses: ./.github/workflows/build-test.yml
+
+  security-scanners:
+    name: Security scanners
+    permissions:
+      contents: read
+    uses: ./.github/workflows/security-scanners.yml
+
+  codeql:
+    name: CodeQL
+    permissions:
+      contents: read
+      # Granted per-job, not at workflow level: no other job here needs either.
+      security-events: write  # CodeQL uploads its SARIF to code scanning
+      actions: read  # the CodeQL action reads run metadata to attribute results
+    uses: ./.github/workflows/codeql.yml

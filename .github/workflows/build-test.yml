@@ -1,4 +1,4 @@
-# sync-sha: a495ba36e53347a8bc7b653a4a413aab76063a35529d9b76a9d2b82543d745a7
+# sync-sha: bfb05505d0b459afc93462de796952ca47ae0f8ad84d9a68ad9ff71879b0aed7
 name: Build & Test
 
 # Third-party actions pinned to commit SHAs for supply-chain safety.
@@ -37,6 +37,7 @@ on:
   pull_request:
     branches: [master, autolabel]
   workflow_dispatch: {}
+  workflow_call: {}
   # This CI is otherwise PR-only, so a self-hosted-runner toolchain drift (e.g.
   # a cppcheck upgrade on builder02) goes unnoticed on master until the next
   # innocent PR eats the blame (#144/#145, 2026-08-08: a README-only PR failed
