@@ -1,4 +1,4 @@
-# sync-sha: 7b380c1c1d6966a4377802ffa87fee01eba360b35cc915c355ffeaa5978aecb8
+# sync-sha: 50e59435d141913eb070ea9fec4b00047ec2c752debc496272e623ee070b4a49
 name: ASan
 
 # Manual ASan+UBSan soak — 30s mixed-load soak of the HTTP-01 serve path with an
@@ -49,15 +49,6 @@ jobs:
       - name: Checkout module
         uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
 
-      - name: Resolve latest mainline nginx
-        run: |
-          set -euo pipefail
-          ver=$(curl -fsSL https://nginx.org/en/download.html \
-            | grep -oP 'nginx-\K[0-9]+\.[0-9]+\.[0-9]+(?=\.tar\.gz)' \
-            | sort -V | tail -1)
-          [ -n "$ver" ] || { echo "::error::cannot resolve nginx version"; exit 1; }
-          echo "NGINX_VERSION=$ver" >> "$GITHUB_ENV"
-
       - name: Install dependencies
         run: |
           sudo apt-get update
@@ -66,20 +57,7 @@ jobs:
             wget zlib1g-dev
 
       - name: Build ASan+UBSan nginx + autocert module (dynamic, AUTOCERT_TEST=1)
-        run: |
-          set -euo pipefail
-          test -f "nginx-${NGINX_VERSION}.tar.gz" || \
-            wget -q -O "nginx-${NGINX_VERSION}.tar.gz" \
-              "https://nginx.org/download/nginx-${NGINX_VERSION}.tar.gz"
-          tar -xzf "nginx-${NGINX_VERSION}.tar.gz"
-          cd "nginx-${NGINX_VERSION}"
-          SAN="-fsanitize=address,undefined -fno-sanitize-recover=undefined -fno-omit-frame-pointer -g3 -O1"
-          AUTOCERT_TEST=1 ./configure \
-            --with-compat --with-debug --with-threads --with-http_ssl_module \
-            --with-cc-opt="$SAN" \
-            --with-ld-opt="-fsanitize=address,undefined" \
-            --add-dynamic-module="$GITHUB_WORKSPACE"
-          make -j"$(nproc)"
+        run: bash ci/tools/ci-build.sh asan
 
       - name: ASan+UBSan soak (30s)
         env:
