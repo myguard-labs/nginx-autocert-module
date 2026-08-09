@@ -24,6 +24,16 @@
 # this module (reproduces on the unpatched build), so process survival + the
 # module's own reload log lines are the meaningful, module-controlled signals.
 #
+# step 26 mutation coverage (recorded 2026-08-09, memory/labs/nginx-autocert-module/
+# mutation-findings-step26.md): this is the suite's reload case. Verified by
+# dropping the `-s reload` signal on the first reload (config changes on disk,
+# nginx is never told) — the "process survived" check upstream stays green
+# (nothing crashed; nothing happened), but the very next assertion,
+# `grep -q "autocert: reload (master_process off) — re-arming driver"`, fails
+# cleanly ("driver did not log a single-process reload re-arm"), confirmed by
+# an actual run (RC=1). Attributed specifically to the re-arm-log assertion,
+# not the survival check one step above it or the gate-drop check one step below.
+#
 # Inputs (env):
 #   SERVER_BIN    - built nginx/angie binary (required)
 #   NGX_BUILD_DIR - dir holding objs/*.so (defaults to two levels up from BIN)

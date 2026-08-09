@@ -15,6 +15,18 @@
 #     account came up only because EAB was sent (per-CA EAB plumbing),
 #   - both privkey/fullchain pairs are stored 0600 + valid + SAN matches.
 #
+# step 26 mutation coverage (recorded 2026-08-09, memory/labs/nginx-autocert-module/
+# mutation-findings-step26.md): this is the suite's concurrency case (two engines
+# doing ACME work in flight through one driver). Verified by pointing vhost B's
+# `autocert_ca` at vhost A's CA URL + trust bundle (dropping B's EAB, so the
+# config-time same-CA-conflicting-config guard does not fire first) — collapses
+# two engines into one. Both certs still provision (through the single engine),
+# so the "both provisioned" check upstream stays green; the failure is caught
+# specifically by `[ "$ACCT_N" -eq 2 ]` ("expected 2 account dirs, got 1"),
+# confirmed by an actual run (RC=1). Distinct from the account-registration-log
+# check below it, which a shared driver log could also satisfy — the account-dir
+# count is what actually falls over here.
+#
 # NOTE on trust/issuer: every Pebble image bakes the SAME minica root
 # (CN=minica root ca ...), so both CAs issue from an identical root and a
 # trust bundle must carry it only ONCE (concatenating it twice breaks OpenSSL's
