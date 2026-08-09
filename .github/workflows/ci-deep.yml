@@ -72,12 +72,12 @@ jobs:
           fi
 
       - name: Build fuzz targets
-        run: bash ci/fuzz/build.sh "$GITHUB_WORKSPACE/fuzz"
+        run: bash ci/fuzz/build.sh
 
       - name: Fuzz each target
         run: |
           set -euo pipefail
-          cd fuzz
+          cd ci/fuzz
           for t in json:corpus http:corpus_http; do
             name=${t%%:*}; corp=${t##*:}
             echo "== fuzz_${name} (${FUZZ_SECS}s) =="
