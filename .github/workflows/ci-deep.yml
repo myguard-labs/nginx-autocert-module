@@ -1,4 +1,4 @@
-# sync-sha: 833fee746611c4af139d4bd8f361108aa0e5eb5012a864d4dd215666c004df5d
+# sync-sha: 98c26c6648ba30372bb1720375e1e2e69bf3e343a4f2ceffada769c856839d60
 name: CI Deep
 
 # Exhaustive dynamic analysis — monthly cron, release, and on-demand only,
@@ -135,13 +135,6 @@ jobs:
     steps:
       - name: Checkout module
         uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
-      - name: Resolve latest mainline nginx
-        run: |
-          set -euo pipefail
-          ver=$(curl -fsSL https://nginx.org/en/download.html \
-            | grep -oP 'nginx-\K[0-9]+\.[0-9]+\.[0-9]+(?=\.tar\.gz)' | sort -V | tail -1)
-          [ -n "$ver" ] || { echo "::error::cannot resolve nginx version"; exit 1; }
-          echo "NGINX_VERSION=$ver" >> "$GITHUB_ENV"
       - name: Install dependencies
         run: |
           sudo apt-get update
@@ -149,16 +142,7 @@ jobs:
             build-essential curl libpcre2-dev libssl-dev pkg-config \
             valgrind wget zlib1g-dev
       - name: Build debug nginx + autocert module (dynamic, AUTOCERT_TEST=1)
-        run: |
-          set -euo pipefail
-          test -f "nginx-${NGINX_VERSION}.tar.gz" || wget -q -O "nginx-${NGINX_VERSION}.tar.gz" \
-            "https://nginx.org/download/nginx-${NGINX_VERSION}.tar.gz"
-          tar -xzf "nginx-${NGINX_VERSION}.tar.gz"; cd "nginx-${NGINX_VERSION}"
-          AUTOCERT_TEST=1 ./configure \
-            --with-compat --with-debug --with-threads --with-http_ssl_module \
-            --with-cc-opt="-DNGX_DEBUG_PALLOC=1 -g3 -O0 -fno-omit-frame-pointer -funwind-tables" \
-            --add-dynamic-module="$GITHUB_WORKSPACE"
-          make -j"$(nproc)"
+        run: bash ci/tools/ci-build.sh valgrind
       - name: Memcheck soak (600s @ 4 conc, WITH suppressions)
         env:
           USE_VALGRIND: "1"
@@ -185,13 +169,6 @@ jobs:
     steps:
       - name: Checkout module
         uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
-      - name: Resolve latest mainline nginx
-        run: |
-          set -euo pipefail
-          ver=$(curl -fsSL https://nginx.org/en/download.html \
-            | grep -oP 'nginx-\K[0-9]+\.[0-9]+\.[0-9]+(?=\.tar\.gz)' | sort -V | tail -1)
-          [ -n "$ver" ] || { echo "::error::cannot resolve nginx version"; exit 1; }
-          echo "NGINX_VERSION=$ver" >> "$GITHUB_ENV"
       - name: Install dependencies
         run: |
           sudo apt-get update
@@ -199,16 +176,7 @@ jobs:
             build-essential curl libpcre2-dev libssl-dev pkg-config \
             valgrind wget zlib1g-dev
       - name: Build debug nginx + autocert module (dynamic, AUTOCERT_TEST=1)
-        run: |
-          set -euo pipefail
-          test -f "nginx-${NGINX_VERSION}.tar.gz" || wget -q -O "nginx-${NGINX_VERSION}.tar.gz" \
-            "https://nginx.org/download/nginx-${NGINX_VERSION}.tar.gz"
-          tar -xzf "nginx-${NGINX_VERSION}.tar.gz"; cd "nginx-${NGINX_VERSION}"
-          AUTOCERT_TEST=1 ./configure \
-            --with-compat --with-debug --with-threads --with-http_ssl_module \
-            --with-cc-opt="-DNGX_DEBUG_PALLOC=1 -g3 -O0 -fno-omit-frame-pointer -funwind-tables" \
-            --add-dynamic-module="$GITHUB_WORKSPACE"
-          make -j"$(nproc)"
+        run: bash ci/tools/ci-build.sh valgrind
       - name: Helgrind soak (600s @ 4 conc, --error-exitcode=99, WITH suppressions)
         env:
           USE_HELGRIND: "1"
@@ -252,13 +220,12 @@ jobs:
       - name: Configure nginx src tree (clang-tidy headers)
         run: |
           set -euo pipefail
-          ver=$(curl -fsSL https://nginx.org/en/download.html \
-            | grep -oP 'nginx-\K[0-9]+\.[0-9]+\.[0-9]+(?=\.tar\.gz)' | sort -V | tail -1)
-          wget -q "https://nginx.org/download/nginx-${ver}.tar.gz"
-          tar -xzf "nginx-${ver}.tar.gz"; cd "nginx-${ver}"
-          CC=gcc ./configure --with-compat --with-http_ssl_module \
-            --add-dynamic-module="$GITHUB_WORKSPACE" >/dev/null
-          echo "NGINX_SRC_TREE=$PWD" >> "$GITHUB_ENV"
+          bash ci/tools/ci-build.sh debug none >/dev/null
+          # ci-build.sh appends NGINX_VERSION to $GITHUB_ENV, which only takes
+          # effect in a LATER step -- source it here so this step can use it too.
+          # shellcheck disable=SC1090
+          source "$GITHUB_ENV"
+          echo "NGINX_SRC_TREE=$GITHUB_WORKSPACE/nginx-${NGINX_VERSION}" >> "$GITHUB_ENV"
       - name: flawfinder
         run: |
           flawfinder --minlevel=1 "$GITHUB_WORKSPACE/src/" 2>&1 | tee flawfinder.log
