@@ -1,4 +1,4 @@
-# sync-sha: 88bf3a50a6ae1f16def3fb5fa2011f7342a937258f53c506271ad27350fb81fb
+# sync-sha: 6a56936f00fb4308dc29d73297a8f4d6977d5f8d56b52109878213ad50fd3d45
 name: Security scanners
 
 # Static / security scanners gate on every PR/push — flawfinder, clang-tidy
@@ -11,6 +11,7 @@ name: Security scanners
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  NGINX_VERSION: ""
 
 on:
   push:
@@ -53,6 +54,10 @@ jobs:
         run: |
           set -euo pipefail
           bash ci/tools/ci-build.sh debug none >/dev/null
+          # ci-build.sh appends NGINX_VERSION to $GITHUB_ENV, which only takes
+          # effect in a LATER step -- source it here so this step can use it too.
+          # shellcheck disable=SC1090
+          source "$GITHUB_ENV"
           echo "NGINX_SRC_TREE=$GITHUB_WORKSPACE/nginx-${NGINX_VERSION}" >> "$GITHUB_ENV"
       - name: flawfinder
         run: |
