@@ -27,6 +27,7 @@
 static u_char       *ngx_autocert_test_arena;
 static ngx_shm_zone_t ngx_autocert_test_zone;
 static ngx_shm_zone_t ngx_autocert_test_zone_next;   /* the "new cycle" zone */
+static ngx_log_t     ngx_autocert_test_log;
 
 /*
  * Build a usable shm zone over a malloc'd arena. Returns the zone pointer the
@@ -53,7 +54,7 @@ ngx_autocert_test_zone_create(void)
     ngx_autocert_test_zone.shm.addr = ngx_autocert_test_arena;
     ngx_autocert_test_zone.shm.size = NGX_AUTOCERT_TEST_ARENA;
     ngx_autocert_test_zone.shm.exists = 0;
-    ngx_autocert_test_zone.shm.log = NULL;
+    ngx_autocert_test_zone.shm.log = &ngx_autocert_test_log;
 
     sp = (ngx_slab_pool_t *) ngx_autocert_test_arena;
     sp->end = ngx_autocert_test_arena + NGX_AUTOCERT_TEST_ARENA;
@@ -125,7 +126,6 @@ ngx_debug_point(void)
  * core. ngx_crc32_table_init() and ngx_alloc() read ngx_cycle->log, so it must
  * be a valid (non-NULL) object, not the bare NULL pointer.
  */
-static ngx_log_t     ngx_autocert_test_log;
 static ngx_cycle_t   ngx_autocert_test_cycle;
 volatile ngx_cycle_t *ngx_cycle = &ngx_autocert_test_cycle;
 
