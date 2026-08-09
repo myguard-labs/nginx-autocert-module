@@ -170,6 +170,7 @@ fi
 
   configure_args=(
     --with-compat --with-debug --with-threads --with-http_ssl_module
+    --with-cc="ccache cc"
   )
   [ -n "$cc_opt" ] && configure_args+=(--with-cc-opt="$cc_opt")
   [ -n "$ld_opt" ] && configure_args+=(--with-ld-opt="$ld_opt")
