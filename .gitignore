@@ -22,3 +22,8 @@ vgcore.*
 *.gcda
 *.gcno
 *.gcov
+coverage.info*
+
+# local ci-build.sh fetches (any profile, including coverage)
+/nginx-*.tar.gz
+/nginx-[0-9]*/

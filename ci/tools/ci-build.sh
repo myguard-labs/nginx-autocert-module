@@ -26,6 +26,8 @@
 #   release   -O2, no debug symbols beyond what --with-debug already adds
 #   codeql    like debug, but intended to be paired with `make-target=modules`
 #             so CodeQL only traces the module build, not the whole of nginx
+#   coverage  gcov/gcda instrumented build (-g -O0 --coverage), consumed by
+#             ci/tools/coverage.sh for a module-only line-coverage report
 #
 # ENV:
 #   NGINX_VERSION   pre-set (non-empty) skips version resolution entirely.
@@ -61,6 +63,7 @@ Profiles:
   debug     plain --with-debug build, no sanitizer
   release   optimized build, no debug cc-opts
   codeql    debug-shaped build; pair with make-target "modules"
+  coverage  gcov/gcda instrumented build (ci/tools/coverage.sh)
 
 Env:
   NGINX_VERSION      pre-resolved version; skips nginx.org lookup when set
@@ -119,8 +122,12 @@ case "$profile" in
   release)
     cc_opt="-O2"
     ;;
+  coverage)
+    cc_opt="-g -O0 --coverage"
+    ld_opt="--coverage"
+    ;;
   *)
-    echo "::error::unknown build profile '$profile' (want: asan, valgrind, debug, release, codeql)" >&2
+    echo "::error::unknown build profile '$profile' (want: asan, valgrind, debug, release, codeql, coverage)" >&2
     exit 1
     ;;
 esac
