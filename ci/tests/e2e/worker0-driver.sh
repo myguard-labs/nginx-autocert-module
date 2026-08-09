@@ -13,6 +13,14 @@
 #           re-arms the driver with a new pid.
 #   STOP    master + workers exit cleanly, pidfile removed, no orphan worker.
 #
+# step 26 mutation coverage (recorded 2026-08-09, memory/labs/nginx-autocert-module/
+# mutation-findings-step26.md): the START phase is this suite's baseline case —
+# it proves the module is actually loaded and blocking, not merely configured.
+# Verified by commenting out `load_module $HTTP_SO;` in the generated config: nginx
+# then fails with "[emerg] unknown directive \"autocert\"", never writes the
+# pidfile, and `MASTER=$(cat ...) || fail "no master pidfile"` (then
+# `wait_armed` / A1) catches it — RC=1, confirmed by an actual run, not reasoning.
+#
 # Usage: worker0-driver.sh   (env: NGX_BUILD_DIR, optional AC_TEST_PORT)
 set -euo pipefail
 
