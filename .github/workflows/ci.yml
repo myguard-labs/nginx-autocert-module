@@ -1,24 +1,45 @@
-# sync-sha: afe234dc82672d556d7d06cb756b498cde9fecae1c903d1490016bb6b3f4b767
+# sync-sha: 643967acd1be4f6e753f893f01adee2ce28100ab558f0f11d1767aa7837bbfcd
 name: CI
 
 # Single entry point for the PR suite (skeleton standard, ci/PROMPT.md step 17).
 #
-# The three members below each still carry their own `pull_request:` trigger at
-# this commit, so every one of them runs TWICE on a PR: once standalone, once
-# called from here. That is the expected intermediate state and it is the proof
-# the call graph is actually wired -- a member that runs only once was never
-# called, and `ci.yml` would be silently contributing nothing. Step 18 removes
-# the members' own `pull_request:` triggers, after that proof exists.
+# Step 18 landed for the PR path: build-test.yml, lint.yml, codeql.yml and
+# security-scanners.yml no longer carry a standalone `pull_request:`, so ci.yml
+# is the sole PR entry point and each member runs exactly once per PR.
+# build-test.yml, codeql.yml and security-scanners.yml do still carry `push:`
+# (and their own `schedule:`), which is the remaining `check_cadence()` finding
+# -- `ci-cadence` is one of the checkers still in `selftest.sh`'s `staged_out`
+# list, and leaves it in the PR that makes it green. Not a lane-topology issue.
 #
-# No lane topology here yet, deliberately. The reference orchestrator arranges
-# its members into lanes shaped by ITS measured job durations and slot count;
-# this repo's numbers are very different (Build & Test is 9.7-14.5m and
-# dominates the suite, where the reference's is ~60s), so copying that shape
-# would encode the wrong critical path. Lanes are step 37's job, against
-# measurements taken on this repo.
+# Lane map (step 37/38, ci/PROMPT.md): NO new orchestrator-level lanes. The
+# lane structure already exists as build-test.yml's internal `needs:` graph
+# (validation/resolve -> build-nginx/build-angie/guard-suite -> unit-tests,
+# e2e), and it fits within the 6 ephemeral self-hosted runner slots (measured
+# peak concurrency: 4). Rule 1 (nothing chained behind the longest job): e2e
+# (471s, the budget) already has nothing downstream. Rule 5 (hosted jobs never
+# laned): lint and codeql run on ubuntu-latest, take no self-hosted slot, and
+# already carry no `needs:` here -- correct as-is. Rule 3 doesn't fire: it
+# fits without one. Adding `needs:` between ci.yml's four members would only
+# delay results while conserving nothing -- the constraint is the 471s e2e
+# job, not slot count.
 #
-# No `push:` trigger: the members keep theirs for now, and the merge commit is
-# identical to the tested PR head.
+# Headroom, honestly stated: the fullest self-hosted chain is
+# validation/resolve (59s) -> build-nginx (76s) -> e2e (471s) = 606s against
+# the 471s budget, i.e. 135s OVER budget. That overage is inherent
+# serialization inside build-test.yml (e2e can't start before its inputs
+# exist), not a lane-arrangement defect.
+#
+# Measured from run 31325771926 (myguard-labs/nginx-autocert-module,
+# branch ci/semgrep-flag-parity, 2026-08-09, all jobs success), wall-clock
+# 612s, budget = longest job = 471s (e2e suite [nginx]). Slots: 6 ephemeral
+# runners (ci-ephemeral@docker-01, docker-02, runner-01..04); peak self-hosted
+# concurrency observed = 4 -- no slot starvation, staggered starts are
+# `needs:` dependencies, not queueing. Re-derive with:
+#   gh run view 31325771926 -R myguard-labs/nginx-autocert-module --json jobs \
+#     -q '.jobs[] | [.name, .conclusion, (((.completedAt|fromdate)-(.startedAt|fromdate))|tostring)+"s", .startedAt, .completedAt] | @tsv'
+#
+# ci.yml itself takes no `push:` trigger: the merge commit is identical to the
+# tested PR head, so a second run would prove nothing.
 
 on:
   pull_request:
