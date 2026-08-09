@@ -1,11 +1,15 @@
-# sync-sha: eb095effbc568024280b9f02d736ee44c85f12f3e47f0c903abb30c63d48ce9a
+# sync-sha: 643967acd1be4f6e753f893f01adee2ce28100ab558f0f11d1767aa7837bbfcd
 name: CI
 
 # Single entry point for the PR suite (skeleton standard, ci/PROMPT.md step 17).
 #
-# Step 18 landed: build-test.yml, lint.yml, codeql.yml and security-scanners.yml
-# carry only `workflow_call:` now, no standalone `pull_request:` -- ci.yml is
-# the sole PR entry point, confirmed by grep on this commit.
+# Step 18 landed for the PR path: build-test.yml, lint.yml, codeql.yml and
+# security-scanners.yml no longer carry a standalone `pull_request:`, so ci.yml
+# is the sole PR entry point and each member runs exactly once per PR.
+# build-test.yml, codeql.yml and security-scanners.yml do still carry `push:`
+# (and their own `schedule:`), which is the remaining `check_cadence()` finding
+# -- `ci-cadence` is one of the checkers still in `selftest.sh`'s `staged_out`
+# list, and leaves it in the PR that makes it green. Not a lane-topology issue.
 #
 # Lane map (step 37/38, ci/PROMPT.md): NO new orchestrator-level lanes. The
 # lane structure already exists as build-test.yml's internal `needs:` graph
@@ -34,8 +38,8 @@ name: CI
 #   gh run view 31325771926 -R myguard-labs/nginx-autocert-module --json jobs \
 #     -q '.jobs[] | [.name, .conclusion, (((.completedAt|fromdate)-(.startedAt|fromdate))|tostring)+"s", .startedAt, .completedAt] | @tsv'
 #
-# No `push:` trigger: the members keep theirs for now, and the merge commit is
-# identical to the tested PR head.
+# ci.yml itself takes no `push:` trigger: the merge commit is identical to the
+# tested PR head, so a second run would prove nothing.
 
 on:
   pull_request:
