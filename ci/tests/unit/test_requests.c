@@ -195,7 +195,7 @@ test_reload_preserves_tree(void)
         ngx_pool_t   *pool;
         ngx_int_t     n;
 
-        pool = ngx_create_pool(1024, NULL);
+        pool = ngx_create_pool(1024, ngx_cycle->log);
         CHECK(pool != NULL, "reload: drain pool");
         out = ngx_array_create(pool, 4, sizeof(ngx_str_t));
         CHECK(out != NULL, "reload: drain array");
