@@ -54,6 +54,7 @@
 "processing"
 
 # --- HTTP response framing tokens ---
+"HTTP/1."
 "HTTP/1.0\x20"
 "HTTP/1.1\x20"
 "\x0d\x0a"
@@ -61,7 +62,9 @@
 "200\x20"
 "201\x20"
 "404\x20"
+"Content-Length:"
 "Content-Length:\x20"
+"Transfer-Encoding:"
 "Transfer-Encoding:\x20"
 "chunked"
 "Location:\x20"
