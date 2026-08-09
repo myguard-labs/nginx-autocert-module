@@ -1,4 +1,4 @@
-# sync-sha: c36611b57c17f1ca17bcce79ffa6fbe11f271fbb0ad464bd4f34b0fbd33dc125
+# sync-sha: 140406a0ebea3bb74a32f2bf0554136951f761f9066d4512706b8a4f7c6d424e
 name: CodeQL
 
 env:
@@ -54,34 +54,13 @@ jobs:
             paths:
               - src
             paths-ignore:
-              - .build/**
-
-      - name: Resolve latest mainline nginx
-        run: |
-          set -euo pipefail
-          ver=$(curl -fsSL https://nginx.org/en/download.html \
-            | grep -oP 'nginx-\K[0-9]+\.[0-9]+\.[0-9]+(?=\.tar\.gz)' \
-            | sort -V | tail -1)
-          if [ -z "$ver" ]; then
-            echo "::error::could not resolve mainline nginx version"
-            exit 1
-          fi
-          echo "NGINX_VERSION=$ver" >> "$GITHUB_ENV"
+              - nginx-*/**
 
       - name: Build traced modules
-        run: |
-          set -euo pipefail
-          mkdir -p .build
-          curl -fsSL -o ".build/nginx-${NGINX_VERSION}.tar.gz" \
-            "https://nginx.org/download/nginx-${NGINX_VERSION}.tar.gz"
-          tar -xzf ".build/nginx-${NGINX_VERSION}.tar.gz" -C .build
-          cd ".build/nginx-${NGINX_VERSION}"
-          ./configure \
-            --with-compat \
-            --with-http_ssl_module \
-            --add-dynamic-module="$GITHUB_WORKSPACE"
-          make -j"$(nproc)" modules
-          test -f objs/ngx_http_autocert_module.so
+        run: bash ci/tools/ci-build.sh codeql modules
+
+      - name: Verify module built
+        run: test -f "$GITHUB_WORKSPACE/nginx-${NGINX_VERSION}/objs/ngx_http_autocert_module.so"
 
       - name: Analyze
         uses: github/codeql-action/analyze@8aad20d150bbac5944a9f9d289da16a4b0d87c1e # v4

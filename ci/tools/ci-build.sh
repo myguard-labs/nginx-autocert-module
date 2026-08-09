@@ -15,6 +15,10 @@
 #   ci/tools/ci-build.sh <profile> [make-target]
 #   AC_BUILD_PROFILE=<profile> ci/tools/ci-build.sh [make-target]
 #
+#   make-target "none" runs configure only and skips make entirely -- for a
+#   scanner-setup lane (security-scanners.yml) that only needs a configured
+#   nginx source tree (e.g. for clang-tidy headers), never a build.
+#
 # PROFILES:
 #   asan      -fsanitize=address,undefined + UBSan, no recover, -O1 -g3
 #   valgrind  -DNGX_DEBUG_PALLOC=1, -O0 -g3, unwind tables
@@ -69,6 +73,7 @@ Examples:
   ci/tools/ci-build.sh asan
   ci/tools/ci-build.sh valgrind
   AC_BUILD_PROFILE=codeql ci/tools/ci-build.sh modules
+  ci/tools/ci-build.sh debug none   # configure only, no make (scanner setup)
 EOF
 }
 
@@ -166,7 +171,9 @@ fi
   echo "configure: AUTOCERT_TEST=1 ./configure ${configure_args[*]}"
   AUTOCERT_TEST=1 ./configure "${configure_args[@]}"
 
-  if [ -n "$make_target" ]; then
+  if [ "$make_target" = "none" ]; then
+    echo "make target is 'none' -- configure only, skipping make"
+  elif [ -n "$make_target" ]; then
     make -j"$(nproc)" "$make_target"
   else
     make -j"$(nproc)"

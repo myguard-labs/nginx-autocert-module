@@ -1,4 +1,4 @@
-# sync-sha: 3709da1da1fe5f2f82aec8816092c9a03ef38df6286ef1667d485f374c537206
+# sync-sha: 6a56936f00fb4308dc29d73297a8f4d6977d5f8d56b52109878213ad50fd3d45
 name: Security scanners
 
 # Static / security scanners gate on every PR/push — flawfinder, clang-tidy
@@ -11,6 +11,7 @@ name: Security scanners
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  NGINX_VERSION: ""
 
 on:
   push:
@@ -52,13 +53,12 @@ jobs:
       - name: Configure nginx src tree (clang-tidy headers)
         run: |
           set -euo pipefail
-          ver=$(curl -fsSL https://nginx.org/en/download.html \
-            | grep -oP 'nginx-\K[0-9]+\.[0-9]+\.[0-9]+(?=\.tar\.gz)' | sort -V | tail -1)
-          wget -q "https://nginx.org/download/nginx-${ver}.tar.gz"
-          tar -xzf "nginx-${ver}.tar.gz"; cd "nginx-${ver}"
-          CC=gcc ./configure --with-compat --with-http_ssl_module \
-            --add-dynamic-module="$GITHUB_WORKSPACE" >/dev/null
-          echo "NGINX_SRC_TREE=$PWD" >> "$GITHUB_ENV"
+          bash ci/tools/ci-build.sh debug none >/dev/null
+          # ci-build.sh appends NGINX_VERSION to $GITHUB_ENV, which only takes
+          # effect in a LATER step -- source it here so this step can use it too.
+          # shellcheck disable=SC1090
+          source "$GITHUB_ENV"
+          echo "NGINX_SRC_TREE=$GITHUB_WORKSPACE/nginx-${NGINX_VERSION}" >> "$GITHUB_ENV"
       - name: flawfinder
         run: |
           set -u
