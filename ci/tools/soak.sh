@@ -234,15 +234,36 @@ fi
 # `ls logs/asan*` above assumes log_path was honored; step 40 measured GCC's
 # UBSan writing its `runtime error:` line to error.log instead (no
 # $WORK/logs/asan.<pid> file at all) on an OOB write with no shared-state or
-# response side effect to trip the other checks. grep -q is expected to find
+# response side effect to trip the other checks. grep -qE is expected to find
 # nothing on a clean run, so it is not bare under `set -e`/pipefail here —
 # same style as the other checks in this block.
-if grep -nE 'runtime error:|AddressSanitizer|LeakSanitizer|SUMMARY: .*Sanitizer' \
-        "$WORK/logs/error.log" "$WORK"/logs/asan* 2>/dev/null; then
-    echo "FAIL: sanitizer report found in error.log/logs:"
-    grep -nE 'runtime error:|AddressSanitizer|LeakSanitizer|SUMMARY: .*Sanitizer' \
-        "$WORK/logs/error.log" "$WORK"/logs/asan* 2>/dev/null
+#
+# error.log is always expected to exist and be readable; logs/asan* is a
+# glob that legitimately matches nothing on a clean run (log_path not
+# honored is the common case). Build the input list from files that
+# actually exist so a non-matching glob never gets treated as an unreadable
+# file, but a missing/unreadable error.log fails closed instead of the
+# detector silently inspecting nothing (grep exits 2, not 1, when it can't
+# open a file — `if grep ...` alone can't tell that apart from "no match").
+_sanitizer_pattern='runtime error:|AddressSanitizer|LeakSanitizer|SUMMARY: .*Sanitizer'
+_sanitizer_inputs=()
+for _f in "$WORK/logs/error.log" "$WORK"/logs/asan*; do
+    [ -e "$_f" ] && _sanitizer_inputs+=("$_f")
+done
+if [ ! -r "$WORK/logs/error.log" ]; then
+    echo "FAIL: cannot read $WORK/logs/error.log — sanitizer-report detector could not inspect its input"
     problems=1
+elif [ "${#_sanitizer_inputs[@]}" -gt 0 ]; then
+    _sanitizer_rc=0
+    grep -qE "$_sanitizer_pattern" "${_sanitizer_inputs[@]}" 2>/dev/null || _sanitizer_rc=$?
+    if [ "$_sanitizer_rc" -eq 0 ]; then
+        echo "FAIL: sanitizer report found in error.log/logs:"
+        grep -nE "$_sanitizer_pattern" "${_sanitizer_inputs[@]}" 2>/dev/null
+        problems=1
+    elif [ "$_sanitizer_rc" -ne 1 ]; then
+        echo "FAIL: sanitizer-report detector could not read one of: ${_sanitizer_inputs[*]}"
+        problems=1
+    fi
 fi
 if [ "$fail" -ne 0 ]; then
     echo "FAIL: a worker reported a wrong response"; problems=1
