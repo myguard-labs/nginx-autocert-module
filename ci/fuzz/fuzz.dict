@@ -1,6 +1,6 @@
-# libFuzzer dictionary for the autocert parsers (fuzz_json + fuzz_http).
-# Whitespace MUST be hex-escaped (\x09/\x0a/\x0d/\x20) — libFuzzer's
-# ParseDictionaryFile rejects literal \t/\n.
+# libFuzzer dictionary for the autocert parsers (fuzz_json + fuzz_http +
+# fuzz_b64). Whitespace MUST be hex-escaped (\x09/\x0a/\x0d/\x20) —
+# libFuzzer's ParseDictionaryFile rejects literal \t/\n.
 
 # --- JSON structural punctuation ---
 "{"
@@ -72,3 +72,19 @@
 "Content-Type:\x20"
 "application/json"
 "https://"
+
+# --- base64url decode boundary tokens (fuzz_b64) ---
+# ngx_http_autocert_base64url_decode enforces a strict RFC 4648 §5 alphabet
+# with no literal string comparisons, so the useful "tokens" here are the
+# class-boundary bytes that distinguish accept from reject: '=' padding
+# (std base64 uses it, this decoder must not), '+'/'/' (std base64 alphabet,
+# NOT url-safe), '-'/'_' (the url-safe substitutes this decoder must accept),
+# plus a run of each to trigger the len%4==1 / size-arithmetic guard paths.
+"="
+"=="
+"+"
+"/"
+"-"
+"_"
+"AAAA"
+"AAAAA"

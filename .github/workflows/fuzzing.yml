@@ -1,9 +1,9 @@
-# sync-sha: 93ca7134633c1240f04afd82b576286489b550a0ff7894f708b0de3889288a15
+# sync-sha: 4058edbb60c96f7d5a5d8f47d01f75fb4810f6b7742b4942429d75bb602b6577
 name: Fuzzing
 
-# Manual fast fuzz regression — 30s/target on the JSON + HTTP ACME parsers
-# (+ fuzz.dict). PR/release coverage lives in ci-deep.yml so normal pushes do
-# not steal self-hosted runner lanes from Build & Test.
+# Manual fast fuzz regression — 30s/target on the JSON + HTTP + base64url ACME
+# parsers (+ fuzz.dict). PR/release coverage lives in ci-deep.yml so normal
+# pushes do not steal self-hosted runner lanes from Build & Test.
 #
 # Action pins (keep in sync with build-test.yml header):
 # actions/checkout@v5        -> 93cb6efe18208431cddfb8368fd83d5badbf9bfd
@@ -24,7 +24,7 @@ permissions:
   contents: read
 
 jobs:
-  # ── Short fuzz regression — both parser targets, 30s each ─────────────────
+  # ── Short fuzz regression — all three parser targets, 30s each ────────────
   fuzz-regression:
     name: Fuzz regression (30s/target)
     runs-on: [self-hosted, builder02, lxc]
@@ -45,7 +45,7 @@ jobs:
         run: |
           set -euo pipefail
           cd fuzz
-          for t in json:corpus http:corpus_http; do
+          for t in json:corpus http:corpus_http b64:corpus_b64; do
             name=${t%%:*}; corp=${t##*:}
             echo "== fuzz_${name} (30s) =="
             set +e

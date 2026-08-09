@@ -1,10 +1,11 @@
 # Fuzzing
 
-Coverage-guided (libFuzzer) fuzzing of the two parsers that read attacker-
-influenceable ACME server bytes: the JSON parser and the HTTP-response parser.
-Both targets are built from the SHIPPED parser source by their `extract_*.sh`
-slicers — no hand-maintained copy and no nginx build tree required.
-`fuzz/build.sh` builds both (`fuzz_json`, `fuzz_http`).
+Coverage-guided (libFuzzer) fuzzing of the parsers that read attacker-
+influenceable ACME server bytes: the JSON parser, the HTTP-response parser,
+and the base64url decoder. All three targets are built from the SHIPPED
+parser source by their `extract_*.sh` slicers — no hand-maintained copy and
+no nginx build tree required. `fuzz/build.sh` builds all three (`fuzz_json`,
+`fuzz_http`, `fuzz_b64`).
 
 ## Targets
 
@@ -39,6 +40,24 @@ freshly allocated output region too. (A clean libFuzzer target over
 only the buffer + a handful of plain fields — no live connection — so no
 fallback to fuzzing `dechunk` in isolation was needed.)
 
+### `fuzz_b64`
+
+Exercises `ngx_http_autocert_base64url_decode()` — the strict RFC 4648 §5
+URL-safe-alphabet decoder that layers a hand-written validation loop and a
+size-arithmetic overflow guard on top of nginx's own (permissive)
+`ngx_decode_base64url()`. nginx's decoder accepts `=` padding and silently
+stops at the first non-alphabet byte; this wrapper must reject any such input
+outright rather than let a hostile/MITM'd ACME response silently truncate a
+decoded field. Only the wrapper's own validation logic is sliced from
+production source (`extract_b64.sh`); `ngx_decode_base64url()` itself is
+reproduced verbatim from nginx core in `ngx_b64_shim.h` as a fixed
+nginx-version dependency, not module code.
+
+Currently the only in-tree caller passes an operator-configured EAB HMAC key
+(not ACME-response bytes), but the function is the module's general-purpose
+base64url decoder — the highest-value target for any future ACME-response-
+derived base64url field, and worth fuzzing defensively regardless of caller.
+
 Why these targets: both parsers read ACME server response bytes
 — bytes that arrive over a verified-TLS channel but are still attacker-
 influenceable (compromised CA, hostile redirect, buggy server). A single
@@ -50,8 +69,8 @@ the ACME integration tests.
 
 ## No copy drift
 
-Neither target contains a copy of its parser. `extract_parser.sh` slices the
-JSON parser (types from `ngx_autocert_json.h` + bodies from
+None of the three targets contains a copy of its parser. `extract_parser.sh`
+slices the JSON parser (types from `ngx_autocert_json.h` + bodies from
 `ngx_autocert_json.c`) into `generated_json.inc`, compiled against `ngx_shim.h`.
 `extract_http.sh` slices the six self-contained HTTP parser functions
 (`url_part_safe`, `parse_url`, `memmem`, `header`, `parse_response`, `dechunk`)
@@ -59,8 +78,12 @@ out of `ngx_autocert_acme.c` into `generated_http.inc`, compiled against
 `ngx_http_shim.h`. (The rest of `ngx_autocert_acme.c` is the event-driven TLS
 client — DNS / connect / handshake — which the parser functions never touch, so
 slicing avoids linking the whole nginx event/SSL/resolver tree just to fuzz the
-byte crunchers.) If a signature or body changes upstream, the next build picks
-it up — or fails loudly rather than fuzz stale code.
+byte crunchers.) `extract_b64.sh` slices `ngx_http_autocert_base64url_decode()`
+out of `ngx_http_autocert_crypto.c` into `generated_b64.inc`, compiled against
+`ngx_b64_shim.h` (avoiding a link against OpenSSL, which the rest of that file
+needs but the decode wrapper does not). If a signature or body changes
+upstream, the next build picks it up — or fails loudly rather than fuzz stale
+code.
 
 `ngx_http_shim.h` mirrors the reduced `ngx_autocert_acme_request_t` surface the
 parser reads (pool, url/host/port/uri, recv `ngx_buf_t`, headers array, the
@@ -83,10 +106,11 @@ heap-buffer-overflow.
 
 ```bash
 # needs clang with libFuzzer (clang >= 6) — no nginx build tree needed
-CC=clang bash fuzz/build.sh          # -> fuzz/fuzz_json + fuzz/fuzz_http
+CC=clang bash fuzz/build.sh    # -> fuzz/fuzz_json + fuzz/fuzz_http + fuzz/fuzz_b64
 cd fuzz
 ./fuzz_json -max_total_time=120 -print_final_stats=1 corpus/
 ./fuzz_http -max_total_time=120 -print_final_stats=1 corpus_http/
+./fuzz_b64  -max_total_time=120 -print_final_stats=1 corpus_b64/
 ```
 
 The valgrind-replay path (plain compile, no sanitizers):
@@ -130,11 +154,31 @@ responses:
 | `big_chunk` | oversized chunk-size line (framing arithmetic) |
 | `junk` | no CRLF at all (header-incomplete path) |
 
+`corpus_b64/` seeds the base64url target with JOSE/JWS-shaped tokens and the
+alphabet-boundary cases the strict decoder must reject:
+
+| file | covers |
+|---|---|
+| `jws_protected_header` | a realistic JWS protected-header segment |
+| `jws_payload_order` / `jws_payload_empty` | JWS payload segment, incl. empty |
+| `jws_signature_ecdsa` | 64-byte raw ECDSA signature, base64url-encoded |
+| `eab_hmac_key_32` | the current in-tree caller's shape (EAB HMAC key) |
+| `short_1char` .. `exact_4char`, `empty` | length-boundary inputs |
+| `has_padding_equals` | `=` padding — must be rejected (std base64, not url) |
+| `has_std_b64_plus` / `_slash` | std base64 alphabet chars — not url-safe |
+| `has_space` / `has_newline` / `has_null_byte` | non-alphabet bytes mid-token |
+| `all_dash_underscore` | pure url-safe-substitute alphabet |
+| `mixed_valid_invalid` | valid prefix, invalid tail (early-reject path) |
+| `len_mod4_eq1` | length ≡ 1 mod 4 (internal decoder's own reject case) |
+| `very_long_valid` | 4096-byte decode (size-arithmetic guard, non-overflow) |
+| `high_byte_0x80` / `utf8_multibyte` | non-ASCII bytes |
+
 ## CI
 
-`.github/workflows/ci-deep.yml` runs both targets long (14400s each) monthly
-(1st of the month) and on manual dispatch, alongside the memcheck/helgrind soaks
-and the security scanners. `.github/workflows/fuzzing.yml` runs a 120s/target
-regression on every PR/push (with `fuzz.dict`); `valgrind.yml` (60s memcheck
-soak) and `security-scanners.yml` gate the same PR/push events. The per-change
-build gate is the ASan+UBSan build-test suite in `build-test.yml`.
+`.github/workflows/ci-deep.yml` runs all three targets long (14400s each)
+monthly (1st of the month) and on manual dispatch, alongside the
+memcheck/helgrind soaks and the security scanners. `.github/workflows/fuzzing.yml`
+runs a 30s/target regression on manual dispatch (with `fuzz.dict`);
+`valgrind.yml` (60s memcheck soak) and `security-scanners.yml` gate PR/push
+events. The per-change build gate is the ASan+UBSan build-test suite in
+`build-test.yml`.
