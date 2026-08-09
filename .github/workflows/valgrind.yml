@@ -1,4 +1,4 @@
-# sync-sha: edc61361c27400998143f89c15f013ad7c64b3a3c6206d5cbd64c27a29728cc8
+# sync-sha: d12647ba5e386b6280d5b1576e3546511a8d9b7e8c202c88d08c5bdac1951ec5
 name: Valgrind
 
 # Manual Valgrind memcheck lite soak — 30s soak of the HTTP-01 serve path, no
@@ -32,15 +32,6 @@ jobs:
       - name: Checkout module
         uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
 
-      - name: Resolve latest mainline nginx
-        run: |
-          set -euo pipefail
-          ver=$(curl -fsSL https://nginx.org/en/download.html \
-            | grep -oP 'nginx-\K[0-9]+\.[0-9]+\.[0-9]+(?=\.tar\.gz)' \
-            | sort -V | tail -1)
-          [ -n "$ver" ] || { echo "::error::cannot resolve nginx version"; exit 1; }
-          echo "NGINX_VERSION=$ver" >> "$GITHUB_ENV"
-
       - name: Install dependencies
         run: |
           sudo apt-get update
@@ -49,18 +40,7 @@ jobs:
             valgrind wget zlib1g-dev
 
       - name: Build debug nginx + autocert module (dynamic, AUTOCERT_TEST=1)
-        run: |
-          set -euo pipefail
-          test -f "nginx-${NGINX_VERSION}.tar.gz" || \
-            wget -q -O "nginx-${NGINX_VERSION}.tar.gz" \
-              "https://nginx.org/download/nginx-${NGINX_VERSION}.tar.gz"
-          tar -xzf "nginx-${NGINX_VERSION}.tar.gz"
-          cd "nginx-${NGINX_VERSION}"
-          AUTOCERT_TEST=1 ./configure \
-            --with-compat --with-debug --with-threads --with-http_ssl_module \
-            --with-cc-opt="-DNGX_DEBUG_PALLOC=1 -g3 -O0 -fno-omit-frame-pointer -funwind-tables" \
-            --add-dynamic-module="$GITHUB_WORKSPACE"
-          make -j"$(nproc)"
+        run: bash ci/tools/ci-build.sh valgrind
 
       - name: Memcheck soak (30s)
         env:
