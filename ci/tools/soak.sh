@@ -80,9 +80,15 @@ EOF
 # abort_on_error=0 deliberately: with abort_on_error=1 the sanitizer raises
 # SIGABRT the instant it reports, which kills the process BEFORE the
 # cat-of-logs/asan* dump at the end of this script ever runs — the job goes red
-# naming nothing. exitcode=42 already makes a report fail the run, and the
-# report is still written to log_path, so failure is preserved while the
-# diagnostic survives. Same reasoning for UBSan's halt_on_error.
+# naming nothing. exitcode=42 already makes a report fail the run, and
+# log_path=$WORK/logs/asan is where a report lands WHEN the runtime honors it.
+# Measured on GCC's UBSan (step 40): a real out-of-bounds write's `runtime
+# error:` line landed in nginx's error.log instead, not in a
+# $WORK/logs/asan.<pid> file — log_path is not a guarantee, just the common
+# case. Failure is preserved regardless because this script also greps
+# error.log (and any $WORK/logs/asan* file) for sanitizer report signatures
+# below, independent of where the runtime chose to write. Same reasoning for
+# UBSan's halt_on_error.
 # detect_odr_violation=0: nginx's build generates `ngx_module_names` into BOTH
 # objs/ngx_modules.c (linked into the binary, 472 bytes) and
 # objs/<module>_modules.c (linked into the dynamic .so, 16 bytes). When nginx
@@ -223,6 +229,20 @@ if ls "$WORK"/logs/valgrind.* "$WORK"/logs/helgrind.* >/dev/null 2>&1; then
 fi
 if grep -nE '\[alert\]|\[emerg\]' "$WORK/logs/error.log" 2>/dev/null; then
     echo "FAIL: alert/emerg in error.log"; problems=1
+fi
+# Dedicated sanitizer-report detector, wherever the runtime actually put it.
+# `ls logs/asan*` above assumes log_path was honored; step 40 measured GCC's
+# UBSan writing its `runtime error:` line to error.log instead (no
+# $WORK/logs/asan.<pid> file at all) on an OOB write with no shared-state or
+# response side effect to trip the other checks. grep -q is expected to find
+# nothing on a clean run, so it is not bare under `set -e`/pipefail here —
+# same style as the other checks in this block.
+if grep -nE 'runtime error:|AddressSanitizer|LeakSanitizer|SUMMARY: .*Sanitizer' \
+        "$WORK/logs/error.log" "$WORK"/logs/asan* 2>/dev/null; then
+    echo "FAIL: sanitizer report found in error.log/logs:"
+    grep -nE 'runtime error:|AddressSanitizer|LeakSanitizer|SUMMARY: .*Sanitizer' \
+        "$WORK/logs/error.log" "$WORK"/logs/asan* 2>/dev/null
+    problems=1
 fi
 if [ "$fail" -ne 0 ]; then
     echo "FAIL: a worker reported a wrong response"; problems=1
