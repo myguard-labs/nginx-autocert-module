@@ -17,6 +17,7 @@ this code started by not knowing nginx internals either.
 
 ## TL;DR checklist
 
+- [ ] Pre-commit hook enabled (`git config core.hooksPath .githooks`) — see below.
 - [ ] One feature or fix per PR — no stacked PRs, no drive-by refactors.
 - [ ] Code follows nginx style and matches the code around it.
 - [ ] Every new feature or bugfix ships a test in the same PR.
@@ -25,10 +26,46 @@ this code started by not knowing nginx internals either.
 - [ ] Commit messages: imperative subject, body explains *why*.
       No AI co-author trailers.
 
+## Enable the pre-commit hook first
+
+Do this once, in your clone, before you write any code:
+
+```sh
+git config core.hooksPath .githooks
+ci/linter/install-linters.sh      # apt-get -> pipx -> cpan -> upstream binary
+ci/linter/install-linters.sh --check
+```
+
+The hook runs the same `ci/linter/lint-*.sh` checkers that `lint.yml` runs on
+your PR, against your staged files. That is the point: CI does not
+reimplement the checks, it re-runs them, so a clean commit locally predicts a
+green Lint job instead of merely correlating with one.
+
+A clone that never sets `core.hooksPath` gets no local checking at all and
+finds out on the PR — which costs a remote round-trip for something
+`shellcheck` would have told you in a second.
+
+Two things worth knowing:
+
+- **A missing linter is a hard failure, not a skip.** A checker whose tool is
+  absent from `PATH` exits 2 and `run-all.sh` reports it as a failure. A gate
+  that quietly passes because its tool is not installed is worse than no gate,
+  so run `install-linters.sh --check` after the install and fix what it names.
+- **`lint.yml` runs a deliberate subset** (`LINT_ONLY`). Some checkers are red
+  against conditions that predate the gate and run locally but do not block a
+  PR yet; a checker joins the blocking set in the same PR that makes it green.
+  The reasons are in `.github/workflows/lint.yml`'s header, and the full
+  checker table is in [`ci/linter/README.md`](ci/linter/README.md).
+
+Run everything over the whole tree, not just staged files, with
+`ci/linter/run-all.sh --all`.
+
 ## How CI works here
 
-Every push and every PR runs four short gates. They exist to catch the
-classes of bugs that C code in a web server cannot afford:
+`ci.yml` is the single PR entry point: it calls the members below as
+`workflow_call` jobs, so a PR asks for one run rather than several
+independent ones. They exist to catch the classes of bugs that C code in a
+web server cannot afford:
 
 - **Build & Test** — builds the module against current nginx (and, where
   applicable, Angie) and runs the unit tests under **ASan/UBSan**.
@@ -47,6 +84,9 @@ classes of bugs that C code in a web server cannot afford:
 - **Valgrind** (`valgrind.yml`) — a short Memcheck soak. Valgrind executes
   the code in an emulated CPU and reports every invalid read/write and
   every leaked byte.
+- **Lint** (`lint.yml`) — the `ci/linter/` checkers described above, the same
+  ones your pre-commit hook ran. If you enabled the hook, this one should
+  never surprise you.
 
 The expensive versions of these — hours-long fuzzing per target, full
 Memcheck **and** Helgrind (thread-race detection) soaks — run monthly and
