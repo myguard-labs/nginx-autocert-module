@@ -80,9 +80,15 @@ EOF
 # abort_on_error=0 deliberately: with abort_on_error=1 the sanitizer raises
 # SIGABRT the instant it reports, which kills the process BEFORE the
 # cat-of-logs/asan* dump at the end of this script ever runs — the job goes red
-# naming nothing. exitcode=42 already makes a report fail the run, and the
-# report is still written to log_path, so failure is preserved while the
-# diagnostic survives. Same reasoning for UBSan's halt_on_error.
+# naming nothing. exitcode=42 already makes a report fail the run, and
+# log_path=$WORK/logs/asan is where a report lands WHEN the runtime honors it.
+# Measured on GCC's UBSan (step 40): a real out-of-bounds write's `runtime
+# error:` line landed in nginx's error.log instead, not in a
+# $WORK/logs/asan.<pid> file — log_path is not a guarantee, just the common
+# case. Failure is preserved regardless because this script also greps
+# error.log (and any $WORK/logs/asan* file) for sanitizer report signatures
+# below, independent of where the runtime chose to write. Same reasoning for
+# UBSan's halt_on_error.
 # detect_odr_violation=0: nginx's build generates `ngx_module_names` into BOTH
 # objs/ngx_modules.c (linked into the binary, 472 bytes) and
 # objs/<module>_modules.c (linked into the dynamic .so, 16 bytes). When nginx
@@ -223,6 +229,41 @@ if ls "$WORK"/logs/valgrind.* "$WORK"/logs/helgrind.* >/dev/null 2>&1; then
 fi
 if grep -nE '\[alert\]|\[emerg\]' "$WORK/logs/error.log" 2>/dev/null; then
     echo "FAIL: alert/emerg in error.log"; problems=1
+fi
+# Dedicated sanitizer-report detector, wherever the runtime actually put it.
+# `ls logs/asan*` above assumes log_path was honored; step 40 measured GCC's
+# UBSan writing its `runtime error:` line to error.log instead (no
+# $WORK/logs/asan.<pid> file at all) on an OOB write with no shared-state or
+# response side effect to trip the other checks. grep -qE is expected to find
+# nothing on a clean run, so it is not bare under `set -e`/pipefail here —
+# same style as the other checks in this block.
+#
+# error.log is always expected to exist and be readable; logs/asan* is a
+# glob that legitimately matches nothing on a clean run (log_path not
+# honored is the common case). Build the input list from files that
+# actually exist so a non-matching glob never gets treated as an unreadable
+# file, but a missing/unreadable error.log fails closed instead of the
+# detector silently inspecting nothing (grep exits 2, not 1, when it can't
+# open a file — `if grep ...` alone can't tell that apart from "no match").
+_sanitizer_pattern='runtime error:|AddressSanitizer|LeakSanitizer|SUMMARY: .*Sanitizer'
+_sanitizer_inputs=()
+for _f in "$WORK/logs/error.log" "$WORK"/logs/asan*; do
+    [ -e "$_f" ] && _sanitizer_inputs+=("$_f")
+done
+if [ ! -r "$WORK/logs/error.log" ]; then
+    echo "FAIL: cannot read $WORK/logs/error.log — sanitizer-report detector could not inspect its input"
+    problems=1
+elif [ "${#_sanitizer_inputs[@]}" -gt 0 ]; then
+    _sanitizer_rc=0
+    grep -qE "$_sanitizer_pattern" "${_sanitizer_inputs[@]}" 2>/dev/null || _sanitizer_rc=$?
+    if [ "$_sanitizer_rc" -eq 0 ]; then
+        echo "FAIL: sanitizer report found in error.log/logs:"
+        grep -nE "$_sanitizer_pattern" "${_sanitizer_inputs[@]}" 2>/dev/null
+        problems=1
+    elif [ "$_sanitizer_rc" -ne 1 ]; then
+        echo "FAIL: sanitizer-report detector could not read one of: ${_sanitizer_inputs[*]}"
+        problems=1
+    fi
 fi
 if [ "$fail" -ne 0 ]; then
     echo "FAIL: a worker reported a wrong response"; problems=1
