@@ -539,6 +539,57 @@ test_reject_charset(ngx_shm_zone_t *zone)
     CHECK(ngx_autocert_requests_ensure(zone, &over) == NGX_AUTOCERT_REQ_DENIED,
           "reject over-long host");
 
+    /* Exact boundary: a single-label host of exactly NGX_AUTOCERT_REQUEST_NAME_MAX
+     * bytes (63 or fewer per label, so pad with dots to keep every label legal)
+     * is still IN bounds ("len > MAX" rejects, not "len >= MAX"). Build
+     * "aaa...a" chunks of 63 'a's separated by '.', truncated to exactly
+     * NAME_MAX bytes and not ending mid-label on a dot. */
+    {
+        u_char      hbuf[NGX_AUTOCERT_REQUEST_NAME_MAX];
+        ngx_str_t   at_max;
+        ngx_uint_t  i, col;
+
+        col = 0;
+        for (i = 0; i < NGX_AUTOCERT_REQUEST_NAME_MAX; i++) {
+            if (col == 63) {
+                hbuf[i] = '.';
+                col = 0;
+            } else {
+                hbuf[i] = 'a';
+                col++;
+            }
+        }
+        /* Never end on a dot (trailing dot is rejected). */
+        if (hbuf[NGX_AUTOCERT_REQUEST_NAME_MAX - 1] == '.') {
+            hbuf[NGX_AUTOCERT_REQUEST_NAME_MAX - 1] = 'a';
+        }
+        at_max = SL(hbuf, NGX_AUTOCERT_REQUEST_NAME_MAX);
+        CHECK(ngx_autocert_requests_ensure(zone, &at_max)
+              == NGX_AUTOCERT_REQ_REQUESTED,
+              "accept a host of exactly NGX_AUTOCERT_REQUEST_NAME_MAX bytes");
+    }
+
+    /* Exact boundary: a DNS label of exactly 63 bytes is legal (max DNS label
+     * length), 64 is not -- "label_len > 63" must not become ">= 63". */
+    {
+        u_char      lbuf[64 + 12]; /* up to 64 'a's + ".example.com" (12) */
+        ngx_str_t   label63, label64;
+
+        memset(lbuf, 'a', 63);
+        memcpy(lbuf + 63, ".example.com", 12);
+        label63 = SL(lbuf, 63 + 12);
+        CHECK(ngx_autocert_requests_ensure(zone, &label63)
+              == NGX_AUTOCERT_REQ_REQUESTED,
+              "accept a label of exactly 63 bytes");
+
+        memset(lbuf, 'a', 64);
+        memcpy(lbuf + 64, ".example.com", 12);
+        label64 = SL(lbuf, 64 + 12);
+        CHECK(ngx_autocert_requests_ensure(zone, &label64)
+              == NGX_AUTOCERT_REQ_DENIED,
+              "reject a label of 64 bytes (over the DNS label limit)");
+    }
+
     /* a valid host is still accepted after all the rejects */
     {
         ngx_str_t ok = S("valid.example.com");

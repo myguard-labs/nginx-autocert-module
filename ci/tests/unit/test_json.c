@@ -234,6 +234,15 @@ test_strings_escapes(void)
           && memcmp(s.data, "\xf0\x9f\x98\x80", 4) == 0,
           "surrogate pair -> 4-byte UTF-8");
 
+    /* \uXXXX exact UTF-8 length-class boundary: U+0800 is the FIRST codepoint
+     * requiring the 3-byte encoding (U+07FF still fits in 2 bytes) -- a
+     * mutation on "cp < 0x800" only misencodes at this exact value. */
+    v = parse("{\"k\":\"\\u0800\"}");
+    CHECK(ngx_autocert_json_object_str(v, "k", &s) == NGX_OK
+          && s.len == 3
+          && memcmp(s.data, "\xe0\xa0\x80", 3) == 0,
+          "\\u0800 -> 3-byte UTF-8 (exact 2-byte/3-byte boundary)");
+
     /* empty string value */
     v = parse("{\"k\":\"\"}");
     CHECK(ngx_autocert_json_object_str(v, "k", &s) == NGX_OK && s.len == 0,
@@ -412,6 +421,16 @@ test_unicode_edge_bounded(void)
         v = ngx_autocert_json_parse(pool, (u_char *) tu, sizeof(tu));
         CHECK(v == NULL, "bounded: \\u with <4 hex digits before end rejected");
     }
+
+    /* NOTE: the hex4 entry guard "c->last - c->p < 4" is checked against the
+     * END OF THE WHOLE DOCUMENT BUFFER, not end-of-string -- so the ONLY way
+     * to make it exactly 4 at entry is to end the buffer immediately after
+     * the 4th digit with no closing quote, which is unterminated-string
+     * malformed input regardless of the guard's boundary. That makes the
+     * "< 4" vs "<= 4" boundary unreachable through ngx_autocert_json_parse
+     * on any well-formed input, and hex4 itself is `static` (no direct call
+     * from this TU, which links against a separately-compiled object, not an
+     * include-shim). Left undertested; see mutation-findings-step24.md. */
 }
 
 
@@ -435,6 +454,55 @@ test_depth_limit(void)
         v = parse(ok);
         CHECK(v != NULL && v->type == NGX_AUTOCERT_JSON_ARRAY,
               "in-bounds nesting parses");
+    }
+
+    /* Exact boundary: NGX_AUTOCERT_JSON_MAX_DEPTH (32) is itself the limit and
+     * must be accepted -- a one-off in the depth check (">"  vs ">=") only
+     * shows up right at this line, not at 100-vs-32. */
+    {
+        u_char  buf[80];
+        ngx_uint_t  i, n = 32;
+
+        for (i = 0; i < n; i++) buf[i] = '[';
+        buf[n] = '1';
+        for (i = 0; i < n; i++) buf[n + 1 + i] = ']';
+
+        v = ngx_autocert_json_parse(pool, buf, n * 2 + 1);
+        CHECK(v != NULL && v->type == NGX_AUTOCERT_JSON_ARRAY,
+              "nesting at exactly MAX_DEPTH (32) parses");
+
+        /* One level deeper (33) must be rejected. */
+        for (i = 0; i < n + 1; i++) buf[i] = '[';
+        buf[n + 1] = '1';
+        for (i = 0; i < n + 1; i++) buf[n + 2 + i] = ']';
+
+        v = ngx_autocert_json_parse(pool, buf, (n + 1) * 2 + 1);
+        CHECK(v == NULL, "nesting at MAX_DEPTH + 1 (33) rejected");
+    }
+
+    /* Same exact-boundary check for the OBJECT parser's depth guard, which
+     * is a separate "++c->depth > MAX_DEPTH" check from the array one above
+     * and not exercised by it. */
+    {
+        u_char  obuf[400];
+        ngx_uint_t  i, n = 32;
+        u_char  *p = obuf;
+
+        for (i = 0; i < n; i++) { *p++ = '{'; *p++ = '"'; *p++ = 'a'; *p++ = '"'; *p++ = ':'; }
+        *p++ = '1';
+        for (i = 0; i < n; i++) { *p++ = '}'; }
+
+        v = ngx_autocert_json_parse(pool, obuf, (size_t) (p - obuf));
+        CHECK(v != NULL && v->type == NGX_AUTOCERT_JSON_OBJECT,
+              "object nesting at exactly MAX_DEPTH (32) parses");
+
+        p = obuf;
+        for (i = 0; i < n + 1; i++) { *p++ = '{'; *p++ = '"'; *p++ = 'a'; *p++ = '"'; *p++ = ':'; }
+        *p++ = '1';
+        for (i = 0; i < n + 1; i++) { *p++ = '}'; }
+
+        v = ngx_autocert_json_parse(pool, obuf, (size_t) (p - obuf));
+        CHECK(v == NULL, "object nesting at MAX_DEPTH + 1 (33) rejected");
     }
 }
 
