@@ -1,4 +1,4 @@
-# sync-sha: 83957360cf5a204d1de2dfd673a2ba16093d2af731db0c295a6c9784e9377a5a
+# sync-sha: 3e4daceb92c7858ff9e334db7dd64d2feae9c05c3b00f0577eb79ce42326ad96
 name: CI Deep
 
 # Exhaustive dynamic analysis — monthly cron, release, and on-demand only,
@@ -51,7 +51,7 @@ permissions:
 
 jobs:
   fuzz:
-    name: Fuzz (JSON + HTTP, long)
+    name: Fuzz (JSON + HTTP + base64url, long)
     runs-on: [self-hosted, builder02, lxc]
     timeout-minutes: 600
     steps:
@@ -78,7 +78,7 @@ jobs:
         run: |
           set -euo pipefail
           cd ci/fuzz
-          for t in json:corpus http:corpus_http; do
+          for t in json:corpus http:corpus_http b64:corpus_b64; do
             name=${t%%:*}; corp=${t##*:}
             echo "== fuzz_${name} (${FUZZ_SECS}s) =="
             set +e
@@ -114,6 +114,7 @@ jobs:
           path: |
             ${{ github.workspace }}/ci/fuzz/corpus-min
             ${{ github.workspace }}/ci/fuzz/corpus_http-min
+            ${{ github.workspace }}/ci/fuzz/corpus_b64-min
           retention-days: 30
 
       - name: Notify Discord on failure

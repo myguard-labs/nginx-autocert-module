@@ -7,9 +7,10 @@
 #   - a dir    : build fuzz_json + fuzz_http into that directory
 #                (CI / OSS-Fuzz compat — $OUT/$OUT_DIR convention)
 #
-# Two targets:
+# Three targets:
 #   fuzz_json  — ngx_autocert_json_parse + accessors   (generated_json.inc)
 #   fuzz_http  — ngx_autocert_acme_parse_response/dechunk (generated_http.inc)
+#   fuzz_b64   — ngx_http_autocert_base64url_decode    (generated_b64.inc)
 #
 # No nginx build tree required — each parser's source is sliced from the shipped
 # .c by its extract_*.sh and compiled against the matching fuzz/ngx_*shim.h, so
@@ -33,9 +34,10 @@ OUT_DIR="${1:-$FUZZ_DIR}"
 # Create the output directory if it does not exist.
 mkdir -p "$OUT_DIR"
 
-# Regenerate both slices from the shipped source.
+# Regenerate all slices from the shipped source.
 bash "$FUZZ_DIR/extract_parser.sh"
 bash "$FUZZ_DIR/extract_http.sh"
+bash "$FUZZ_DIR/extract_b64.sh"
 
 # fuzz.dict must cover every literal the parsers actually recognize, or the
 # fuzzer wastes time guessing tokens it could be handed directly. Fail the
@@ -54,3 +56,4 @@ build_one() {
 
 build_one fuzz_json
 build_one fuzz_http
+build_one fuzz_b64
