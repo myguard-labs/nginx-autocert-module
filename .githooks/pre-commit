@@ -63,7 +63,12 @@ ROOT="$(git rev-parse --show-toplevel)"
 # Keep this value identical to lint.yml's LINT_ONLY. They are two copies of one
 # list on purpose (the hook cannot read a workflow's env), and lint-docs-drift
 # has no opinion about them, so a change to one is a change to both.
-LINT_ONLY="${LINT_ONLY:-ci-ports ci-secrets docs-drift python sh sync-stamp}"
+#
+# Assigned unconditionally, NOT as ${LINT_ONLY:-...}. Honouring an inherited
+# value would let anything in the caller's environment narrow the gate --
+# LINT_ONLY=sh git commit would skip ci-secrets and sync-stamp while still
+# printing "all linters clean". The hook's set is not the caller's to choose.
+LINT_ONLY="ci-ports ci-secrets docs-drift python sh sync-stamp"
 export LINT_ONLY
 
 "$ROOT/ci/linter/run-all.sh" --staged

@@ -1,4 +1,4 @@
-# sync-sha: 94a4e41bbdbf8a09942044a8124c4b2b9cca37d6e290cc95b95771dd904f700e
+# sync-sha: 1dc81edb8986cf1b8c8c84722feea3df022facdda12828193ed9be8a191c2db1
 name: Build & Test
 
 # Third-party actions pinned to commit SHAs for supply-chain safety.
@@ -207,6 +207,7 @@ jobs:
           version: ${{ needs.resolve.outputs.nginx_version }}
           url: ${{ needs.resolve.outputs.nginx_url }}
           dir: ${{ needs.resolve.outputs.nginx_dir }}
+          sha256: ${{ needs.resolve.outputs.nginx_sha256 }}
 
   # angie ships its own native `acme` directive, but this module's `autocert`
   # directive is independent and coexists with it (the operator chooses), so we
@@ -228,6 +229,7 @@ jobs:
           version: ${{ needs.resolve.outputs.angie_version }}
           url: ${{ needs.resolve.outputs.angie_url }}
           dir: ${{ needs.resolve.outputs.angie_dir }}
+          sha256: ${{ needs.resolve.outputs.angie_sha256 }}
 
   # ABI-drift regression. The prod crash was a struct-offset mismatch: the .so
   # was built against vanilla angie, but our packaged angie carries

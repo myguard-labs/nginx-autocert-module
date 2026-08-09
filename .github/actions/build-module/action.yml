@@ -1,4 +1,4 @@
-# sync-sha: cd0fd766e3b47263318d4a46d271134b1e98baa9dd4768c1ccf8784b7ec946b2
+# sync-sha: b68ff284aaa5a07d7c3e2dcedd65f8a080d98adbf3124f352d4788b83a5aef9c
 name: Build module + load/serve tests
 description: >
   Fetch one flavor (nginx | angie), configure + build the autocert dynamic
@@ -19,6 +19,14 @@ inputs:
     required: true
   dir:
     description: Unpacked source dir name (e.g. nginx-1.31.2).
+    required: true
+  sha256:
+    description: >
+      Expected sha256 of the source tarball, from .github/versions.env.
+      Required: this action extracts and compiles whatever is at `url`, so
+      without a digest a changed upstream archive -- or a poisoned entry in the
+      self-hosted runner's persistent ~/.cache/src-tarballs -- is built and
+      tested as if it were genuine.
     required: true
 
 runs:
@@ -48,6 +56,12 @@ runs:
         if [ ! -s "$tarball" ]; then
           curl -fsSL -o "$tarball" "${{ inputs.url }}"
         fi
+        # Verify BEFORE extraction, and deliberately outside the `if` above:
+        # the cache-hit path needs this more than the fresh download does.
+        # ~/.cache/src-tarballs persists across runs on the self-hosted
+        # runners, so a bad tarball written once would otherwise be reused by
+        # every later build without anything re-checking it.
+        echo "${{ inputs.sha256 }}  $tarball" | sha256sum -c -
 
     - name: Extract ${{ inputs.flavor }} ${{ inputs.version }}
       shell: bash
