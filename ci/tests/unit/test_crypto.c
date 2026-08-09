@@ -25,6 +25,8 @@
 #include <openssl/pem.h>
 #include <openssl/x509.h>
 #include <openssl/x509v3.h>
+#include <openssl/rsa.h>
+#include <openssl/bn.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -506,6 +508,68 @@ test_acme_tls_cert(ngx_uint_t curve, const char *domain, const char *keyauth)
 }
 
 
+/*
+ * ngx_http_autocert_key_curve_name (L1's "account key stays P-384" check
+ * depends on this). Was entirely untested (0/26 lines) before step42:
+ * boundary cases -- NULL pkey, a non-EC key (RSA, so EVP_PKEY_base_id !=
+ * EVP_PKEY_EC short-circuits before curve inspection), and both supported
+ * curves round-tripping through key_generate.
+ */
+static void
+test_key_curve_name(void)
+{
+    EVP_PKEY  *pkey;
+    RSA       *rsa;
+
+    CHECK(ngx_http_autocert_key_curve_name(NULL) == NULL,
+          "key_curve_name(NULL) returns NULL, does not crash");
+
+    pkey = ngx_http_autocert_key_generate(NGX_HTTP_AUTOCERT_CRYPTO_P256);
+    CHECK(pkey != NULL, "key_curve_name: generate P-256 key");
+    if (pkey != NULL) {
+        const char *name = ngx_http_autocert_key_curve_name(pkey);
+        CHECK(name != NULL && strcmp(name, "P-256") == 0,
+              "key_curve_name(P-256 key) == \"P-256\"");
+        ngx_http_autocert_key_free(pkey);
+    }
+
+    pkey = ngx_http_autocert_key_generate(NGX_HTTP_AUTOCERT_CRYPTO_P384);
+    CHECK(pkey != NULL, "key_curve_name: generate P-384 key");
+    if (pkey != NULL) {
+        const char *name = ngx_http_autocert_key_curve_name(pkey);
+        CHECK(name != NULL && strcmp(name, "P-384") == 0,
+              "key_curve_name(P-384 key) == \"P-384\"");
+        ngx_http_autocert_key_free(pkey);
+    }
+
+    /* Non-EC key: EVP_PKEY_base_id != EVP_PKEY_EC short-circuits before any
+     * curve-table lookup -- must return NULL, not misread garbage as a curve. */
+    pkey = EVP_PKEY_new();
+    rsa = RSA_new();
+    CHECK(pkey != NULL && rsa != NULL, "key_curve_name: alloc RSA fixture");
+    if (pkey != NULL && rsa != NULL) {
+        BIGNUM *e = BN_new();
+        CHECK(e != NULL && BN_set_word(e, RSA_F4) == 1
+              && RSA_generate_key_ex(rsa, 2048, e, NULL) == 1,
+              "key_curve_name: generate RSA fixture key");
+        if (EVP_PKEY_assign_RSA(pkey, rsa) == 1) {
+            rsa = NULL;  /* pkey now owns it */
+            CHECK(ngx_http_autocert_key_curve_name(pkey) == NULL,
+                  "key_curve_name(RSA key) returns NULL, not a curve name");
+        }
+        if (e != NULL) {
+            BN_free(e);
+        }
+    }
+    if (rsa != NULL) {
+        RSA_free(rsa);
+    }
+    if (pkey != NULL) {
+        EVP_PKEY_free(pkey);
+    }
+}
+
+
 static void
 test_dns01_txt(void)
 {
@@ -537,6 +601,7 @@ main(void)
     test_hmac_sha256();
     test_dns01_txt();
     test_jwk_and_thumbprint();
+    test_key_curve_name();
     test_jws_sign_verify(NGX_HTTP_AUTOCERT_CRYPTO_P256, "ES256");
     test_jws_sign_verify(NGX_HTTP_AUTOCERT_CRYPTO_P384, "ES384");
     test_csr(NGX_HTTP_AUTOCERT_CRYPTO_P256, "le.example.com");
