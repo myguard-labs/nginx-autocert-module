@@ -1,4 +1,4 @@
-# sync-sha: 3e4daceb92c7858ff9e334db7dd64d2feae9c05c3b00f0577eb79ce42326ad96
+# sync-sha: 173470ccffe05a330da922db27c0130a16398ff6a5e34782fb80be0bccba6143
 name: CI Deep
 
 # Exhaustive dynamic analysis — monthly cron, release, and on-demand only,
@@ -281,21 +281,26 @@ jobs:
       - name: Checkout module
         uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
 
-      - name: Resolve latest angie
+      # Pinned, not a live lookup -- same reason as build-test.yml's `resolve`:
+      # .github/versions.env is the single source, bump.yml moves it weekly.
+      - name: Read pinned angie version
         id: v
         run: |
           set -euo pipefail
-          angie=$(curl -fsSL https://download.angie.software/files/ \
-            | grep -oP 'angie-\K[0-9]+\.[0-9]+\.[0-9]+(?=\.tar\.gz)' \
-            | sort -V | tail -1)
-          if [ -z "$angie" ]; then
-            echo "::error::could not resolve latest angie version"; exit 1
-          fi
-          echo "Resolved angie: $angie"
+          f=.github/versions.env
+          [ -f "$f" ] || { echo "::error::$f not found"; exit 1; }
+          # shellcheck disable=SC1090
+          . "$f"
+          for k in ANGIE_VERSION ANGIE_SHA256; do
+            eval "v=\${$k:-}"
+            [ -n "$v" ] || { echo "::error::$k missing from $f"; exit 1; }
+          done
+          echo "Pinned angie: $ANGIE_VERSION"
           {
-            echo "angie_version=$angie"
-            echo "angie_dir=angie-$angie"
-            echo "angie_url=https://download.angie.software/files/angie-$angie.tar.gz"
+            echo "angie_version=$ANGIE_VERSION"
+            echo "angie_dir=angie-$ANGIE_VERSION"
+            echo "angie_url=https://download.angie.software/files/angie-$ANGIE_VERSION.tar.gz"
+            echo "angie_sha256=$ANGIE_SHA256"
           } >> "$GITHUB_OUTPUT"
 
       - name: Build module + load/serve tests
@@ -305,6 +310,7 @@ jobs:
           version: ${{ steps.v.outputs.angie_version }}
           url: ${{ steps.v.outputs.angie_url }}
           dir: ${{ steps.v.outputs.angie_dir }}
+          sha256: ${{ steps.v.outputs.angie_sha256 }}
 
       - name: Install python cryptography for the mock CAs
         run: |

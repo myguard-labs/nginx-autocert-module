@@ -664,6 +664,15 @@ for one run rather than several independent ones.
 | `codeql.yml` | PR (via `ci.yml`), monthly | CodeQL over the module TU |
 | `asan.yml` | weekly (Sun 03:45 UTC), manual | 30s ASan+UBSan request-storm soak. Green since #160. Two nginx-inherent checks are off: ODR (nginx generates `ngx_module_names` into both the binary and the `.so`) and config-load leaks (the cycle pool is never freed) — see `ci/tools/lsan.supp`. Request-path leaks, UAF, overflow and all UBSan checks stay armed |
 | `ci-deep.yml` | monthly, manual | long fuzz, memcheck + helgrind soaks, security scanners, angie Pebble e2e |
+| `bump.yml` | weekly (Mon 04:00 UTC), manual | regenerate the nginx/angie version + sha256 pins in [`.github/versions.env`](.github/versions.env) and open a PR. Not a gate — it produces a reviewable change instead of letting builds drift onto a new upstream on their own |
+
+**nginx and angie are pinned.** `.github/versions.env` is the single source of
+truth for both versions and their tarball sha256s; `resolve` in
+`build-test.yml`, the angie leg of `ci-deep.yml` and `ci/tools/ci-build.sh` all
+read it, and every fetch is checked against the recorded digest. Builds
+therefore no longer track whatever upstream happens to be serving: an upstream
+release used to turn a green PR red with no diff, and two jobs in one run could
+disagree about the version. `bump.yml` owns moving the pins.
 
 Port bands: the e2e jobs derive `AC_PORT_OFFSET` from the run ID plus a
 per-flavour offset, and `ci/tests/e2e/max-port.sh` verifies the ceiling **before**
