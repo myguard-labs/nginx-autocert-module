@@ -147,6 +147,18 @@ test_bounds(ngx_shm_zone_t *zone)
     CHECK(ngx_autocert_challenge_set(zone, &over, &ka) == NGX_ERROR,
           "set rejects over-long token");
 
+    /* Exact boundary: a token of exactly NGX_AUTOCERT_TOKEN_MAX bytes is
+     * still IN bounds ("len > MAX" rejects, not "len >= MAX") and must be
+     * accepted. */
+    {
+        ngx_str_t  at_max = SL(big, NGX_AUTOCERT_TOKEN_MAX);
+
+        CHECK(ngx_autocert_challenge_set(zone, &at_max, &ka) == NGX_OK,
+              "set accepts a token of exactly NGX_AUTOCERT_TOKEN_MAX bytes");
+        CHECK(ngx_autocert_challenge_remove(zone, &at_max) == NGX_OK,
+              "cleanup: remove the exact-max token");
+    }
+
     /* keyauth bounds */
     {
         ngx_str_t tok = S("tok");

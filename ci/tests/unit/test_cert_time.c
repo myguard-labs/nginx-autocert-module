@@ -115,6 +115,15 @@ test_timegm_vectors(void)
     tm.tm_mon = 0; tm.tm_mday = 1;
     CHECK(ngx_autocert_timegm(&tm) == (time_t) -1,
           "timegm rejects out-of-range year");
+
+    /* boundary: year == 9999 is IN range (the guard is "> 9999", not ">="),
+     * and must match libc timegm exactly -- catches a mutation that widens
+     * the rejection to ">= 9999". */
+    memset(&tm, 0, sizeof(tm));
+    tm.tm_year = 9999 - 1900;
+    tm.tm_mon = 11; tm.tm_mday = 31; tm.tm_hour = 23; tm.tm_min = 59; tm.tm_sec = 59;
+    CHECK(ngx_autocert_timegm(&tm) == timegm(&tm),
+          "timegm accepts year == 9999 (upper boundary is inclusive)");
 }
 
 

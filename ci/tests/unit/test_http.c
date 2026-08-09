@@ -151,6 +151,11 @@ test_parse_url(void)
         url_bad_n(cr_uri,    sizeof(cr_uri) - 1,     "parse_url reject CR in uri");
         url_bad_n(lf_uri,    sizeof(lf_uri) - 1,     "parse_url reject LF in uri");
     }
+
+    /* url_part_safe exact boundary: 0x20 (space) is rejected, 0x21 ('!') is
+     * the first PRINTABLE byte and must be accepted -- "ch < 0x21" must not
+     * become "ch <= 0x21". */
+    url_ok("https://h/a!b", "h", 443, "/a!b", 0);
 }
 
 
@@ -280,6 +285,39 @@ test_body_framing(void)
     /* incomplete headers (no CRLFCRLF) -> AGAIN, no over-read */
     rc = parse_resp(RESP("HTTP/1.1 200 OK\r\nContent-Length: 0\r\n"), &r);
     CHECK(rc == NGX_AGAIN, "headers: incomplete header block -> AGAIN");
+    ngx_http_fuzz_pool_reset(&pool);
+
+    /* chunk-size overflow guard, exact boundary, called directly since
+     * ngx_autocert_acme_chunk_size is sliced into THIS TU by
+     * extract_http.sh (unlike json.c's hex4, which lives in a separately
+     * compiled object). NGX_MAX_SIZE_T_VALUE here is 0x7fff...f (signed
+     * max, per the shim), so bound = (0x7fff...f >> 4) = 0x7ff...f (15 hex
+     * digits: "7ffffffffffffff"). Feeding exactly that 15-digit prefix makes
+     * the accumulated size equal the bound precisely; a 16th digit then
+     * checks "size > bound", which is FALSE (they're equal) so the real
+     * guard lets it through -- but a mutation to "size >= bound" rejects it.
+     * This is the one input where "> " and ">=" actually diverge (any pure
+     * run of 'f' digits hits the guard at the same digit count either way,
+     * since size strictly exceeds bound the moment it does at all). */
+    {
+        u_char      at_bound[]  = "7ffffffffffffff";      /* 15 digits == bound */
+        u_char      one_over[]  = "7fffffffffffffff";     /* 16 digits, one more 'f' */
+        size_t      out;
+
+        CHECK(ngx_autocert_acme_chunk_size(at_bound, at_bound + 15, &out) == NGX_OK
+              && out == 0x7ffffffffffffffULL,
+              "chunk_size: 15 hex digits forming exactly the overflow bound accepted");
+        CHECK(ngx_autocert_acme_chunk_size(one_over, one_over + 16, &out) == NGX_OK,
+              "chunk_size: bound followed by one more digit still accepted "
+              "(guard is strictly '>', not '>=')");
+    }
+
+    /* chunk-size line with no hex digits at all (e.g. an extension with no
+     * leading size) must be rejected, not treated as a 0-size terminator. */
+    rc = parse_resp(RESP("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n"
+                         ";ext\r\n\r\n"), &r);
+    CHECK(rc == NGX_ERROR,
+          "body: digit-less chunk-size line rejected");
     ngx_http_fuzz_pool_reset(&pool);
 }
 

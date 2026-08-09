@@ -102,6 +102,24 @@ main(void)
                  "_ip6_fe80-0000-0000-0000-0000-0000-0000-0001"),
           "v6 fe80:0:...:1 normalized");
 
+    /* --- fs_segment: exact-capacity boundary ---
+     * "need > cap" must reject only when the buffer is strictly too small;
+     * a buffer of EXACTLY the required size ("_wildcard_." + "example.com")
+     * must still succeed ("need > cap", not "need >= cap"). */
+    {
+        u_char      exact[sizeof("_wildcard_.example.com") - 1];
+        u_char      one_short[sizeof("_wildcard_.example.com") - 2];
+        size_t      n;
+
+        n = ngx_autocert_fs_segment(exact, sizeof(exact), &wild);
+        CHECK(n == sizeof(exact)
+              && ngx_memcmp(exact, "_wildcard_.example.com", n) == 0,
+              "fs_segment: wildcard fits a buffer of exactly the needed size");
+
+        n = ngx_autocert_fs_segment(one_short, sizeof(one_short), &wild);
+        CHECK(n == 0, "fs_segment: wildcard rejects a buffer one byte short");
+    }
+
     if (failures) {
         fprintf(stderr, "\n%d FAILURE(S)\n", failures);
         return 1;

@@ -160,6 +160,17 @@ test_bounds(ngx_shm_zone_t *zone)
           "get rejects over-long domain");
     CHECK(ngx_autocert_alpn_remove(zone, &overd) == NGX_OK,
           "remove of over-long domain -> OK (no-op)");
+
+    /* Exact boundary: a domain of exactly NGX_AUTOCERT_ALPN_DOMAIN_MAX bytes
+     * is still IN bounds ("len > MAX" rejects, not "len >= MAX"). */
+    {
+        ngx_str_t  at_max = SL(dbuf, NGX_AUTOCERT_ALPN_DOMAIN_MAX);
+
+        CHECK(ngx_autocert_alpn_set(zone, &at_max, &c, &k) == NGX_OK,
+              "set accepts a domain of exactly NGX_AUTOCERT_ALPN_DOMAIN_MAX bytes");
+        CHECK(ngx_autocert_alpn_remove(zone, &at_max) == NGX_OK,
+              "cleanup: remove the exact-max domain");
+    }
 }
 
 
