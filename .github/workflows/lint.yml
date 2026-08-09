@@ -1,4 +1,4 @@
-# sync-sha: 478b2e993cc0c822ca3991adf5c770dbf84262f056210dad98936071e6ae2c5c
+# sync-sha: fc14f27374a651144ef3ab6366773d7e12ee9852c3649d9b32389473e212016b
 name: Lint
 
 # The same ci/linter/ scripts a developer runs locally, run again on the PR --
@@ -91,5 +91,5 @@ jobs:
           # fails on any omission not named there. Adding a lint-*.sh without
           # adding its name leaves it running locally and never in CI, which is
           # the quieter half of a gate that is not really a gate.
-          LINT_ONLY: ci-ports ci-secrets docs-drift sh sync-stamp
+          LINT_ONLY: ci-ports ci-secrets docs-drift python sh sync-stamp
         run: ci/linter/run-all.sh

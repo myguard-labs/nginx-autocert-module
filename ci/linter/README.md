@@ -18,6 +18,7 @@ finding shellcheck could have named in two seconds. Every script is standalone;
 | `lint-ci-secrets.sh` | `.github/workflows/` | a `workflow_call` member declares the secrets it needs with `required: true`; callers wire them by name and never use `secrets: inherit` |
 | `lint-sync-stamp.sh` | `.github/workflows/`, `.github/scripts/`, `.github/actions/` | every skeleton-shared file carries a current `# sync-sha:` stamp, so an adopter can diff two repos' `--list` output and see exactly what drifted |
 | `lint-docs-drift.sh` | `.github/workflows/`, `README.md` | every workflow documented, every documented workflow exists |
+| `lint-python.sh` | `*.py` | ruff `check --select E,W,F,B,SIM,I,UP` plus `format --check`; rules are selected EXPLICITLY because ruff's default set omits F401/E402 |
 | `lint-spelling.sh` | all tracked files | codespell over prose, comments and log strings; vendored trees excluded via `lib.sh` |
 | `run-all.sh` | all of the above | runs every check, reports once |
 | `install-linters.sh` | — | apt-get → pipx → cpan → upstream binary |

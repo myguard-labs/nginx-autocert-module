@@ -19,8 +19,9 @@ The checks here encode facts about THIS repo that no general tool can know:
 which self-hosted labels exist, that the runners are persistent and shared with
 package builds, which port band each job owns, which files document the
 pipeline, that ci.yml is the single orchestrator, and that a member's secret
-surface is declared at the member. They are the checks that go red when a NEW workflow is
-added without the property every existing one happens to have -- the case where
+surface is declared at the member. They are the checks that go red when a NEW
+workflow is added without the property every existing one happens to have --
+the case where
 copying an existing file is the only thing standing between the repo and a
 regression, and nothing enforces the copy.
 """
