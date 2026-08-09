@@ -1,4 +1,4 @@
-# sync-sha: 98c26c6648ba30372bb1720375e1e2e69bf3e343a4f2ceffada769c856839d60
+# sync-sha: 83957360cf5a204d1de2dfd673a2ba16093d2af731db0c295a6c9784e9377a5a
 name: CI Deep
 
 # Exhaustive dynamic analysis — monthly cron, release, and on-demand only,
@@ -72,12 +72,12 @@ jobs:
           fi
 
       - name: Build fuzz targets
-        run: bash ci/fuzz/build.sh "$GITHUB_WORKSPACE/fuzz"
+        run: bash ci/fuzz/build.sh
 
       - name: Fuzz each target
         run: |
           set -euo pipefail
-          cd fuzz
+          cd ci/fuzz
           for t in json:corpus http:corpus_http; do
             name=${t%%:*}; corp=${t##*:}
             echo "== fuzz_${name} (${FUZZ_SECS}s) =="

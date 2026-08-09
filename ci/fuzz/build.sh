@@ -30,18 +30,21 @@ CFLAGS="${CFLAGS:--g -O1 -fsanitize=address,undefined -fno-sanitize-recover=unde
 
 OUT_DIR="${1:-$FUZZ_DIR}"
 
+# Create the output directory if it does not exist.
+mkdir -p "$OUT_DIR"
+
 # Regenerate both slices from the shipped source.
 bash "$FUZZ_DIR/extract_parser.sh"
 bash "$FUZZ_DIR/extract_http.sh"
 
 build_one() {
-    target="$1"
-    # shellcheck disable=SC2086
-    "$CC" $CFLAGS $ENGINE \
-        -I"$FUZZ_DIR" \
-        "$FUZZ_DIR/${target}.c" \
-        -o "$OUT_DIR/${target}"
-    echo "✓ built fuzz target: $OUT_DIR/${target}"
+  target="$1"
+  # shellcheck disable=SC2086
+  "$CC" $CFLAGS $ENGINE \
+    -I"$FUZZ_DIR" \
+    "$FUZZ_DIR/${target}.c" \
+    -o "$OUT_DIR/${target}"
+  echo "✓ built fuzz target: $OUT_DIR/${target}"
 }
 
 build_one fuzz_json
