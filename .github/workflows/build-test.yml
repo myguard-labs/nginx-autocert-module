@@ -1,4 +1,4 @@
-# sync-sha: e9734100f9e99b66165f9f13f64ba33be3ee3d709e8a06e7567ce28fd0cbf602
+# sync-sha: 94a4e41bbdbf8a09942044a8124c4b2b9cca37d6e290cc95b95771dd904f700e
 name: Build & Test
 
 # Third-party actions pinned to commit SHAs for supply-chain safety.
@@ -15,8 +15,12 @@ name: Build & Test
 #   ./.github/actions/run-e2e       restore build-nginx + run one e2e script
 #                                   Pebble e2e (optionally under sudo).
 
-# Neither nginx nor angie is pinned: the `resolve` job scrapes the current
-# mainline nginx and the latest angie release at run time.
+# Both nginx and angie are PINNED: the `resolve` job reads
+# .github/versions.env (version + sha256 on adjacent lines) instead of scraping
+# nginx.org/download.angie.software at run time, and every tarball fetch is
+# verified against the recorded digest. .github/workflows/bump.yml regenerates
+# the file weekly and opens a PR, so moving to a new upstream is a reviewable
+# commit rather than something a build picks up on its own.
 #   - build-nginx and build-angie both fully build the flavor + the module, run
 #     the no-network load/serve/lifecycle/USR2 tests, and upload the tree as
 #     build-<flavor>. The unit jobs download build-nginx (the C they test is
@@ -149,31 +153,43 @@ jobs:
       angie_version: ${{ steps.v.outputs.angie_version }}
       angie_dir: ${{ steps.v.outputs.angie_dir }}
       angie_url: ${{ steps.v.outputs.angie_url }}
+      nginx_sha256: ${{ steps.v.outputs.nginx_sha256 }}
+      angie_sha256: ${{ steps.v.outputs.angie_sha256 }}
     steps:
-      - name: Resolve latest mainline nginx + latest angie
+      - name: Checkout module
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          persist-credentials: false
+
+      # Pins, not a live lookup. Builds used to track whatever nginx.org and
+      # download.angie.software happened to be serving at the moment the job
+      # ran, so an upstream release turned a green PR red with no diff, and two
+      # jobs in the same run could disagree about the version. The versions
+      # live in .github/versions.env with their sha256 on the adjacent line;
+      # .github/workflows/bump.yml regenerates both weekly and opens a PR, so
+      # moving to a new upstream is a reviewable commit rather than a surprise.
+      - name: Read pinned nginx + angie versions
         id: v
         run: |
           set -euo pipefail
-          ver=$(curl -fsSL https://nginx.org/en/download.html \
-            | grep -oP 'nginx-\K[0-9]+\.[0-9]+\.[0-9]+(?=\.tar\.gz)' \
-            | sort -V | tail -1)
-          if [ -z "$ver" ]; then
-            echo "::error::could not resolve mainline nginx version"; exit 1
-          fi
-          angie=$(curl -fsSL https://download.angie.software/files/ \
-            | grep -oP 'angie-\K[0-9]+\.[0-9]+\.[0-9]+(?=\.tar\.gz)' \
-            | sort -V | tail -1)
-          if [ -z "$angie" ]; then
-            echo "::error::could not resolve latest angie version"; exit 1
-          fi
-          echo "Resolved nginx mainline: $ver  angie: $angie"
+          f=.github/versions.env
+          [ -f "$f" ] || { echo "::error::$f not found"; exit 1; }
+          # shellcheck disable=SC1090
+          . "$f"
+          for k in NGINX_VERSION NGINX_VERSION_SHA256 ANGIE_VERSION ANGIE_SHA256; do
+            eval "v=\${$k:-}"
+            [ -n "$v" ] || { echo "::error::$k missing from $f"; exit 1; }
+          done
+          echo "Pinned nginx: $NGINX_VERSION  angie: $ANGIE_VERSION"
           {
-            echo "nginx_version=$ver"
-            echo "nginx_dir=nginx-$ver"
-            echo "nginx_url=https://nginx.org/download/nginx-$ver.tar.gz"
-            echo "angie_version=$angie"
-            echo "angie_dir=angie-$angie"
-            echo "angie_url=https://download.angie.software/files/angie-$angie.tar.gz"
+            echo "nginx_version=$NGINX_VERSION"
+            echo "nginx_dir=nginx-$NGINX_VERSION"
+            echo "nginx_url=https://nginx.org/download/nginx-$NGINX_VERSION.tar.gz"
+            echo "nginx_sha256=$NGINX_VERSION_SHA256"
+            echo "angie_version=$ANGIE_VERSION"
+            echo "angie_dir=angie-$ANGIE_VERSION"
+            echo "angie_url=https://download.angie.software/files/angie-$ANGIE_VERSION.tar.gz"
+            echo "angie_sha256=$ANGIE_SHA256"
           } >> "$GITHUB_OUTPUT"
 
   build-nginx:
@@ -253,6 +269,12 @@ jobs:
           angie_tar=~/.cache/src-tarballs/angie-${{ needs.resolve.outputs.angie_version }}.tar.gz
           [ -s "$nginx_tar" ] || curl -fsSL -o "$nginx_tar" "${{ needs.resolve.outputs.nginx_url }}"
           [ -s "$angie_tar" ] || curl -fsSL -o "$angie_tar" "${{ needs.resolve.outputs.angie_url }}"
+          # Now that the versions are pinned, the digest can be enforced: a
+          # changed upstream archive (or a poisoned runner cache, which is why
+          # this also covers the cache-hit path) fails here instead of being
+          # compiled. Digests come from .github/versions.env via `resolve`.
+          echo "${{ needs.resolve.outputs.nginx_sha256 }}  $nginx_tar" | sha256sum -c -
+          echo "${{ needs.resolve.outputs.angie_sha256 }}  $angie_tar" | sha256sum -c -
 
       - name: ABI-drift guard (matched OK, mismatch refused)
         env:

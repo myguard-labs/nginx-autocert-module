@@ -1,0 +1,126 @@
+# sync-sha: ca0ef3b3393a70fdda579bde9c156cd60eb547ab375d849644d9f892ead320da
+name: Bump versions
+
+# Weekly: check nginx.org/angie.software for newer releases than what is
+# pinned in .github/versions.env and rewrite the file (version + sha256 as one
+# unit). ci/tools/bump-versions.sh does the work; it is also runnable locally
+# with --dry-run to preview.
+#
+# Opens a PR rather than pushing straight to master -- master carries the
+# "PR-ONLY" ruleset with no bypass actor, so a direct push is always rejected
+# (GH013). Normal review and required checks gate the merge, which is the
+# point: moving to a new upstream nginx becomes a reviewable commit instead of
+# something a build silently picked up.
+#
+# ADAPTED FROM THE SKELETON (nginx-skeleton-module, 2026-08-09):
+#   - The reference names a BUMP_PR_TOKEN secret. This repo and the myguard-labs
+#     org do not have one (`gh api .../actions/secrets` lists only
+#     DISCORD_BOT_TOKEN, DISCORD_CHANNEL_BUILDS, GH_SUBMODULE_TOKEN), so this
+#     uses the org's GH_SUBMODULE_TOKEN and fails loudly when it is unset
+#     rather than dying halfway through with an opaque git error. The default
+#     GITHUB_TOKEN cannot create PRs on myguard-labs repos.
+#   - The reference also bumps action pins, linter pins and a vendored
+#     ci/vendor/nginx-tests submodule. This repo has no bump-actions.sh, no
+#     bump-tools.sh and no submodules at all, so those lanes are absent here
+#     rather than stubbed. See ci/tools/bump-versions.sh's header.
+#   - Base branch is master, not main.
+#
+# Action pins (keep in sync with build-test.yml):
+# actions/checkout@v5 -> 93cb6efe18208431cddfb8368fd83d5badbf9bfd
+
+on:
+  schedule:
+    # Weekly, Monday 04:00 UTC. Off-peak, and clear of build-test.yml's daily
+    # 03:17 and ci-deep's monthly 03:30.
+    - cron: "0 4 * * 1"
+  workflow_dispatch: {}
+
+concurrency:
+  group: bump-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  bump:
+    name: Bump nginx/angie version pins
+    runs-on: [self-hosted, builder02, lxc]
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Require a PR-capable token
+        env:
+          BUMP_PR_TOKEN: ${{ secrets.GH_SUBMODULE_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${BUMP_PR_TOKEN:-}" ]; then
+            echo "::error::GH_SUBMODULE_TOKEN is unset. The default GITHUB_TOKEN cannot open PRs on myguard-labs repos, and master is PR-only, so this job has no way to land a bump. Set the secret or disable this workflow."
+            exit 1
+          fi
+          echo "token present"
+
+      - name: Run bump script
+        id: bump
+        env:
+          # The angie release lookup hits api.github.com; unauthenticated, the
+          # shared runner IP is rate-limited to 403s, and compute-versions.sh
+          # treats a failed lookup as fatal rather than "nothing to bump".
+          GH_TOKEN: ${{ secrets.GH_SUBMODULE_TOKEN }}
+        run: bash ci/tools/bump-versions.sh
+
+      - name: Open PR if anything changed
+        env:
+          GH_TOKEN: ${{ secrets.GH_SUBMODULE_TOKEN }}
+          BUMP_PR_TOKEN: ${{ secrets.GH_SUBMODULE_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "$(git status --porcelain)" ]; then
+            echo "nothing changed, skipping PR"
+            exit 0
+          fi
+          branch="bump/versions-$(date -u +%Y%m%d)"
+          git config user.name "myguard-bump-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git checkout -b "$branch"
+          git add -A
+          git commit -m "chore: bump nginx/angie version pins
+
+          Automated weekly version check (ci/tools/bump-versions.sh)."
+          # persist-credentials is false, so the checkout leaves no git
+          # credential behind and a plain `git push` prompts for a username.
+          # GH_TOKEN authenticates gh but not git, so hand git its own
+          # credential via the askpass helper -- keeps the token out of argv
+          # and out of .git/config, unlike an inline x-access-token@ URL.
+          git config credential.helper ''
+          askpass="$(mktemp)"
+          cat > "$askpass" <<'ASKPASS'
+          #!/bin/sh
+          case "$1" in
+            Username*) echo x-access-token ;;
+            *) printf '%s' "$BUMP_PR_TOKEN" ;;
+          esac
+          ASKPASS
+          chmod 700 "$askpass"
+          # Force-push: the branch name is date-based, so a same-day re-run (a
+          # manual dispatch, or a retry after a failure) collides with the
+          # branch the earlier run created and is otherwise rejected
+          # non-fast-forward. The branch is bot-owned and disposable.
+          GIT_ASKPASS="$askpass" git push --force-with-lease origin "$branch"
+          rm -f "$askpass"
+          # An open PR for this branch may already exist from that earlier run;
+          # the push above has refreshed it, so there is nothing to do.
+          if [ -n "$(gh pr list --head "$branch" --state open --json number -q '.[0].number')" ]; then
+            echo "PR for $branch already open, refreshed by the push"
+            exit 0
+          fi
+          gh pr create \
+            --title "chore: bump nginx/angie version pins ($(date -u +%Y-%m-%d))" \
+            --body "Automated weekly version check (\`ci/tools/bump-versions.sh\`). Review the diff and let required CI checks gate the merge." \
+            --base master \
+            --head "$branch"

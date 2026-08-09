@@ -133,15 +133,41 @@ case "$profile" in
 esac
 
 # ---- resolve nginx version -------------------------------------------------
-if [ -z "${NGINX_VERSION:-}" ]; then
-  ver=$(curl -fsSL https://nginx.org/en/download.html \
-    | grep -oP 'nginx-\K[0-9]+\.[0-9]+\.[0-9]+(?=\.tar\.gz)' \
-    | sort -V | tail -1)
-  if [ -z "$ver" ]; then
-    echo "::error::cannot resolve nginx version from nginx.org" >&2
+# Pinned, not looked up live. When NGINX_VERSION is not already in the
+# environment it comes from .github/versions.env (regenerated weekly by
+# bump.yml), so every job in a run builds the same nginx and an upstream
+# release can no longer turn a green PR red with no diff. NGINX_VERSION_SHA256
+# rides along from the same file and is enforced on the tarball below.
+repo_root="$(cd "$(dirname "$0")/../.." && pwd)"
+versions_env="$repo_root/.github/versions.env"
+if [ -z "${NGINX_VERSION:-}" ] || [ -z "${NGINX_VERSION_SHA256:-}" ]; then
+  if [ ! -f "$versions_env" ]; then
+    echo "::error::$versions_env not found and NGINX_VERSION/NGINX_VERSION_SHA256 not preset" >&2
     exit 1
   fi
-  NGINX_VERSION="$ver"
+  # Only adopt what the caller did not already pin, so an explicit
+  # NGINX_VERSION (ci-deep's stable matrix cell) still wins.
+  _pin_ver=$(sed -n 's/^NGINX_VERSION=//p' "$versions_env" | head -1)
+  _pin_sha=$(sed -n 's/^NGINX_VERSION_SHA256=//p' "$versions_env" | head -1)
+  # A caller that pinned only the version (ci-deep's "stable" matrix cell sets
+  # NGINX_VERSION=$NGINX_STABLE) must NOT inherit the mainline digest -- that
+  # would check the wrong tarball against the wrong hash. Take the file's
+  # digest only when its version is the one being built; otherwise look the
+  # matching *_SHA256 up by value, and leave it empty if there is no pin for
+  # this version at all.
+  if [ -z "${NGINX_VERSION:-}" ] || [ "${NGINX_VERSION}" = "$_pin_ver" ]; then
+    : "${NGINX_VERSION:=$_pin_ver}"
+    : "${NGINX_VERSION_SHA256:=$_pin_sha}"
+  elif [ -z "${NGINX_VERSION_SHA256:-}" ]; then
+    _stable_ver=$(sed -n 's/^NGINX_STABLE=//p' "$versions_env" | head -1)
+    if [ "$NGINX_VERSION" = "$_stable_ver" ]; then
+      NGINX_VERSION_SHA256=$(sed -n 's/^NGINX_STABLE_SHA256=//p' "$versions_env" | head -1)
+    fi
+  fi
+fi
+if [ -z "${NGINX_VERSION:-}" ]; then
+  echo "::error::NGINX_VERSION empty after reading $versions_env" >&2
+  exit 1
 fi
 
 if [ -n "${GITHUB_ENV:-}" ]; then
@@ -159,6 +185,16 @@ echo "make target:   ${make_target:-<default>}"
 tarball="nginx-${NGINX_VERSION}.tar.gz"
 test -f "$tarball" \
   || wget -q -O "$tarball" "https://nginx.org/download/nginx-${NGINX_VERSION}.tar.gz"
+
+# Verify against the pin. Also covers the test -f path above: a stale or
+# tampered tarball left in the workspace by an earlier run is caught here
+# rather than compiled. Empty digest = no pin for this version (an explicit
+# NGINX_VERSION override); say so instead of silently skipping the check.
+if [ -n "${NGINX_VERSION_SHA256:-}" ]; then
+  echo "${NGINX_VERSION_SHA256}  ${tarball}" | sha256sum -c -
+else
+  echo "warning: no sha256 pin for nginx ${NGINX_VERSION}; tarball unverified" >&2
+fi
 
 build_dir="nginx-${NGINX_VERSION}"
 if [ ! -d "$build_dir" ]; then
