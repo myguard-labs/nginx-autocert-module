@@ -304,9 +304,22 @@ printf '\nSee .github/workflows/nosuch.yml\n' >> README.md
 LINT_ONLY=docs-drift ci/linter/run-all.sh ; git checkout README.md
 
 # missing tool -> exit 2, never a silent skip
+# (bare directories in $PATH never contain the literal substring "shellcheck",
+# so filtering PATH entries by name leaves the binary reachable and proves
+# nothing -- build a symlink farm that excludes it instead)
+tmpd="$(mktemp -d)"
+for d in $(echo "$PATH" | tr ':' '\n'); do
+    [ -d "$d" ] || continue
+    for f in "$d"/*; do
+        [ -e "$f" ] || continue
+        b="$(basename "$f")"
+        [ "$b" = shellcheck ] && continue
+        [ -e "$tmpd/$b" ] || ln -s "$f" "$tmpd/$b" 2>/dev/null
+    done
+done
 printf '#!/bin/bash\necho ok\n' > _p.sh
-PATH="$(echo "$PATH" | tr : '\n' | grep -v shellcheck | paste -sd:)" \
-    LINT_ONLY=sh ci/linter/run-all.sh _p.sh ; rm _p.sh
+PATH="$tmpd" LINT_ONLY=sh ci/linter/run-all.sh _p.sh   # -> exit 2, shellcheck not found
+rm -f _p.sh; rm -rf "$tmpd"
 
 # the hook itself blocks the commit
 printf '#!/bin/bash\ncd /tmp/x\n' > _bad.sh && git add _bad.sh
