@@ -163,7 +163,7 @@ repos:
       # is exactly when a green-to-red flip reads as a real finding.
       - id: semgrep
         name: semgrep (gate on >=WARNING)
-        entry: semgrep scan --jobs=1 --config p/c --config p/security-audit
+        entry: semgrep scan --jobs=1 --metrics=off --config p/c --config p/security-audit
                --severity=WARNING --severity=ERROR --error
         language: system
         files: '^src/.*\.[ch]$'

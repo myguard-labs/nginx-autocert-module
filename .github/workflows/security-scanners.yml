@@ -1,4 +1,4 @@
-# sync-sha: 6a56936f00fb4308dc29d73297a8f4d6977d5f8d56b52109878213ad50fd3d45
+# sync-sha: f9a92865c9aa82462a6e2e6dc9afefd332e4f96d52528d463be237f45cb6855b
 name: Security scanners
 
 # Static / security scanners gate on every PR/push — flawfinder, clang-tidy
@@ -105,7 +105,11 @@ jobs:
           #
           # Status via PIPESTATUS[0] rather than pipefail so semgrep.log is
           # still written for "Upload reports" when the scan fails.
-          semgrep scan --config p/c --config p/security-audit \
+          #
+          # --jobs=1: correctness flag (io_uring/RLIMIT_MEMLOCK contention), not
+          # speed; see .pre-commit-config.yaml for the full rationale.
+          # --metrics=off: skip telemetry POST to semgrep.dev.
+          semgrep scan --jobs=1 --metrics=off --config p/c --config p/security-audit \
             --severity=WARNING --severity=ERROR --error \
             "$GITHUB_WORKSPACE/src/" 2>&1 | tee semgrep.log
           exit "${PIPESTATUS[0]}"
