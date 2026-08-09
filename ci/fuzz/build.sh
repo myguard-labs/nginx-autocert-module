@@ -37,6 +37,11 @@ mkdir -p "$OUT_DIR"
 bash "$FUZZ_DIR/extract_parser.sh"
 bash "$FUZZ_DIR/extract_http.sh"
 
+# fuzz.dict must cover every literal the parsers actually recognize, or the
+# fuzzer wastes time guessing tokens it could be handed directly. Fail the
+# build before wiring a stale dictionary into -dict=.
+bash "$FUZZ_DIR/check-dict-drift.sh"
+
 build_one() {
   target="$1"
   # shellcheck disable=SC2086
