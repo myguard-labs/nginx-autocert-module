@@ -1,4 +1,4 @@
-# sync-sha: 643967acd1be4f6e753f893f01adee2ce28100ab558f0f11d1767aa7837bbfcd
+# sync-sha: 50baf8a2081409875e3787bbbe7adc6437aa7a8aff01d8efa966b383c34ca741
 name: CI
 
 # Single entry point for the PR suite (skeleton standard, ci/PROMPT.md step 17).
@@ -69,6 +69,12 @@ jobs:
     permissions:
       contents: read
     uses: ./.github/workflows/security-scanners.yml
+
+  fuzzing:
+    name: Fuzzing
+    permissions:
+      contents: read
+    uses: ./.github/workflows/fuzzing.yml
 
   lint:
     name: Lint

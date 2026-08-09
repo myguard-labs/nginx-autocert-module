@@ -1,9 +1,17 @@
-# sync-sha: 4058edbb60c96f7d5a5d8f47d01f75fb4810f6b7742b4942429d75bb602b6577
+# sync-sha: 80e651d1ff5eb86cde85ee25c6bb8d18b8e31ac53a7a034189b8320592d4f32b
 name: Fuzzing
 
-# Manual fast fuzz regression — 30s/target on the JSON + HTTP + base64url ACME
-# parsers (+ fuzz.dict). PR/release coverage lives in ci-deep.yml so normal
-# pushes do not steal self-hosted runner lanes from Build & Test.
+# Fast fuzz regression — 30s/target on the JSON + HTTP + base64url ACME parsers
+# (+ fuzz.dict). Called by ci.yml on every PR, and dispatchable standalone.
+#
+# Deep coverage (14400s/target) lives in ci-deep.yml, on the release/schedule
+# path only. This member carries no `needs:`, so it runs in the first wave beside
+# the ~471-494s e2e critical path and adds nothing to the merge budget. Measured
+# 171s at 3 targets on run 31332902290 (the older 74s figure predates fuzz_b64).
+#
+# Was dispatch-only and called by nobody until step 48 (2026-08-09): its last
+# run was 2026-07-11 under a `pull_request:` trigger it no longer had, leaving a
+# month-stale green badge. A member reached by no caller never goes red.
 #
 # Action pins (keep in sync with build-test.yml header):
 # actions/checkout@v5        -> 93cb6efe18208431cddfb8368fd83d5badbf9bfd
@@ -15,6 +23,7 @@ env:
 
 on:
   workflow_dispatch: {}
+  workflow_call: {}
 
 concurrency:
   group: fuzzing-${{ github.workflow }}-${{ github.ref }}
@@ -44,17 +53,25 @@ jobs:
       - name: Run each target 30s
         run: |
           set -euo pipefail
-          cd fuzz
+          # build.sh puts only the BINARIES in $GITHUB_WORKSPACE/fuzz (the
+          # OSS-Fuzz $OUT convention); the corpora and fuzz.dict stay tracked in
+          # ci/fuzz. Resolve each from where it actually lives -- a bare
+          # `cd fuzz` finds the binaries but no corpus, which is what made this
+          # workflow fail the moment it was reconnected to CI (step 48).
+          BIN="$GITHUB_WORKSPACE/fuzz"
+          DATA="$GITHUB_WORKSPACE/ci/fuzz"
+          cd "$DATA"
           for t in json:corpus http:corpus_http b64:corpus_b64; do
             name=${t%%:*}; corp=${t##*:}
+            [ -d "$DATA/${corp}" ] || { echo "❌ corpus $DATA/${corp} missing"; exit 1; }
             echo "== fuzz_${name} (30s) =="
             set +e
-            "./fuzz_${name}" \
+            "$BIN/fuzz_${name}" \
               -max_total_time=30 \
-              -dict=fuzz.dict \
+              -dict="$DATA/fuzz.dict" \
               -print_final_stats=1 \
               -artifact_prefix="crash-${name}-" \
-              "${corp}/"
+              "$DATA/${corp}/"
             rc=$?
             set -e
             [ $rc -eq 0 ] || { echo "❌ fuzz_${name} crash (exit $rc)"; exit 1; }
