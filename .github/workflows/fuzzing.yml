@@ -1,4 +1,4 @@
-# sync-sha: b59d796bd3dad8d07d36419f65396f63d81555b9746b3d43ffc8f0067009306f
+# sync-sha: d2bdfda7f4091c8d8bebcfcca6115da09b53ce63d938a9460dd004f2a7b128ba
 name: Fuzzing
 
 # Fast fuzz regression — 30s/target on the JSON + HTTP + base64url ACME parsers
@@ -52,17 +52,25 @@ jobs:
       - name: Run each target 30s
         run: |
           set -euo pipefail
-          cd fuzz
+          # build.sh puts only the BINARIES in $GITHUB_WORKSPACE/fuzz (the
+          # OSS-Fuzz $OUT convention); the corpora and fuzz.dict stay tracked in
+          # ci/fuzz. Resolve each from where it actually lives -- a bare
+          # `cd fuzz` finds the binaries but no corpus, which is what made this
+          # workflow fail the moment it was reconnected to CI (step 48).
+          BIN="$GITHUB_WORKSPACE/fuzz"
+          DATA="$GITHUB_WORKSPACE/ci/fuzz"
+          cd "$DATA"
           for t in json:corpus http:corpus_http b64:corpus_b64; do
             name=${t%%:*}; corp=${t##*:}
+            [ -d "$DATA/${corp}" ] || { echo "❌ corpus $DATA/${corp} missing"; exit 1; }
             echo "== fuzz_${name} (30s) =="
             set +e
-            "./fuzz_${name}" \
+            "$BIN/fuzz_${name}" \
               -max_total_time=30 \
-              -dict=fuzz.dict \
+              -dict="$DATA/fuzz.dict" \
               -print_final_stats=1 \
               -artifact_prefix="crash-${name}-" \
-              "${corp}/"
+              "$DATA/${corp}/"
             rc=$?
             set -e
             [ $rc -eq 0 ] || { echo "❌ fuzz_${name} crash (exit $rc)"; exit 1; }
