@@ -118,12 +118,32 @@ test_timegm_vectors(void)
 
     /* boundary: year == 9999 is IN range (the guard is "> 9999", not ">="),
      * and must match libc timegm exactly -- catches a mutation that widens
-     * the rejection to ">= 9999". */
+     * the rejection to ">= 9999".
+     *
+     * The comparison alone is NOT a sufficient oracle: where time_t is too
+     * narrow to represent year 9999 (32-bit time_t), libc timegm also returns
+     * (time_t) -1, so a ">= 9999" mutation would compare -1 == -1 and PASS.
+     * Require the libc reference to be representable before asserting the
+     * match; skip explicitly otherwise, rather than assert a tautology. */
     memset(&tm, 0, sizeof(tm));
     tm.tm_year = 9999 - 1900;
     tm.tm_mon = 11; tm.tm_mday = 31; tm.tm_hour = 23; tm.tm_min = 59; tm.tm_sec = 59;
-    CHECK(ngx_autocert_timegm(&tm) == timegm(&tm),
-          "timegm accepts year == 9999 (upper boundary is inclusive)");
+    {
+        struct tm  ref = tm;
+        time_t     libc_ref = timegm(&ref);
+
+        if (libc_ref == (time_t) -1) {
+            fprintf(stderr,
+                    "skip: year 9999 not representable in time_t "
+                    "(%zu-bit) -- boundary oracle would be a tautology\n",
+                    sizeof(time_t) * 8);
+        } else {
+            time_t  got = ngx_autocert_timegm(&tm);
+
+            CHECK(got != (time_t) -1 && got == libc_ref,
+                  "timegm accepts year == 9999 (upper boundary is inclusive)");
+        }
+    }
 }
 
 
