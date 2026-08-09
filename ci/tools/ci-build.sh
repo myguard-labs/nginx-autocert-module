@@ -170,8 +170,16 @@ fi
 
   configure_args=(
     --with-compat --with-debug --with-threads --with-http_ssl_module
-    --with-cc="ccache cc"
   )
+  # nginx's configure ignores a bare CC=, so --with-cc is the only way to get
+  # a warm ccache hit rate. Only pass it when ccache is actually on PATH:
+  # ci-deep.yml, asan.yml, valgrind.yml, security-scanners.yml and codeql.yml
+  # all call this script without .github/actions/setup and their apt-get
+  # lists do not install ccache, so an unconditional --with-cc="ccache cc"
+  # would make configure/make invoke a binary that does not exist.
+  if command -v ccache >/dev/null 2>&1; then
+    configure_args+=(--with-cc="ccache cc")
+  fi
   [ -n "$cc_opt" ] && configure_args+=(--with-cc-opt="$cc_opt")
   [ -n "$ld_opt" ] && configure_args+=(--with-ld-opt="$ld_opt")
   configure_args+=(--add-dynamic-module="$workspace")
