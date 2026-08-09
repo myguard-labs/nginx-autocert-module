@@ -1,0 +1,70 @@
+Changes with the nginx-autocert-module            unreleased
+
+    *) CI standardisation against nginx-skeleton-module. All CI material moved
+       under ci/, and ci.yml became the single pull_request entry point: the
+       other workflows are workflow_call members, so a PR asks for one run
+       rather than several independent ones. Members keep their push: and
+       schedule: triggers for direct coverage of master.
+
+    *) Ported the ci/linter framework and wired lint.yml into the suite: the
+       same lint-*.sh checkers run in the pre-commit hook and on the PR, so
+       local green predicts remote green instead of merely correlating with
+       it. The blocking set (LINT_ONLY) is a deliberate subset; a checker
+       joins it in the same change that makes it green, so the gate only
+       ratchets forward.
+
+    *) Added ci/linter/lint-python.sh. ci/linter/workflow_policy.py implements
+       the rule for five of the eleven checkers and had no checker of its own.
+       Rules are selected explicitly because ruff's default set omits F401 and
+       E402 -- a stray unused import passed a bare `ruff check`.
+
+    *) Added ci/tools/ci-build.sh as the single chokepoint for building nginx
+       plus the module, and adopted it in codeql.yml, security-scanners.yml
+       and ci-deep.yml.
+
+    *) Added a coverage build profile and ci/tools/coverage.sh, and verified
+       the coverage filter actually moves rather than reporting a constant.
+
+    *) Added a fuzz target for the base64url decode wrapper, a drift gate
+       holding fuzz.dict against the parser's literals, and a replay of every
+       past crash on each PR. fuzzing.yml had become orphaned from the merge
+       path and was reconnected; reconnecting it exposed and fixed a stale
+       corpus path.
+
+    *) Added an ASan/UBSan soak workflow (asan.yml) on a weekly schedule, and
+       fixed the two non-defects that had kept it red since it was written.
+       The soak now detects a sanitizer report wherever it lands: a
+       sanitizer's log_path is not a contract, and GCC's UBSan wrote its
+       report into nginx's error.log rather than the configured path.
+
+    *) Added a sync-stamp gate over the .github/ files shared with the
+       skeleton, so an adopter can diff two repos and see exactly what
+       drifted.
+
+    *) Added workflow-policy checks for runner selection, port bands, trigger
+       cadence and secret declarations, each with fixture trees that must go
+       red.
+
+    *) Wired ccache into the nginx configure step. It had been installed and
+       configured but was never reaching the compiler, so the cache recorded
+       no hits at all.
+
+    *) Fixed a NULL-log segfault reached through the crypto unit tests, and
+       closed mutation-testing gaps at the length, depth and overflow
+       boundaries. A year-9999 boundary assertion compared two implementations
+       that both return (time_t) -1 on a narrow time_t, so it could not fail;
+       it now requires a representable reference.
+
+    *) Scoped e2e container reaping by GITHUB_RUN_ID so concurrent jobs cannot
+       kill each other's containers, and derived e2e port bands from the run
+       ID with the ceiling verified before anything binds.
+
+    *) CONTRIBUTING.md now tells a contributor to enable the pre-commit hook,
+       which is what makes the local and remote gates agree.
+
+
+Changes with the nginx-autocert-module 1.2.0                     11 Jul 2026
+
+    *) See the git history and the GitHub release notes for v1.2.0 and
+       earlier. This file starts at the CI standardisation above; it was not
+       maintained for the releases that precede it.
