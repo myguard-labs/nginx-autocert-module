@@ -1712,15 +1712,21 @@ ngx_autocert_order_download(ngx_autocert_order_t *order)
 static ngx_int_t
 ngx_autocert_order_validate_cert(ngx_autocert_order_t *order)
 {
-    BIO       *bio;
-    X509      *leaf, *x;
-    EVP_PKEY  *key;
-    ngx_int_t  rc = NGX_ERROR;
-    ngx_str_t  verify;
-    u_char     verify_buf[256];
+    BIO              *bio;
+    X509             *leaf, *x;
+    EVP_PKEY         *key;
+    X509_STORE       *store;
+    X509_STORE_CTX   *ctx;
+    STACK_OF(X509)   *untrusted;
+    ngx_int_t         rc = NGX_ERROR;
+    ngx_str_t         verify;
+    u_char            verify_buf[256];
 
     leaf = NULL;
     key = NULL;
+    store = NULL;
+    ctx = NULL;
+    untrusted = NULL;
 
     bio = BIO_new_mem_buf(order->cert_chain.data, (int) order->cert_chain.len);
     if (bio == NULL) {
@@ -1735,8 +1741,25 @@ ngx_autocert_order_validate_cert(ngx_autocert_order_t *order)
     }
 
     /* Drain the rest of the chain; only a clean end-of-data is acceptable, a
-     * malformed intermediate must fail validation (mirrors serve.c). */
+     * malformed intermediate must fail validation (mirrors serve.c). The
+     * intermediates are retained (not freed) when an issuance anchor is
+     * configured: X509_verify_cert needs them as untrusted chain-building
+     * material to reach the root. */
+    if (order->issuance_certificate.len != 0) {
+        untrusted = sk_X509_new_null();
+        if (untrusted == NULL) {
+            goto done;
+        }
+    }
+
     while ((x = PEM_read_bio_X509(bio, NULL, NULL, NULL)) != NULL) {
+        if (untrusted != NULL) {
+            if (sk_X509_push(untrusted, x) == 0) {
+                X509_free(x);
+                goto done;
+            }
+            continue;       /* owned by the stack now */
+        }
         X509_free(x);
     }
     if (ERR_GET_REASON(ERR_peek_last_error()) != PEM_R_NO_START_LINE) {
@@ -1801,9 +1824,75 @@ ngx_autocert_order_validate_cert(ngx_autocert_order_t *order)
         goto done;
     }
 
+    /*
+     * Defence in depth against a buggy or compromised CA: verify the chain to
+     * a configured trust anchor. Opt-in — with no anchor configured the check
+     * is skipped, because there is no safe default here. The transport anchor
+     * (autocert_ca_trusted_certificate) is deliberately NOT reused: it attests
+     * the CA's TLS endpoint, and a CA may legitimately serve its API under one
+     * root while signing end-entity certificates under another (Pebble does
+     * exactly this), so anchoring issuance on it breaks real deployments.
+     */
+    if (order->issuance_certificate.len != 0) {
+        store = X509_STORE_new();
+        if (store == NULL) {
+            goto done;
+        }
+
+        /* NUL-terminated by ngx_conf_full_name/str_slot; X509_STORE_load_locations
+         * takes a C string. */
+        if (X509_STORE_load_locations(store,
+                                      (char *) order->issuance_certificate.data,
+                                      NULL) != 1)
+        {
+            ngx_log_error(NGX_LOG_ERR, order->log, 0,
+                          "autocert: cannot load the issuance trust anchor "
+                          "\"%V\"", &order->issuance_certificate);
+            goto done;
+        }
+
+        ctx = X509_STORE_CTX_new();
+        if (ctx == NULL) {
+            goto done;
+        }
+
+        if (X509_STORE_CTX_init(ctx, store, leaf, untrusted) != 1) {
+            goto done;
+        }
+
+        /* Let the anchor itself terminate the chain. Without PARTIAL_CHAIN,
+         * OpenSSL insists on reaching a self-signed root that is IN the store,
+         * so pinning the issuing (intermediate) CA — the natural reading of
+         * this directive — fails with "unable to get issuer certificate" even
+         * though the chain is valid. With it, verification succeeds at any
+         * certificate present in the store, which is exactly the pin the
+         * operator asked for. Anchoring on a root still works unchanged. */
+        X509_STORE_CTX_set_flags(ctx, X509_V_FLAG_PARTIAL_CHAIN);
+
+        if (X509_verify_cert(ctx) != 1) {
+            int  err = X509_STORE_CTX_get_error(ctx);
+
+            ngx_log_error(NGX_LOG_ERR, order->log, 0,
+                          "autocert: downloaded chain for \"%V\" does not "
+                          "verify against \"%V\" (%d: %s)",
+                          &order->domain, &order->issuance_certificate,
+                          err, X509_verify_cert_error_string(err));
+            goto done;
+        }
+    }
+
     rc = NGX_OK;
 
 done:
+    if (ctx) {
+        X509_STORE_CTX_free(ctx);
+    }
+    if (store) {
+        X509_STORE_free(store);
+    }
+    if (untrusted) {
+        sk_X509_pop_free(untrusted, X509_free);
+    }
     if (key) {
         EVP_PKEY_free(key);
     }

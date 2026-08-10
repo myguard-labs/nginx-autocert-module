@@ -1454,6 +1454,7 @@ ngx_autocert_start_order_for(ngx_cycle_t *cycle, ngx_autocert_conf_t *acf,
     order->account = state->account;
     order->log = cycle->log;
     order->directory_url = state->entry->ca_conf.ca;
+    order->issuance_certificate = state->entry->ca_conf.issuance_certificate;
     order->domain.len = name->len;
     order->domain.data = ngx_pnalloc(pool, name->len);
     if (order->domain.data == NULL) {

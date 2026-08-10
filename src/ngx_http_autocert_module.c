@@ -246,6 +246,19 @@ static ngx_command_t  ngx_http_autocert_commands[] = {
       offsetof(ngx_http_autocert_srv_conf_t, ca_conf.ca_certificate),
       NULL },
 
+    /* Trust anchor for the ISSUED chain, checked in order_validate_cert().
+     * Deliberately separate from autocert_ca_trusted_certificate: that one
+     * anchors the CA's TLS endpoint, and a CA may serve its API under a
+     * different root than it signs certificates with. Unset = chain
+     * verification is skipped, preserving pre-1.3.0 behaviour. */
+
+    { ngx_string("autocert_ca_issuance_certificate"),
+      NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_CONF_TAKE1,
+      ngx_conf_set_str_slot,
+      NGX_HTTP_SRV_CONF_OFFSET,
+      offsetof(ngx_http_autocert_srv_conf_t, ca_conf.issuance_certificate),
+      NULL },
+
     /* M15: External Account Binding (RFC 8555 §7.3.4) for commercial CAs
      * (ZeroSSL, Sectigo, Google) that gate newAccount behind a CA-issued
      * key-id + HMAC key. Both-or-neither — enforced in init_main_conf. */
@@ -707,6 +720,10 @@ ngx_http_autocert_merge_srv_conf(ngx_conf_t *cf, void *parent, void *child)
             if (conf->ca_conf.ca_certificate.data == NULL) {
                 conf->ca_conf.ca_certificate = prev->ca_conf.ca_certificate;
             }
+            if (conf->ca_conf.issuance_certificate.data == NULL) {
+                conf->ca_conf.issuance_certificate =
+                                            prev->ca_conf.issuance_certificate;
+            }
             if (conf->ca_conf.eab_kid.data == NULL) {
                 conf->ca_conf.eab_kid = prev->ca_conf.eab_kid;
             }
@@ -770,6 +787,13 @@ ngx_http_autocert_resolve_ca_conf(ngx_conf_t *cf, ngx_autocert_ca_conf_t *cac)
 
     if (cac->ca_certificate.len != 0
         && ngx_conf_full_name(cf->cycle, &cac->ca_certificate, 1) != NGX_OK)
+    {
+        return NGX_ERROR;
+    }
+
+    if (cac->issuance_certificate.len != 0
+        && ngx_conf_full_name(cf->cycle, &cac->issuance_certificate, 1)
+           != NGX_OK)
     {
         return NGX_ERROR;
     }
@@ -850,6 +874,12 @@ ngx_http_autocert_ca_entry(ngx_conf_t *cf,
                 && ngx_strncmp(e[i].ca_conf.ca_certificate.data,
                                cac->ca_certificate.data,
                                cac->ca_certificate.len) != 0)
+            || e[i].ca_conf.issuance_certificate.len
+               != cac->issuance_certificate.len
+            || (cac->issuance_certificate.len != 0
+                && ngx_strncmp(e[i].ca_conf.issuance_certificate.data,
+                               cac->issuance_certificate.data,
+                               cac->issuance_certificate.len) != 0)
             || e[i].ca_conf.eab_kid.len != cac->eab_kid.len
             || (cac->eab_kid.len != 0
                 && ngx_strncmp(e[i].ca_conf.eab_kid.data, cac->eab_kid.data,
@@ -862,9 +892,10 @@ ngx_http_autocert_ca_entry(ngx_conf_t *cf,
         {
             ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
                 "autocert: CA \"%V\" is configured with conflicting "
-                "\"autocert_ca_trusted_certificate\" / \"autocert_eab_*\" across "
-                "servers; one CA URL must use one trust bundle and one EAB "
-                "credential", &cac->ca);
+                "\"autocert_ca_trusted_certificate\" / "
+                "\"autocert_ca_issuance_certificate\" / \"autocert_eab_*\" "
+                "across servers; one CA URL must use one trust bundle, one "
+                "issuance anchor and one EAB credential", &cac->ca);
             return NULL;
         }
 

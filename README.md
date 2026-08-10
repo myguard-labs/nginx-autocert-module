@@ -202,6 +202,7 @@ http {
         autocert_eab_kid       AbCdEf0123456789;  # http,server | default: (none)  (both EAB lines or neither)
         autocert_eab_hmac_key  bX9...base64url...; # http,server | default: (none)
         # autocert_ca_trusted_certificate /etc/ssl/internal-ca.pem;  # http,server | default: (none)  — only for a private CA
+        # autocert_ca_issuance_certificate /etc/ssl/issuing-ca.pem;  # http,server | default: (none)  — verify the ISSUED chain (not the TLS endpoint)
     }
 
     # =====================================================================
@@ -235,6 +236,7 @@ set an instance-wide default in `http{}` that each `server{}` may override.
 | `autocert_ca <url>` | http, server | LE production `https://acme-v02.api.letsencrypt.org/directory` | ACME directory URL to issue against. Distinct effective URLs become distinct CA groups. Mutually exclusive with `autocert_staging`. |
 | `autocert_staging on\|off` | http, server | `off` | Shorthand for the LE staging directory (`https://acme-staging-v02.api.letsencrypt.org/directory`). For CI; no production rate limits. Mutually exclusive with `autocert_ca`. |
 | `autocert_ca_trusted_certificate <file>` | http, server | (none) | PEM trust bundle verifying a private CA's TLS endpoint. CA-bound: a server that overrides the CA does **not** inherit it. Made absolute against the nginx prefix. |
+| `autocert_ca_issuance_certificate <file>` | http, server | (none) | PEM trust anchor the **issued certificate chain** must verify against, checked before a new cert can replace the live one. Defence in depth against a buggy or compromised CA. Unset = no chain verification (the default; the check is opt-in). **Not** the same as `autocert_ca_trusted_certificate` — that anchors the CA's TLS *endpoint*, and a CA may serve its API under one root while signing certificates under another, in which case pointing this at the transport bundle rejects every issuance. Point it at the CA's issuing certificate or its root; an intermediate is accepted as the terminating anchor. CA-bound; made absolute against the nginx prefix. |
 | `autocert_eab_kid <key-id>` | http, server | (none) | EAB key identifier ([RFC 8555 §7.3.4](https://datatracker.ietf.org/doc/html/rfc8555#section-7.3.4)) for CAs requiring External Account Binding. Both-or-neither with `autocert_eab_hmac_key`. CA-bound. |
 | `autocert_eab_hmac_key <b64url>` | http, server | (none) | EAB HMAC key (base64url). Paired with `autocert_eab_kid`. CA-bound. |
 | `autocert_store_path <path>` | http | `autocert` (→ `<prefix>/autocert`) | Root of the cert / account-key store. Relative paths resolve against the nginx prefix, not the CWD. |

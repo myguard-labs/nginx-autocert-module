@@ -127,6 +127,25 @@ for i in $(seq 1 30); do
 done
 docker cp "$PEBBLE_NAME:/test/certs/pebble.minica.pem" "$PREFIX/ca.pem"
 
+# ACCEPTANCE anchor for autocert_ca_issuance_certificate. Pebble mints a fresh
+# issuance root per run and serves it at /roots/0 -- deliberately NOT
+# pebble.minica.pem, which only signs its HTTPS interface. Pinning it here means
+# every issuance below must still SUCCEED with chain verification enabled; the
+# rejection side is covered by cert-validate-reject.sh's untrusted-chain case.
+# NOTE: /roots/0 is served on the MANAGEMENT port (15000), not the ACME port
+# (14000), where it 404s. It returns Pebble's SELF-SIGNED root (subject ==
+# issuer), so this case proves issuance still succeeds with verification on;
+# the intermediate-as-anchor (PARTIAL_CHAIN) path is covered by
+# cert-validate-reject.sh's intermediate-anchor case, which can control the
+# CA hierarchy directly.
+curl -ksf "https://127.0.0.1:${AC_PORT_15000:-15000}/roots/0" \
+    -o "$PREFIX/issuance-ca.pem" || true
+if [ ! -s "$PREFIX/issuance-ca.pem" ]; then
+    echo "::error::could not fetch Pebble's issuance root from /roots/0"
+    exit 1
+fi
+echo "✓ fetched Pebble issuance anchor ($(grep -c 'BEGIN CERTIFICATE' "$PREFIX/issuance-ca.pem") cert(s))"
+
 # HTTP_PORT must be reachable from the Pebble container at HOST_IP:HTTP_PORT for
 # the http-01 validation GET (autocert forces http-01 for runtime names, A5).
 cat > "$PREFIX/conf/nginx.conf" <<EOF
@@ -151,6 +170,7 @@ http {
     autocert_ca https://pebble:${AC_PORT_14000:-14000}/dir;
     autocert_resolver 127.0.0.1:${DNS_PORT};
     autocert_ca_trusted_certificate $PREFIX/ca.pem;
+    autocert_ca_issuance_certificate $PREFIX/issuance-ca.pem;
     autocert_store_path $PREFIX/store;
     autocert_challenge http-01;
     autocert_test_runtime_request ${RUNTIME_HOST};
