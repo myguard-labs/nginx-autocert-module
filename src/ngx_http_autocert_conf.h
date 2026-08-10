@@ -59,6 +59,13 @@ typedef struct {
     ngx_str_t    ca;                /* ACME directory URL */
     ngx_flag_t   staging;           /* autocert_staging on|off */
     ngx_str_t    ca_certificate;    /* PEM trust bundle to verify the CA, "" */
+    ngx_str_t    issuance_certificate;
+                                    /* PEM trust anchor for the ISSUED chain,
+                                     * "" = no chain verification. Distinct
+                                     * from ca_certificate, which anchors the
+                                     * CA's TLS endpoint: a CA may serve its
+                                     * API under one root and sign end-entity
+                                     * certificates under another. */
     ngx_str_t    eab_kid;           /* EAB key id (RFC 8555 §7.3.4), "" */
     ngx_str_t    eab_hmac_key;      /* base64url EAB HMAC key, "" */
 } ngx_autocert_ca_conf_t;

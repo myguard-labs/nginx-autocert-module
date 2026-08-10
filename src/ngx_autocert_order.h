@@ -52,6 +52,9 @@ struct ngx_autocert_order_s {
     ngx_autocert_account_t          *account;       /* live, registered */
     ngx_log_t                       *log;
     ngx_str_t                        directory_url;  /* ACME directory */
+    /* PEM trust anchor for the issued chain (autocert_ca_issuance_certificate).
+     * "" = skip chain verification. NOT the transport anchor. */
+    ngx_str_t                        issuance_certificate;
     ngx_str_t                        domain;         /* identifier (one) */
     ngx_shm_zone_t                  *challenge_zone; /* M5 token store */
     ngx_uint_t                       key_type;       /* cert key curve (M6b) */

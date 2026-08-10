@@ -1,8 +1,16 @@
-Changes with the nginx-autocert-module            unreleased
+Changes with the nginx-autocert-module 1.3.0                     10 Aug 2026
 
     *) License: the module is now BSD-2-Clause, matching nginx and angie. It
        was previously distributed under different terms; redistributors should
        read the new LICENSE file rather than assuming the old one carries over.
+
+    *) Feature: autocert_ca_issuance_certificate verifies the issued chain
+       against a trust anchor before it can replace the live certificate,
+       as defence in depth against a buggy or compromised CA. Opt-in: unset
+       (the default) keeps the previous behaviour. It is deliberately NOT
+       autocert_ca_trusted_certificate — that anchors the CA's TLS endpoint,
+       and a CA may sign certificates under a different root than it serves
+       its API under, so reusing it would reject every issuance.
 
     *) Feature: a runtime certificate-issuance API for other nginx modules. A
        named shared-memory zone (autocert_requests) lets a separate module ask

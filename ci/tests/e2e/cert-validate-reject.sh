@@ -2,7 +2,9 @@
 #
 # Negative test for pre-store certificate validation (order.c). Each CI matrix
 # case returns a leaf that must be refused before it can replace the store:
-# mismatched key, wrong DNS SAN, expired, or not-yet-valid.
+# mismatched key, wrong DNS SAN, expired, not-yet-valid, or (untrusted-chain)
+# a leaf that is valid in every other respect but does not chain to the
+# configured autocert_ca_issuance_certificate anchor.
 #
 # The mock CA returns, at /cert, a leaf signed over a DIFFERENT key than the one
 # in the order's CSR (simulating a buggy/malicious CA, or a corrupted response).
@@ -27,8 +29,9 @@ CA_PORT="${CA_PORT:-${AC_PORT_14081:-14081}}"
 DNS_NAME="ac-val-dns-$$"
 DNS_PORT="${DNS_PORT:-${AC_PORT_15581:-15581}}"
 CERT_CASE="${CERT_CASE:-key-mismatch}"
+ISSUANCE_ANCHOR=""
 case "$CERT_CASE" in
-    key-mismatch|wrong-san|expired|future) ;;
+    key-mismatch|wrong-san|expired|future|untrusted-chain) ;;
     *) echo "unknown CERT_CASE: $CERT_CASE"; exit 1 ;;
 esac
 NAME="validate-${CERT_CASE}.example.com"
@@ -49,6 +52,19 @@ mkdir -p "$PREFIX/logs" "$PREFIX/conf" "$PREFIX/store"
 openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 \
     -keyout "$PREFIX/ca-key.pem" -out "$PREFIX/ca.pem" -days 2 -nodes \
     -subj "/CN=$CA_HOST" -addext "subjectAltName=DNS:$CA_HOST" >/dev/null 2>&1
+
+# untrusted-chain: a SECOND, unrelated CA used as the configured issuance
+# anchor. The mock still signs the leaf with ca-key.pem, so the leaf is
+# perfectly valid in every other respect (right key, right SAN, in window) and
+# fails ONLY the chain-to-anchor check — which is what this case must isolate.
+# Deliberately distinct from the transport anchor: reusing that one is exactly
+# the conflation that breaks real private-CA issuance (see issues.md).
+if [ "$CERT_CASE" = "untrusted-chain" ]; then
+    openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 \
+        -keyout "$PREFIX/other-ca-key.pem" -out "$PREFIX/other-ca.pem" \
+        -days 2 -nodes -subj "/CN=other-ca.example.com" >/dev/null 2>&1
+    ISSUANCE_ANCHOR="    autocert_ca_issuance_certificate $PREFIX/other-ca.pem;"
+fi
 
 docker network ls >/dev/null
 docker run -d --name "$DNS_NAME" \
@@ -194,6 +210,7 @@ http {
     autocert_resolver 127.0.0.1:${DNS_PORT};
     autocert_resolver_timeout 5s;
     autocert_ca_trusted_certificate $PREFIX/ca.pem;
+${ISSUANCE_ANCHOR}
     autocert_store_path $PREFIX/store;
     server { listen ${AC_PORT_5002:-5002}; server_name ${NAME}; }
 }
