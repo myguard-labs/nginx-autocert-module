@@ -23,7 +23,7 @@ the new certificate is served on the very next TLS handshake. **Your existing
 with Angie's native `acme`).
 
 > 📖 New here? Start with the walkthrough:
-> **[Automatic TLS Certs, No Certbot](https://deb.myguard.nl/2026/06/nginx-autocert-module/)**
+> **[Automatic TLS Certs, No Certbot](https://deb.myguard.nl/articles/nginx-autocert-module/)**
 > on deb.myguard.nl.
 
 ---
@@ -683,7 +683,7 @@ collide on a port.
 
 ## See also
 
-- **[Automatic TLS Certs, No Certbot](https://deb.myguard.nl/2026/06/nginx-autocert-module/)**
+- **[Automatic TLS Certs, No Certbot](https://deb.myguard.nl/articles/nginx-autocert-module/)**
   — the walkthrough on deb.myguard.nl.
 - **[NGINX modules repository for Debian & Ubuntu](https://deb.myguard.nl/nginx-modules/)**
   — prebuilt packages.
