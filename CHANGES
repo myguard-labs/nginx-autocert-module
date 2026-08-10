@@ -10,7 +10,8 @@ Changes with the nginx-autocert-module 1.3.0                     10 Aug 2026
        (the default) keeps the previous behaviour. It is deliberately NOT
        autocert_ca_trusted_certificate — that anchors the CA's TLS endpoint,
        and a CA may sign certificates under a different root than it serves
-       its API under, so reusing it would reject every issuance.
+       its API under, in which case reusing it rejects every issuance. The
+       anchor may be the CA's root or its issuing intermediate.
 
     *) Feature: a runtime certificate-issuance API for other nginx modules. A
        named shared-memory zone (autocert_requests) lets a separate module ask

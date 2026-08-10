@@ -125,7 +125,7 @@ SCRIPTS=(
 
 # cert-validate-reject.sh exercises one rejection fixture per CERT_CASE; run all
 # four (matches the old per-case matrix). Always sudo (root-owned store).
-CERT_CASES=(key-mismatch expired future wrong-san untrusted-chain)
+CERT_CASES=(key-mismatch expired future wrong-san untrusted-chain intermediate-anchor)
 
 # max-port.sh sources this file purely to reuse PORT_BASES/SCRIPTS/CERT_CASES so
 # its port-budget ceiling can never drift from the real suite. Hand control back

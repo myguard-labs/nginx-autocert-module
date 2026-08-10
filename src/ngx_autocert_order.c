@@ -1860,6 +1860,15 @@ ngx_autocert_order_validate_cert(ngx_autocert_order_t *order)
             goto done;
         }
 
+        /* Let the anchor itself terminate the chain. Without PARTIAL_CHAIN,
+         * OpenSSL insists on reaching a self-signed root that is IN the store,
+         * so pinning the issuing (intermediate) CA — the natural reading of
+         * this directive — fails with "unable to get issuer certificate" even
+         * though the chain is valid. With it, verification succeeds at any
+         * certificate present in the store, which is exactly the pin the
+         * operator asked for. Anchoring on a root still works unchanged. */
+        X509_STORE_CTX_set_flags(ctx, X509_V_FLAG_PARTIAL_CHAIN);
+
         if (X509_verify_cert(ctx) != 1) {
             int  err = X509_STORE_CTX_get_error(ctx);
 

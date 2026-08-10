@@ -31,7 +31,7 @@ DNS_PORT="${DNS_PORT:-${AC_PORT_15581:-15581}}"
 CERT_CASE="${CERT_CASE:-key-mismatch}"
 ISSUANCE_ANCHOR=""
 case "$CERT_CASE" in
-    key-mismatch|wrong-san|expired|future|untrusted-chain) ;;
+    key-mismatch|wrong-san|expired|future|untrusted-chain|intermediate-anchor) ;;
     *) echo "unknown CERT_CASE: $CERT_CASE"; exit 1 ;;
 esac
 NAME="validate-${CERT_CASE}.example.com"
@@ -66,6 +66,26 @@ if [ "$CERT_CASE" = "untrusted-chain" ]; then
     ISSUANCE_ANCHOR="    autocert_ca_issuance_certificate $PREFIX/other-ca.pem;"
 fi
 
+# intermediate-anchor: an ACCEPT case (the only one in this script). A real
+# root -> intermediate -> leaf hierarchy, with the INTERMEDIATE pinned as the
+# issuance anchor and the root deliberately absent from the store. OpenSSL will
+# not stop at a non-self-signed anchor unless X509_V_FLAG_PARTIAL_CHAIN is set,
+# so without that flag this fails with "unable to get issuer certificate" even
+# though the chain is valid -- which is exactly what this case guards.
+if [ "$CERT_CASE" = "intermediate-anchor" ]; then
+    openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 \
+        -keyout "$PREFIX/root-key.pem" -out "$PREFIX/root.pem" -days 2 -nodes \
+        -subj "/CN=issuance-root.example.com" >/dev/null 2>&1
+    openssl req -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 \
+        -keyout "$PREFIX/int-key.pem" -out "$PREFIX/int.csr" -nodes \
+        -subj "/CN=issuance-int.example.com" >/dev/null 2>&1
+    openssl x509 -req -in "$PREFIX/int.csr" -CA "$PREFIX/root.pem" \
+        -CAkey "$PREFIX/root-key.pem" -CAcreateserial -out "$PREFIX/int.pem" \
+        -days 2 -extfile <(echo "basicConstraints=critical,CA:TRUE") \
+        >/dev/null 2>&1
+    ISSUANCE_ANCHOR="    autocert_ca_issuance_certificate $PREFIX/int.pem;"
+fi
+
 docker network ls >/dev/null
 docker run -d --name "$DNS_NAME" \
     -p "${DNS_PORT}":53/udp -p "${DNS_PORT}":53/tcp \
@@ -94,6 +114,19 @@ state = {"chal_done": False, "cert": None}
 def b64url_dec(s):
     return base64.urlsafe_b64decode(s + "=" * (-len(s) % 4))
 
+ISSUER_KEY = CA_KEY
+ISSUER_CERT = CA_CERT
+EXTRA_CHAIN = b""
+if CASE == "intermediate-anchor":
+    # Sign with the intermediate and ship it in the chain, so the module has the
+    # untrusted material to build leaf -> intermediate while only the
+    # intermediate is pinned. The root is never given to the module.
+    ISSUER_KEY = serialization.load_pem_private_key(
+        open("${PREFIX}/int-key.pem", "rb").read(), password=None)
+    ISSUER_CERT = x509.load_pem_x509_certificate(
+        open("${PREFIX}/int.pem", "rb").read())
+    EXTRA_CHAIN = open("${PREFIX}/int.pem", "rb").read()
+
 def bad_leaf(csr_der):
     csr = x509.load_der_x509_csr(csr_der)
     now = datetime.datetime.utcnow()
@@ -113,14 +146,14 @@ def bad_leaf(csr_der):
         not_after = now + datetime.timedelta(days=2)
     leaf = (x509.CertificateBuilder()
             .subject_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, name)]))
-            .issuer_name(CA_CERT.subject)
+            .issuer_name(ISSUER_CERT.subject)
             .public_key(key)
             .serial_number(x509.random_serial_number())
             .not_valid_before(not_before)
             .not_valid_after(not_after)
             .add_extension(x509.SubjectAlternativeName([x509.DNSName(name)]), False)
-            .sign(CA_KEY, hashes.SHA256()))
-    return leaf.public_bytes(serialization.Encoding.PEM)
+            .sign(ISSUER_KEY, hashes.SHA256()))
+    return leaf.public_bytes(serialization.Encoding.PEM) + EXTRA_CHAIN
 
 class H(BaseHTTPRequestHandler):
     def log_message(self, *a):
@@ -220,6 +253,33 @@ EOF
 "$SERVER_BIN" -p "$PREFIX" -c "$PREFIX/conf/nginx.conf"
 
 LOG="$PREFIX/logs/error.log"
+
+# The accept case: issuance must SUCCEED with the intermediate pinned. Asserted
+# on the stored artifact and the success log line, and explicitly on the absence
+# of a chain-verification rejection (which is how a missing PARTIAL_CHAIN
+# manifests).
+if [ "$CERT_CASE" = "intermediate-anchor" ]; then
+    echo "== waiting for issuance to SUCCEED against the pinned intermediate =="
+    for i in $(seq 1 60); do
+        if grep -q "certificate issued and stored for \"${NAME}\"" "$LOG"; then
+            break
+        fi
+        if grep -q "does not verify against" "$LOG"; then
+            echo "::error::chain verification rejected a VALID chain anchored on"
+            echo "::error::its issuing intermediate — X509_V_FLAG_PARTIAL_CHAIN missing?"
+            grep "does not verify against" "$LOG" | tail -2
+            exit 1
+        fi
+        sleep 0.5
+        [ "$i" = 60 ] && { echo "::error::no issuance completed"; grep autocert "$LOG" | tail -20; exit 1; }
+    done
+    [ -s "$PREFIX/store/${NAME}/fullchain.pem" ] \
+        || { echo "::error::success logged but no fullchain.pem stored"; exit 1; }
+    echo "✓ intermediate-anchor accepted: chain verified against the pinned intermediate"
+    echo "✓✓ issuance-anchor acceptance verified"
+    exit 0
+fi
+
 echo "== waiting for the ${CERT_CASE} validation rejection =="
 for i in $(seq 1 60); do
     if grep -q "is not usable" "$LOG"; then
