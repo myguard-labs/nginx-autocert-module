@@ -1,4 +1,4 @@
-# sync-sha: 50baf8a2081409875e3787bbbe7adc6437aa7a8aff01d8efa966b383c34ca741
+# sync-sha: 574cc19a64a366c05f577e75013e6adb552f9f40872d2402e5fd12a2d3f1b73f
 name: CI
 
 # Single entry point for the PR suite (skeleton standard, ci/PROMPT.md step 17).
@@ -43,7 +43,7 @@ name: CI
 
 on:
   pull_request:
-    branches: [master, autolabel]
+    branches: [master]
   workflow_dispatch: {}
 
 concurrency:
