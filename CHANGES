@@ -1,5 +1,54 @@
 Changes with the nginx-autocert-module            unreleased
 
+    *) License: the module is now BSD-2-Clause, matching nginx and angie. It
+       was previously distributed under different terms; redistributors should
+       read the new LICENSE file rather than assuming the old one carries over.
+
+    *) Feature: a runtime certificate-issuance API for other nginx modules. A
+       named shared-memory zone (autocert_requests) lets a separate module ask
+       for ACME certificates at runtime; autocert orders, renews, persists and
+       serves them. Inert unless a consumer module attaches to the zone. See
+       docs/API.md.
+
+    *) Feature: runtime issuance is provisioned by "autocert on" rather than by
+       the number of configured names. A label-driven gateway matching hosts
+       with a regex or catch-all server_name contributes zero issuable names at
+       config time, so the requests zone, the challenge zone with its :80
+       HTTP-01 handler, and the ACME account were all silently never created.
+
+    *) Feature: a cert_cb delegation hook for consumer modules. OpenSSL keeps
+       exactly one cert_cb per SSL_CTX and offers no getter to chain through, so
+       a second module installing its own cert_cb silently broke autocert's
+       serving: certificates still issued and landed in the store, but every
+       name was served the self-signed bootstrap certificate with nothing
+       logged.
+
+    *) Feature: idle-TTL garbage collection for the runtime registry (shm API
+       v2). The registry is a bounded 64-node table; a host learned at runtime
+       was never evicted, so a long-lived gateway churning more than 64 distinct
+       hosts wedged at the cap permanently.
+
+    *) Bugfix: an ordinary "nginx -s reload" discarded the shared-memory tree in
+       all three zones (requests, challenge, alpn). nginx's zone-reuse path
+       calls init() without setting shm.exists, which on Linux is always 0, so
+       every reload re-allocated the zone header and orphaned the rbtree.
+
+    *) Bugfix: a pre-planted FIFO at <store>/<seg>/.autocert-runtime wedged
+       worker 0 indefinitely. O_NOFOLLOW rejects a symlink but not a FIFO, and
+       opening a FIFO for writing blocks until a reader appears, stalling the
+       sole ACME driver event loop right after a successful runtime issuance.
+
+    *) Bugfix: IP literals are rejected on the runtime request path. IP
+       certificates (RFC 8738) are config-driven, but a dotted-quad is
+       LDH-clean, so an IPv4 literal passed the charset gate and would reach a
+       real ACME order.
+
+    *) Bugfix: activity stamping no longer discards the shared-memory layout
+       identity.
+
+    *) Change: the module now fails to start when nginx is built without SSL
+       support, instead of failing later at first use.
+
     *) CI standardisation against nginx-skeleton-module. All CI material moved
        under ci/, and ci.yml became the single pull_request entry point: the
        other workflows are workflow_call members, so a PR asks for one run
