@@ -1070,7 +1070,11 @@ test_gc(void)
 
     gc_find(zone, &idle_req)->last_seen  = ngx_time() - ttl - 10;
     gc_find(zone, &idle_iss)->last_seen  = ngx_time() - ttl - 10;
-    gc_find(zone, &idle_pend)->last_seen = ngx_time() - ttl - 10;
+
+    /* PENDING is protected for the TTL, not forever. Keep this one INSIDE the
+     * window: a genuinely in-flight order must not be evicted out from under
+     * its completion. The stuck case is exercised separately below. */
+    gc_find(zone, &idle_pend)->last_seen = ngx_time() - 1;
 
     out = ngx_array_create(pool, 8, sizeof(ngx_str_t));
     n = ngx_autocert_requests_gc(zone, ttl, pool, out);
@@ -1084,7 +1088,7 @@ test_gc(void)
           "gc: evicted hosts now read UNKNOWN");
     CHECK(ngx_autocert_requests_state(zone, &idle_pend)
               == NGX_AUTOCERT_REQ_PENDING,
-          "gc: idle PENDING survives (order in flight)");
+          "gc: in-flight PENDING inside the TTL survives");
     CHECK(ngx_autocert_requests_state(zone, &fresh)
               == NGX_AUTOCERT_REQ_REQUESTED,
           "gc: fresh node survives");
@@ -1094,6 +1098,31 @@ test_gc(void)
     CHECK(ngx_autocert_requests_ensure(zone, &idle_req)
               == NGX_AUTOCERT_REQ_REQUESTED,
           "gc: evicted host re-ensures as a fresh REQUESTED");
+
+    /*
+     * Regression: a PENDING node whose completion was LOST must age out.
+     *
+     * set_state() rejects every write while the zone carries the INACTIVE
+     * stamp, so an order failing during a consumer-only cycle records neither
+     * FAILED nor REQUESTED. Before this was fixed, gc() skipped PENDING
+     * unconditionally, so the node sat there forever: no disk marker for
+     * startup seeding to repair, and a reload reuses the zone, so only a full
+     * restart freed the name. Push it past the TTL and it must be collected.
+     */
+    (void) ngx_autocert_requests_ensure(zone, &idle_pend);
+    (void) ngx_autocert_requests_set_state(zone, &idle_pend,
+              NGX_AUTOCERT_REQ_PENDING, 0);
+    gc_find(zone, &idle_pend)->last_seen = ngx_time() - ttl - 10;
+
+    out = ngx_array_create(pool, 8, sizeof(ngx_str_t));
+    n = ngx_autocert_requests_gc(zone, ttl, pool, out);
+    CHECK(n == 1, "gc: stuck PENDING past the TTL is evicted");
+    CHECK(ngx_autocert_requests_state(zone, &idle_pend)
+              == NGX_AUTOCERT_REQ_UNKNOWN,
+          "gc: stranded PENDING host reads UNKNOWN after eviction");
+    CHECK(ngx_autocert_requests_ensure(zone, &idle_pend)
+              == NGX_AUTOCERT_REQ_REQUESTED,
+          "gc: the stranded host can be requested again (was stuck forever)");
 
     /* keep-alive path 1: an ensure() hit refreshes last_seen */
     rn = gc_find(zone, &fresh);

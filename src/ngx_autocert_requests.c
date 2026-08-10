@@ -698,13 +698,32 @@ ngx_autocert_requests_gc(ngx_shm_zone_t *shm_zone, time_t ttl,
         rn = (ngx_autocert_request_t *) node;
 
         /* PENDING = an order is in flight; its completion set_state() will
-         * re-stamp last_seen. Evicting it would orphan that completion. */
-        if (rn->state == NGX_AUTOCERT_REQ_PENDING) {
+         * re-stamp last_seen, so evicting a live one would orphan that
+         * completion. Protect it for the TTL, not forever: a completion can be
+         * lost for good, and then nothing ever clears the node.
+         *
+         * The way that happens in practice is a graceful disable. set_state()
+         * rejects every write while the zone carries the INACTIVE stamp, so an
+         * order that fails during a consumer-only cycle cannot record FAILED or
+         * REQUESTED. Re-enabling autocert leaves the node PENDING with no disk
+         * marker for startup seeding to repair, and an unconditional skip here
+         * meant that hostname could never be requested again short of a full
+         * restart (a reload reuses the zone).
+         *
+         * A real order is minutes; a node PENDING for a whole idle TTL has lost
+         * its completion, so age it out like any other. The cost of being wrong
+         * is one redundant re-request, against a permanently stuck name. */
+        if (now - rn->last_seen <= ttl) {
             continue;
         }
 
-        if (now - rn->last_seen <= ttl) {
-            continue;
+        if (rn->state == NGX_AUTOCERT_REQ_PENDING) {
+            ngx_log_error(NGX_LOG_WARN, ngx_cycle->log, 0,
+                          "autocert: evicting runtime request \"%*s\" stuck "
+                          "PENDING for %T seconds; its order completion was "
+                          "lost (graceful disable, or a worker died mid-order)",
+                          (size_t) rn->host_len, rn->host,
+                          (time_t) (now - rn->last_seen));
         }
 
         victims[nvictims++] = rn;
