@@ -46,6 +46,11 @@ Changes with the nginx-autocert-module            unreleased
     *) Bugfix: activity stamping no longer discards the shared-memory layout
        identity.
 
+    *) Bugfix: a runtime request left PENDING by a lost order completion is now
+       aged out by the idle-TTL GC instead of being skipped forever. Disabling
+       autocert while an order was in flight could strand that hostname until a
+       full restart, because a reload reuses the shared-memory zone.
+
     *) Change: the module now fails to start when nginx is built without SSL
        support, instead of failing later at first use.
 
