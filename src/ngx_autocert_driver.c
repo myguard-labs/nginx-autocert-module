@@ -2173,7 +2173,9 @@ ngx_autocert_runtime_marker_write(ngx_cycle_t *cycle, ngx_autocert_conf_t *acf,
 
     /* Only ever write into a regular file, and only one with a single link — a
      * hard link to someone else's file must not be truncated through this fd. */
-    if (fstat(fd, &st) == -1 || !S_ISREG(st.st_mode) || st.st_nlink != 1) {
+    if (ngx_autocert_fstat(fd, &st) == -1 || !S_ISREG(st.st_mode)
+        || st.st_nlink != 1)
+    {
         (void) ngx_autocert_close(fd);
         ngx_log_error(NGX_LOG_ERR, cycle->log, 0,
                       "autocert: A6 refusing non-regular runtime marker path "
@@ -2190,7 +2192,7 @@ ngx_autocert_runtime_marker_write(ngx_cycle_t *cycle, ngx_autocert_conf_t *acf,
         return;
     }
 
-    if (write(fd, host->data, host->len) != (ssize_t) host->len) {
+    if (ngx_autocert_write(fd, host->data, host->len) != (ssize_t) host->len) {
         ngx_log_error(NGX_LOG_ERR, cycle->log, ngx_errno,
                       "autocert: A6 short/failed write of runtime marker "
                       "for \"%V\"", host);

@@ -356,6 +356,19 @@ ngx_autocert_fstatat(int dfd, const char *name, struct stat *st, int flags)
 }
 
 
+/*
+ * fstat(2) on an already-open int fd from this family (ngx_autocert_open_file_path,
+ * ngx_autocert_openat_mode, ...). Kept distinct from ngx_autocert_fstatat above:
+ * that one stats a NAME relative to a pinned dir fd, this one stats the fd
+ * itself once it is already open — the two call sites never overlap.
+ */
+static ngx_inline int
+ngx_autocert_fstat(int fd, struct stat *st)
+{
+    return fstat(fd, st);
+}
+
+
 static ngx_inline ngx_int_t
 ngx_autocert_renameat2(int oldfd, const char *oldp, int newfd,
     const char *newp, unsigned int flags)
