@@ -222,9 +222,11 @@ typedef int  ngx_autocert_dirfd_t;
  * collapses distinctions the callers depend on — notably ERROR_SHARING_VIOLATION,
  * which must surface as EAGAIN so the lock path retries rather than failing hard.
  *
- * Defined in ngx_autocert_shared.h with the other shim bodies.
+ * Defined below with the other shim bodies. static ngx_inline, like every
+ * other body in this header: a non-static definition in a header included by
+ * six translation units is a duplicate-symbol link error at win32 link time.
  */
-int ngx_autocert_win32_errno(DWORD err);
+static ngx_inline int ngx_autocert_win32_errno(DWORD err);
 
 
 /*
@@ -490,7 +492,7 @@ ngx_autocert_win32_errno_from_ntstatus(NTSTATUS status)
  * which must surface as EAGAIN so the lock path retries rather than failing
  * hard.
  */
-int
+static ngx_inline int
 ngx_autocert_win32_errno(DWORD err)
 {
     switch (err) {
