@@ -66,18 +66,41 @@ AUTOCERT_DEPS="$ngx_addon_dir/src/ngx_autocert_driver.h \
                $ngx_addon_dir/src/ngx_autocert_requests.h \
                $ngx_addon_dir/src/ngx_http_autocert_crypto.h \
                $ngx_addon_dir/src/ngx_autocert_shared.h \
+               $ngx_addon_dir/src/ngx_autocert_win32.h \
                $ngx_addon_dir/src/ngx_http_autocert_conf.h"
+
+# Link libraries differ per platform, and the difference is not just spelling.
+#
+# On win32 there are no -l flags: MSVC's linker takes .lib filenames directly.
+# Two system libraries come with them that POSIX gets for free from libc:
+#   ws2_32.lib   - sockets. The ACME client opens its own connections to the CA
+#                  (ngx_autocert_acme.c), so this module pulls in the winsock
+#                  symbols itself rather than riding on nginx core's link line.
+#   advapi32.lib - the Win32 security API (SetNamedSecurityInfo and friends),
+#                  needed for the key-file ACL that replaces fchmod(0600).
+#
+# The names are also not fixed: an OpenSSL built with MSVC ships
+# libssl.lib/libcrypto.lib, but MinGW-w64 builds the -l form against
+# libssl.a/libcrypto.a. NGX_AUTOCERT_WIN32_SSL_LIBS lets a builder override the
+# whole SSL half without patching this file; only the two system libs, which are
+# spelled identically for both toolchains, are appended unconditionally.
+if [ "${NGX_PLATFORM:-}" = win32 ]; then
+    AUTOCERT_SSL_LIBS="${NGX_AUTOCERT_WIN32_SSL_LIBS:-libssl.lib libcrypto.lib}"
+    AUTOCERT_LIBS="$AUTOCERT_SSL_LIBS ws2_32.lib advapi32.lib"
+else
+    AUTOCERT_LIBS="-lssl -lcrypto"
+fi
 
 if test -n "$ngx_module_link"; then
     ngx_module_type=HTTP
     ngx_module_name=ngx_http_autocert_module
     ngx_module_srcs="$AUTOCERT_SRCS"
-    ngx_module_libs="-lssl -lcrypto"
+    ngx_module_libs="$AUTOCERT_LIBS"
     ngx_module_deps="$AUTOCERT_DEPS"
     . auto/module
 else
     HTTP_MODULES="$HTTP_MODULES ngx_http_autocert_module"
     NGX_ADDON_SRCS="$NGX_ADDON_SRCS $AUTOCERT_SRCS"
     NGX_ADDON_DEPS="$NGX_ADDON_DEPS $AUTOCERT_DEPS"
-    CORE_LIBS="$CORE_LIBS -lssl -lcrypto"
+    CORE_LIBS="$CORE_LIBS $AUTOCERT_LIBS"
 fi
