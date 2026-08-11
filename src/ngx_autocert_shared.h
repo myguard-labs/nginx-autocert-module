@@ -259,6 +259,59 @@ ngx_autocert_open_file_path(const char *path, int flags)
 
     return fd;
 }
+/*
+ * The dir-fd operation family. Every call site below takes a `dfd` that came
+ * from ngx_autocert_open_dir_path(), i.e. a directory whose every ancestor was
+ * pinned during the walk. Routing them through the seam means the win32 port
+ * (W5) touches this header instead of the four .c files.
+ *
+ * The flags parameters stay explicit rather than being folded into the helper:
+ * AT_REMOVEDIR and AT_SYMLINK_NOFOLLOW are load-bearing at their call sites,
+ * and a helper that silently picked one would be a security change disguised as
+ * a refactor.
+ */
+
+static ngx_inline int
+ngx_autocert_openat(int dfd, const char *name, int flags)
+{
+    return openat(dfd, name, flags);
+}
+
+
+/*
+ * O_CREAT variant. Split from the 3-argument form rather than made variadic:
+ * a variadic wrapper cannot portably forward its mode to openat(), and the
+ * win32 branch needs the creation mode as a distinct parameter anyway (it maps
+ * to a security descriptor, not to a mode_t).
+ */
+static ngx_inline int
+ngx_autocert_openat_mode(int dfd, const char *name, int flags, mode_t mode)
+{
+    return openat(dfd, name, flags, mode);
+}
+
+
+static ngx_inline int
+ngx_autocert_mkdirat(int dfd, const char *name, mode_t mode)
+{
+    return mkdirat(dfd, name, mode);
+}
+
+
+static ngx_inline int
+ngx_autocert_unlinkat(int dfd, const char *name, int flags)
+{
+    return unlinkat(dfd, name, flags);
+}
+
+
+static ngx_inline int
+ngx_autocert_fstatat(int dfd, const char *name, struct stat *st, int flags)
+{
+    return fstatat(dfd, name, st, flags);
+}
+
+
 static ngx_inline ngx_int_t
 ngx_autocert_renameat2(int oldfd, const char *oldp, int newfd,
     const char *newp, unsigned int flags)

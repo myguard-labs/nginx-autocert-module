@@ -186,13 +186,13 @@ ngx_autocert_mkdirat_secure(ngx_cycle_t *cycle, int pfd, const char *leaf)
     int          fd;
     struct stat  st;
 
-    if (mkdirat(pfd, leaf, 0700) == -1 && ngx_errno != NGX_EEXIST) {
+    if (ngx_autocert_mkdirat(pfd, leaf, 0700) == -1 && ngx_errno != NGX_EEXIST) {
         ngx_log_error(NGX_LOG_ERR, cycle->log, ngx_errno,
                       "autocert: mkdir(\"%s\") failed", leaf);
         return -1;
     }
 
-    fd = openat(pfd, leaf, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    fd = ngx_autocert_openat(pfd, leaf, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
     if (fd == -1) {
         ngx_log_error(NGX_LOG_ERR, cycle->log, ngx_errno,
                       "autocert: \"%s\" is not a directory", leaf);
@@ -278,14 +278,14 @@ ngx_autocert_prepare_account_key(ngx_cycle_t *cycle, ngx_autocert_conf_t *acf,
     /* Migrate <path>/account.key -> <path>/accounts/<ca_hash>/account.key,
      * both relative to pinned dir fds. RENAME_NOREPLACE never clobbers a key
      * that raced into the destination after our absence check. */
-    if (fstatat(cafd, "account.key", &st, AT_SYMLINK_NOFOLLOW) == -1) {
+    if (ngx_autocert_fstatat(cafd, "account.key", &st, AT_SYMLINK_NOFOLLOW) == -1) {
         if (ngx_errno != NGX_ENOENT) {
             /* unknown error — do NOT treat as "absent" and migrate over it */
             ngx_log_error(NGX_LOG_WARN, cycle->log, ngx_errno,
                           "autocert: stat(\"%s\") failed; skipping account-key "
                           "migration", key_path);
 
-        } else if (fstatat(bfd, "account.key", &st, AT_SYMLINK_NOFOLLOW) == 0) {
+        } else if (ngx_autocert_fstatat(bfd, "account.key", &st, AT_SYMLINK_NOFOLLOW) == 0) {
             /* new key absent + legacy key present: migrate atomically, once. */
             ngx_int_t  rc;
 
@@ -2149,7 +2149,7 @@ ngx_autocert_runtime_marker_write(ngx_cycle_t *cycle, ngx_autocert_conf_t *acf,
      * would let a hostile leaf be truncated before we established it is a regular
      * file. We open, verify the type, and only then ftruncate the pinned fd.
      */
-    fd = openat(dfd, NGX_AUTOCERT_RUNTIME_MARKER,
+    fd = ngx_autocert_openat_mode(dfd, NGX_AUTOCERT_RUNTIME_MARKER,
                 O_WRONLY | O_CREAT | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC, 0644);
     (void) close(dfd);
     if (fd == -1) {
@@ -2221,7 +2221,7 @@ ngx_autocert_runtime_marker_remove(ngx_cycle_t *cycle,
         return;                 /* no per-host dir => no marker to remove */
     }
 
-    if (unlinkat(dfd, NGX_AUTOCERT_RUNTIME_MARKER, 0) == -1
+    if (ngx_autocert_unlinkat(dfd, NGX_AUTOCERT_RUNTIME_MARKER, 0) == -1
         && ngx_errno != NGX_ENOENT)
     {
         ngx_log_error(NGX_LOG_WARN, cycle->log, ngx_errno,
@@ -2309,7 +2309,7 @@ ngx_autocert_runtime_seed(ngx_cycle_t *cycle)
 
         /* O_NOFOLLOW: a symlinked entry can't be used to read a marker from
          * outside the pinned store dir. Non-directory entries fail harmlessly. */
-        dfd = openat(cfd, de->d_name,
+        dfd = ngx_autocert_openat(cfd, de->d_name,
                      O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
         if (dfd == -1) {
             continue;
@@ -2324,7 +2324,7 @@ ngx_autocert_runtime_seed(ngx_cycle_t *cycle)
          * type check is the actual gate, O_NONBLOCK just removes the hang
          * as a possibility even before that check runs).
          */
-        mfd = openat(dfd, NGX_AUTOCERT_RUNTIME_MARKER,
+        mfd = ngx_autocert_openat(dfd, NGX_AUTOCERT_RUNTIME_MARKER,
                      O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
         if (mfd == -1) {
             (void) close(dfd);
@@ -2434,7 +2434,7 @@ ngx_autocert_driver_trylock(ngx_cycle_t *cycle)
         return NGX_ERROR;
     }
 
-    ngx_autocert_lock_fd = openat(bfd, ".driver.lock",
+    ngx_autocert_lock_fd = ngx_autocert_openat_mode(bfd, ".driver.lock",
                                   O_RDWR | O_CREAT | O_NOFOLLOW | O_CLOEXEC,
                                   0600);
     (void) close(bfd);

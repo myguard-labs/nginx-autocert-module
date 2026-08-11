@@ -6,6 +6,7 @@
  * handler(NGX_ERROR).
  */
 
+#include "ngx_autocert_shared.h"
 #include "ngx_autocert_account.h"
 #include "ngx_autocert_json.h"
 #include "ngx_http_autocert_crypto.h"
@@ -99,7 +100,7 @@ ngx_autocert_account_open_keydir(ngx_autocert_account_t *acct,
         }
 
         *slash = '\0';                  /* temporarily isolate this component */
-        nfd = openat(dfd, (char *) comp,
+        nfd = ngx_autocert_openat(dfd, (char *) comp,
                      O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
         {
             ngx_err_t  err = ngx_errno;
@@ -212,7 +213,7 @@ ngx_autocert_account_load_key(ngx_autocert_account_t *acct)
     if (dfd == -1) {
         return NGX_ERROR;
     }
-    file.fd = openat(dfd, leaf, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+    file.fd = ngx_autocert_openat(dfd, leaf, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
 
     if (file.fd == NGX_INVALID_FILE) {
         ngx_err_t  err = ngx_errno;     /* close(dfd) below must not clobber it */
@@ -371,7 +372,7 @@ ngx_autocert_account_save_key(ngx_autocert_account_t *acct, int dfd,
      * only reached when the load open returned ENOENT, so the file should not
      * exist; if it now does (race) we bail rather than overwrite.
      */
-    fd = openat(dfd, leaf,
+    fd = ngx_autocert_openat_mode(dfd, leaf,
                 O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
     if (fd == NGX_INVALID_FILE) {
         ngx_log_error(NGX_LOG_ERR, acct->log, ngx_errno,
@@ -391,7 +392,7 @@ ngx_autocert_account_save_key(ngx_autocert_account_t *acct, int dfd,
                           "autocert: write account key \"%V\" failed",
                           &acct->key_path);
             ngx_close_file(fd);
-            (void) unlinkat(dfd, leaf, 0);                /* no partial key */
+            (void) ngx_autocert_unlinkat(dfd, leaf, 0);                /* no partial key */
             return NGX_ERROR;
         }
         off += (size_t) n;
@@ -408,7 +409,7 @@ ngx_autocert_account_save_key(ngx_autocert_account_t *acct, int dfd,
                       "autocert: fsync account key \"%V\" failed",
                       &acct->key_path);
         ngx_close_file(fd);
-        (void) unlinkat(dfd, leaf, 0);
+        (void) ngx_autocert_unlinkat(dfd, leaf, 0);
         return NGX_ERROR;
     }
 
@@ -416,7 +417,7 @@ ngx_autocert_account_save_key(ngx_autocert_account_t *acct, int dfd,
         ngx_log_error(NGX_LOG_ERR, acct->log, ngx_errno,
                       "autocert: close account key \"%V\" failed",
                       &acct->key_path);
-        (void) unlinkat(dfd, leaf, 0);
+        (void) ngx_autocert_unlinkat(dfd, leaf, 0);
         return NGX_ERROR;
     }
 
