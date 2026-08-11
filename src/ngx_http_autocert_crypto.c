@@ -1222,7 +1222,7 @@ ngx_http_autocert_cert_not_after(const char *path, time_t *out, int *key_id,
 
     bio = BIO_new_fd(fd, BIO_CLOSE);        /* BIO owns + closes fd */
     if (bio == NULL) {
-        (void) close(fd);
+        (void) ngx_autocert_close(fd);
         return NGX_ERROR;
     }
 

@@ -108,7 +108,7 @@ ngx_autocert_account_open_keydir(ngx_autocert_account_t *acct,
         {
             ngx_err_t  err = ngx_errno;
             *slash = '/';               /* restore key_path before any return */
-            (void) close(dfd);
+            (void) ngx_autocert_close(dfd);
             if (nfd == -1) {
                 ngx_log_error(NGX_LOG_ERR, acct->log, err,
                               "autocert: open key dir component failed");
@@ -222,7 +222,7 @@ ngx_autocert_account_load_key(ngx_autocert_account_t *acct)
         ngx_err_t  err = ngx_errno;     /* close(dfd) below must not clobber it */
 
         if (err != NGX_ENOENT) {
-            (void) close(dfd);
+            (void) ngx_autocert_close(dfd);
             ngx_log_error(NGX_LOG_ERR, acct->log, err,
                           "autocert: open account key \"%V\" failed",
                           &acct->key_path);
@@ -235,22 +235,22 @@ ngx_autocert_account_load_key(ngx_autocert_account_t *acct)
                        "(key_type %ui)", &acct->key_path, acct->key_type);
         acct->key = ngx_http_autocert_key_generate(acct->key_type);
         if (acct->key == NULL) {
-            (void) close(dfd);
+            (void) ngx_autocert_close(dfd);
             ngx_log_error(NGX_LOG_ERR, acct->log, 0,
                           "autocert: account key generation failed");
             return NGX_ERROR;
         }
         if (ngx_autocert_account_save_key(acct, dfd, leaf) != NGX_OK) {
-            (void) close(dfd);
+            (void) ngx_autocert_close(dfd);
             ngx_http_autocert_key_free(acct->key);
             acct->key = NULL;
             return NGX_ERROR;
         }
-        (void) close(dfd);
+        (void) ngx_autocert_close(dfd);
         return NGX_OK;
     }
 
-    (void) close(dfd);
+    (void) ngx_autocert_close(dfd);
 
     /* present -> read whole file, parse PEM */
     {

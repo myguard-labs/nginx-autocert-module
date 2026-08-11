@@ -123,6 +123,23 @@ ngx_int_t ngx_autocert_get_conf(ngx_cycle_t *cycle, ngx_autocert_conf_t *out);
 
 
 /*
+ * ngx_autocert_close/read/write/ftruncate/geteuid — POSIX side. The win32
+ * side is defined in ngx_autocert_win32.h on the MSVCRT int-fd API (_close,
+ * _read, _write, _chsize_s); see that file's W7 comment for why the fd stays
+ * a plain CRT int rather than a HANDLE. Defined here as thin macros to the
+ * POSIX call so every call site goes through one shim spelling regardless of
+ * platform, with POSIX object code unchanged.
+ */
+#if !(NGX_WIN32)
+#define ngx_autocert_close(fd)          close(fd)
+#define ngx_autocert_read(fd, b, n)     read(fd, b, n)
+#define ngx_autocert_write(fd, b, n)    write(fd, b, n)
+#define ngx_autocert_ftruncate(fd, len) ftruncate(fd, len)
+#define ngx_autocert_geteuid()          geteuid()
+#endif
+
+
+/*
  * renameat2(2) wrapper, shared by the store commit (order.c) and the account-key
  * migration (driver.c) — both fd-pinned, security-sensitive renames that must
  * not drift. Called via syscall() so the build needs no glibc renameat2 wrapper.
@@ -188,7 +205,7 @@ ngx_autocert_open_dir_path(const char *path, ngx_uint_t create,
             || len >= sizeof(name))
         {
             err = (len >= sizeof(name)) ? ENAMETOOLONG : EINVAL;
-            (void) close(dfd);
+            (void) ngx_autocert_close(dfd);
             errno = err;
             return -1;
         }
@@ -200,7 +217,7 @@ ngx_autocert_open_dir_path(const char *path, ngx_uint_t create,
         if (nfd == -1 && create && errno == ENOENT) {
             if (mkdirat(dfd, name, mode) == -1 && errno != EEXIST) {
                 err = errno;
-                (void) close(dfd);
+                (void) ngx_autocert_close(dfd);
                 errno = err;
                 return -1;
             }
@@ -209,12 +226,12 @@ ngx_autocert_open_dir_path(const char *path, ngx_uint_t create,
         }
         if (nfd == -1) {
             err = errno;
-            (void) close(dfd);
+            (void) ngx_autocert_close(dfd);
             errno = err;
             return -1;
         }
 
-        (void) close(dfd);
+        (void) ngx_autocert_close(dfd);
         dfd = nfd;
         p = (*q == '/') ? q + 1 : q;
     }
@@ -269,7 +286,7 @@ ngx_autocert_open_file_path(const char *path, int flags)
         || (leaf[0] == '.' && leaf[1] == '.' && leaf[2] == '\0'))
     {
         if (dfd != -1) {
-            (void) close(dfd);
+            (void) ngx_autocert_close(dfd);
         }
         errno = EINVAL;
         return -1;
@@ -280,7 +297,7 @@ ngx_autocert_open_file_path(const char *path, int flags)
 
     fd = openat(dfd, leaf, flags | O_NOFOLLOW | O_CLOEXEC);
     err = errno;
-    (void) close(dfd);
+    (void) ngx_autocert_close(dfd);
     errno = err;
 
     return fd;
