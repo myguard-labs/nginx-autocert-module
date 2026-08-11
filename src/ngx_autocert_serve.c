@@ -23,6 +23,7 @@
 #include <openssl/x509v3.h>
 
 #include <fcntl.h>
+#include <sys/stat.h>
 
 
 /*
@@ -1057,8 +1058,8 @@ ngx_http_autocert_cache_reload(ngx_autocert_cert_t *c, ngx_uint_t slot,
     size_t             chain_leaf_len = ngx_strlen(chain_leaf);
     size_t             key_leaf_len = ngx_strlen(key_leaf);
     ngx_str_t          chain_pem, key_pem, seg;
-    ngx_file_info_t    fi;
-    ngx_fd_t           fd;
+    struct stat        st;
+    int                fd;
     BIO               *bio = NULL;
     X509              *leaf = NULL, *x;
     STACK_OF(X509)    *chain = NULL;
@@ -1122,19 +1123,19 @@ ngx_http_autocert_cache_reload(ngx_autocert_cert_t *c, ngx_uint_t slot,
     /* Pin every store-path component before inspecting the certificate. A plain
      * stat(path) would still follow an attacker-planted ancestor symlink. */
     fd = ngx_autocert_open_file_path((const char *) chain_path, O_RDONLY);
-    if (fd == NGX_INVALID_FILE) {
+    if (fd == -1) {
         ngx_log_debug2(NGX_LOG_DEBUG_HTTP, log, ngx_errno,
                        "autocert: no stored fullchain for \"%V\" (slot %ui)",
                        host, slot);
         return NGX_ERROR;                 /* this variant not on disk -> skip */
     }
-    if (ngx_fd_info(fd, &fi) == NGX_FILE_ERROR) {
-        ngx_close_file(fd);
+    if (ngx_autocert_fstat(fd, &st) == -1) {
+        ngx_autocert_close(fd);
         return NGX_ERROR;
     }
-    ngx_close_file(fd);
+    ngx_autocert_close(fd);
 
-    if (sl->mtime == ngx_file_mtime(&fi)) {
+    if (sl->mtime == st.st_mtime) {
         ngx_log_debug1(NGX_LOG_DEBUG_HTTP, log, 0,
                        "autocert: stored cert for \"%V\" unchanged", host);
         return NGX_OK;                    /* unchanged */
@@ -1142,7 +1143,7 @@ ngx_http_autocert_cache_reload(ngx_autocert_cert_t *c, ngx_uint_t slot,
 
     ngx_log_debug2(NGX_LOG_DEBUG_HTTP, log, 0,
                    "autocert: reloading stored cert for \"%V\" mtime:%T",
-                   host, ngx_file_mtime(&fi));
+                   host, st.st_mtime);
 
     /* Read both PEMs into a scratch pool we destroy before returning. */
     tmp = ngx_create_pool(4096, log);
@@ -1271,7 +1272,7 @@ ngx_http_autocert_cache_reload(ngx_autocert_cert_t *c, ngx_uint_t slot,
     sl->cert = leaf;
     sl->chain = chain;
     sl->key = key;
-    sl->mtime = ngx_file_mtime(&fi);
+    sl->mtime = st.st_mtime;
 
     leaf = NULL;                          /* ownership transferred */
     chain = NULL;
@@ -1306,8 +1307,8 @@ static ngx_int_t
 ngx_http_autocert_read_file(ngx_pool_t *pool, u_char *path, ngx_str_t *out,
     time_t *mtime)
 {
-    ngx_fd_t         fd;
-    ngx_file_info_t  fi;
+    int              fd;
+    struct stat      st;
     ssize_t          n;
     off_t            fsize;
     size_t           size;
@@ -1315,12 +1316,12 @@ ngx_http_autocert_read_file(ngx_pool_t *pool, u_char *path, ngx_str_t *out,
 
     /* Pin every ancestor and the final leaf before reading. */
     fd = ngx_autocert_open_file_path((const char *) path, O_RDONLY);
-    if (fd == NGX_INVALID_FILE) {
+    if (fd == -1) {
         return NGX_ERROR;
     }
 
-    if (ngx_fd_info(fd, &fi) == NGX_FILE_ERROR) {
-        ngx_close_file(fd);
+    if (ngx_autocert_fstat(fd, &st) == -1) {
+        ngx_autocert_close(fd);
         return NGX_ERROR;
     }
 
@@ -1329,21 +1330,21 @@ ngx_http_autocert_read_file(ngx_pool_t *pool, u_char *path, ngx_str_t *out,
      * build could otherwise wrap a huge off_t below the cap. A PEM cert/key
      * over ~1 MB is never legitimate.
      */
-    fsize = ngx_file_size(&fi);
+    fsize = st.st_size;
     if (fsize <= 0 || fsize > 1024 * 1024) {
-        ngx_close_file(fd);
+        ngx_autocert_close(fd);
         return NGX_ERROR;
     }
     size = (size_t) fsize;
 
     buf = ngx_pnalloc(pool, size);
     if (buf == NULL) {
-        ngx_close_file(fd);
+        ngx_autocert_close(fd);
         return NGX_ERROR;
     }
 
-    n = ngx_read_fd(fd, buf, size);
-    ngx_close_file(fd);
+    n = ngx_autocert_read(fd, buf, size);
+    ngx_autocert_close(fd);
 
     if (n != (ssize_t) size) {
         return NGX_ERROR;
@@ -1353,7 +1354,7 @@ ngx_http_autocert_read_file(ngx_pool_t *pool, u_char *path, ngx_str_t *out,
     out->len = size;
 
     if (mtime != NULL) {
-        *mtime = ngx_file_mtime(&fi);
+        *mtime = st.st_mtime;
     }
 
     return NGX_OK;

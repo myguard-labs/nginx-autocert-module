@@ -194,17 +194,14 @@ ngx_autocert_account_register(ngx_autocert_account_t *acct)
 static ngx_int_t
 ngx_autocert_account_load_key(ngx_autocert_account_t *acct)
 {
-    ngx_file_t   file;
+    int          fd;
     ngx_str_t    pem;
     ssize_t      n;
+    size_t       off;
     ngx_int_t    rc;
 
     int          dfd;
     const char  *leaf;
-
-    ngx_memzero(&file, sizeof(ngx_file_t));
-    file.name = acct->key_path;
-    file.log = acct->log;
 
     /* TOCTOU: pin the parent dir (full chain walked component-by-component),
      * open the leaf relative to it. O_NOFOLLOW on every component + the leaf:
@@ -216,9 +213,9 @@ ngx_autocert_account_load_key(ngx_autocert_account_t *acct)
     if (dfd == -1) {
         return NGX_ERROR;
     }
-    file.fd = ngx_autocert_openat(dfd, leaf, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+    fd = ngx_autocert_openat(dfd, leaf, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
 
-    if (file.fd == NGX_INVALID_FILE) {
+    if (fd == -1) {
         ngx_err_t  err = ngx_errno;     /* close(dfd) below must not clobber it */
 
         if (err != NGX_ENOENT) {
@@ -254,53 +251,67 @@ ngx_autocert_account_load_key(ngx_autocert_account_t *acct)
 
     /* present -> read whole file, parse PEM */
     {
-        ngx_file_info_t  fi;
+        struct stat  st;
 
-        if (ngx_fd_info(file.fd, &fi) == NGX_FILE_ERROR
-            || ngx_file_size(&fi) <= 0
-            || ngx_file_size(&fi) > 64 * 1024)
+        if (ngx_autocert_fstat(fd, &st) == -1
+            || st.st_size <= 0
+            || st.st_size > 64 * 1024)
         {
             ngx_log_error(NGX_LOG_ERR, acct->log, 0,
                           "autocert: account key \"%V\" bad size",
                           &acct->key_path);
-            ngx_close_file(file.fd);
+            ngx_autocert_close(fd);
             return NGX_ERROR;
         }
 
         /* Must be a plain file owned tightly: reject anything with group/other
          * permission bits set (the private key must stay 0600). */
-        if (!S_ISREG(fi.st_mode)) {
+        if (!S_ISREG(st.st_mode)) {
             ngx_log_error(NGX_LOG_ERR, acct->log, 0,
                           "autocert: account key \"%V\" is not a regular file",
                           &acct->key_path);
-            ngx_close_file(file.fd);
+            ngx_autocert_close(fd);
             return NGX_ERROR;
         }
-        if (fi.st_mode & (S_IRWXG | S_IRWXO)) {
+        if (st.st_mode & (S_IRWXG | S_IRWXO)) {
             ngx_log_error(NGX_LOG_ERR, acct->log, 0,
                           "autocert: account key \"%V\" has group/other "
                           "permissions (must be 0600)", &acct->key_path);
-            ngx_close_file(file.fd);
+            ngx_autocert_close(fd);
             return NGX_ERROR;
         }
-        if (fi.st_uid != geteuid()) {
+        if (st.st_uid != ngx_autocert_geteuid()) {
             ngx_log_error(NGX_LOG_ERR, acct->log, 0,
                           "autocert: account key \"%V\" is not owned by "
                           "the helper user", &acct->key_path);
-            ngx_close_file(file.fd);
+            ngx_autocert_close(fd);
             return NGX_ERROR;
         }
-        pem.len = (size_t) ngx_file_size(&fi);
+        pem.len = (size_t) st.st_size;
     }
 
     pem.data = ngx_pnalloc(acct->pool, pem.len);
     if (pem.data == NULL) {
-        ngx_close_file(file.fd);
+        ngx_autocert_close(fd);
         return NGX_ERROR;
     }
 
-    n = ngx_read_file(&file, pem.data, pem.len, 0);
-    ngx_close_file(file.fd);
+    for (off = 0; off < pem.len; /* void */) {
+        n = ngx_autocert_read(fd, pem.data + off, pem.len - off);
+
+        if (n < 0) {
+            if (ngx_autocert_err_is_intr(ngx_errno)) {
+                continue;
+            }
+            break;
+        }
+        if (n == 0) {
+            break;                    /* short read -> length mismatch below */
+        }
+        off += (size_t) n;
+    }
+    n = (ssize_t) off;
+    ngx_autocert_close(fd);
 
     ngx_log_debug2(NGX_LOG_DEBUG_CORE, acct->log, 0,
                    "autocert: read account key PEM from \"%V\", %z bytes",
@@ -357,7 +368,7 @@ ngx_autocert_account_save_key(ngx_autocert_account_t *acct, int dfd,
     const char *leaf)
 {
     ngx_str_t    pem;
-    ngx_fd_t     fd;
+    int          fd;
     size_t       off;
 
     if (ngx_http_autocert_key_to_pem(acct->pool, acct->key, &pem) != NGX_OK) {
@@ -377,7 +388,7 @@ ngx_autocert_account_save_key(ngx_autocert_account_t *acct, int dfd,
      */
     fd = ngx_autocert_openat_mode(dfd, leaf,
                 O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
-    if (fd == NGX_INVALID_FILE) {
+    if (fd == -1) {
         ngx_log_error(NGX_LOG_ERR, acct->log, ngx_errno,
                       "autocert: create account key \"%V\" failed",
                       &acct->key_path);
@@ -385,7 +396,7 @@ ngx_autocert_account_save_key(ngx_autocert_account_t *acct, int dfd,
     }
 
     for (off = 0; off < pem.len; /* void */) {
-        ssize_t  n = write(fd, pem.data + off, pem.len - off);
+        ssize_t  n = ngx_autocert_write(fd, pem.data + off, pem.len - off);
 
         if (n < 0) {
             if (ngx_autocert_err_is_intr(ngx_errno)) {
@@ -394,7 +405,7 @@ ngx_autocert_account_save_key(ngx_autocert_account_t *acct, int dfd,
             ngx_log_error(NGX_LOG_ERR, acct->log, ngx_errno,
                           "autocert: write account key \"%V\" failed",
                           &acct->key_path);
-            ngx_close_file(fd);
+            ngx_autocert_close(fd);
             (void) ngx_autocert_unlinkat(dfd, leaf, 0);                /* no partial key */
             return NGX_ERROR;
         }
@@ -411,12 +422,12 @@ ngx_autocert_account_save_key(ngx_autocert_account_t *acct, int dfd,
         ngx_log_error(NGX_LOG_ERR, acct->log, ngx_errno,
                       "autocert: fsync account key \"%V\" failed",
                       &acct->key_path);
-        ngx_close_file(fd);
+        ngx_autocert_close(fd);
         (void) ngx_autocert_unlinkat(dfd, leaf, 0);
         return NGX_ERROR;
     }
 
-    if (ngx_close_file(fd) == NGX_FILE_ERROR) {
+    if (ngx_autocert_close(fd) == -1) {
         ngx_log_error(NGX_LOG_ERR, acct->log, ngx_errno,
                       "autocert: close account key \"%V\" failed",
                       &acct->key_path);

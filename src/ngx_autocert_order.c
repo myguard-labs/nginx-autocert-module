@@ -2751,7 +2751,7 @@ ngx_autocert_order_write_tmp_at(ngx_autocert_order_t *order, int sfd,
     }
 
     for (off = 0; off < data->len; off += n) {
-        n = write(fd, data->data + off, data->len - off);
+        n = ngx_autocert_write(fd, data->data + off, data->len - off);
         if (n == -1) {
             if (ngx_errno == EINTR) {
                 n = 0;
