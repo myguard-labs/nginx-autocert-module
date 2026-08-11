@@ -51,6 +51,18 @@
 #endif
 
 
+/*
+ * FILE_ATTRIBUTE_TAG_INFO / GetFileInformationByHandleEx are Vista+ API and
+ * are gated on _WIN32_WINNT. Declare the floor before <windows.h> is pulled
+ * in; respect a higher value the build already set.
+ */
+#ifndef _WIN32_WINNT
+#define _WIN32_WINNT 0x0600
+#elif _WIN32_WINNT < 0x0600
+#undef _WIN32_WINNT
+#define _WIN32_WINNT 0x0600
+#endif
+
 #include <windows.h>
 #include <winioctl.h>          /* IO_REPARSE_TAG_*; needs windows.h first */
 #include <io.h>                /* _open_osfhandle, _get_osfhandle, _close */
