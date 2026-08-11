@@ -66,18 +66,61 @@ AUTOCERT_DEPS="$ngx_addon_dir/src/ngx_autocert_driver.h \
                $ngx_addon_dir/src/ngx_autocert_requests.h \
                $ngx_addon_dir/src/ngx_http_autocert_crypto.h \
                $ngx_addon_dir/src/ngx_autocert_shared.h \
+               $ngx_addon_dir/src/ngx_autocert_win32.h \
                $ngx_addon_dir/src/ngx_http_autocert_conf.h"
+
+# Link libraries differ per platform, and the difference is not just spelling.
+#
+# On win32 there are no -l flags: MSVC's linker takes .lib filenames directly.
+# Two system libraries come with them that POSIX gets for free from libc:
+#   ws2_32.lib   - sockets. The ACME client opens its own connections to the CA
+#                  (ngx_autocert_acme.c), so this module pulls in the winsock
+#                  symbols itself rather than riding on nginx core's link line.
+#   advapi32.lib - the Win32 security API (SetNamedSecurityInfo and friends),
+#                  needed for the key-file ACL that replaces fchmod(0600).
+#
+# crypt32.lib joins them whenever OpenSSL is linked statically: libcrypto calls
+# CertOpenStore/CertFindCertificateInStore for the Windows certificate store,
+# and a static link has nothing else to resolve those from. A DLL build hides
+# the dependency inside libcrypto-3-x64.dll, so this only bites the static
+# configuration the CI gate uses.
+#
+# None of these names are fixed, and the split is by COMPILER rather than by
+# platform: MSVC takes .lib filenames on the command line, while MinGW-w64
+# drives a GNU ld that wants the -l form. Keying off NGX_PLATFORM alone would
+# hand MinGW the MSVC spelling and fail at link, which is why both CI cells
+# exist. NGX_CC_NAME is set by auto/cc/name before a module's config runs.
+# NGX_AUTOCERT_WIN32_SSL_LIBS still overrides the SSL half for a builder whose
+# OpenSSL is named neither way.
+if [ "${NGX_PLATFORM:-}" = win32 ]; then
+    # The same clang|gcc split nginx core uses for its own win32 libraries
+    # (auto/os/win32:20-31), for the same reason: both halves of the line are
+    # spelled differently per toolchain, not just the OpenSSL half.
+    case "${NGX_CC_NAME:-}" in
+        clang | gcc)
+            AUTOCERT_SSL_LIBS="${NGX_AUTOCERT_WIN32_SSL_LIBS:--lssl -lcrypto}"
+            AUTOCERT_SYS_LIBS="-lws2_32 -ladvapi32 -lcrypt32"
+            ;;
+        *)
+            AUTOCERT_SSL_LIBS="${NGX_AUTOCERT_WIN32_SSL_LIBS:-libssl.lib libcrypto.lib}"
+            AUTOCERT_SYS_LIBS="ws2_32.lib advapi32.lib crypt32.lib"
+            ;;
+    esac
+    AUTOCERT_LIBS="$AUTOCERT_SSL_LIBS $AUTOCERT_SYS_LIBS"
+else
+    AUTOCERT_LIBS="-lssl -lcrypto"
+fi
 
 if test -n "$ngx_module_link"; then
     ngx_module_type=HTTP
     ngx_module_name=ngx_http_autocert_module
     ngx_module_srcs="$AUTOCERT_SRCS"
-    ngx_module_libs="-lssl -lcrypto"
+    ngx_module_libs="$AUTOCERT_LIBS"
     ngx_module_deps="$AUTOCERT_DEPS"
     . auto/module
 else
     HTTP_MODULES="$HTTP_MODULES ngx_http_autocert_module"
     NGX_ADDON_SRCS="$NGX_ADDON_SRCS $AUTOCERT_SRCS"
     NGX_ADDON_DEPS="$NGX_ADDON_DEPS $AUTOCERT_DEPS"
-    CORE_LIBS="$CORE_LIBS -lssl -lcrypto"
+    CORE_LIBS="$CORE_LIBS $AUTOCERT_LIBS"
 fi
