@@ -1,4 +1,4 @@
-# sync-sha: 1f45cff1489f5de4bbcb9bf2981e8889a0d982cd82557c47ba74adedc604a065
+# sync-sha: d9a833457e24bfb9ea5c13f8e7e132d79e6ef2f97a8472ef84f940851c87b150
 name: Windows build
 
 # Build-only gate for the native Windows port (W17). This proves the module
@@ -150,8 +150,34 @@ jobs:
               ForEach-Object { Write-Host "  $($_.Name)" }
             throw "libssl.lib not found under $ssl"
           }
+          # nginx's MSVC branch does not probe for OpenSSL: it takes
+          # --with-openssl=<path> and hardcodes <path>/openssl/include and
+          # <path>/openssl/lib (auto/lib/openssl/conf:22-32). Without that flag
+          # it falls through to the POSIX probe, which tries -lssl -lcrypto and
+          # fails under cl - "SSL modules require the OpenSSL library" even
+          # though OpenSSL is right there.
+          #
+          # vcpkg's layout is flat (include/, lib/), so stage a tree in the
+          # shape configure expects. Junctions, not copies: same content, no
+          # duplication of a large lib dir.
+          $stage = "$env:GITHUB_WORKSPACE\ossl-stage"
+          New-Item -ItemType Directory -Force -Path "$stage\openssl" | Out-Null
+          foreach ($sub in 'include', 'lib') {
+            $link = "$stage\openssl\$sub"
+            if (-not (Test-Path $link)) {
+              New-Item -ItemType Junction -Path $link -Target "$ssl\$sub" | Out-Null
+            }
+          }
+          if (-not (Test-Path "$stage\openssl\include\openssl\ssl.h")) {
+            throw "staged tree is missing openssl/ssl.h - layout assumption is wrong"
+          }
+          if (-not (Test-Path "$stage\openssl\lib\libssl.lib")) {
+            throw "staged tree is missing libssl.lib - layout assumption is wrong"
+          }
+
           "OPENSSL_ROOT=$ssl" >> $env:GITHUB_ENV
-          Write-Host "using OpenSSL at $ssl"
+          "OPENSSL_STAGE=$stage" >> $env:GITHUB_ENV
+          Write-Host "vcpkg OpenSSL at $ssl, staged for configure at $stage"
 
       # configure is a shell script, so it runs under the runner's bash even
       # though the compiler is MSVC. Three constraints, each of which cost a
@@ -180,7 +206,7 @@ jobs:
           # as escapes by the shell and by the generated makefile.
           MODULE_DIR=$(cygpath -w "$GITHUB_WORKSPACE")
           MODULE_DIR=${MODULE_DIR//\\//}
-          SSL_DIR=${OPENSSL_ROOT//\\//}
+          SSL_STAGE=${OPENSSL_STAGE//\\//}
           # PCRE2 and zlib unpack in the workspace root, one level above the
           # nginx tree this step runs in, and need the same Windows-path form.
           DEPS=$MODULE_DIR
@@ -198,8 +224,9 @@ jobs:
             --http-client-body-temp-path=temp/client_body_temp \
             --http-proxy-temp-path=temp/proxy_temp \
             --http-fastcgi-temp-path=temp/fastcgi_temp \
-            --with-cc-opt="-DFD_SETSIZE=1024 -MT -I$SSL_DIR/include" \
-            --with-ld-opt="-LIBPATH:$SSL_DIR/lib crypt32.lib user32.lib" \
+            --with-cc-opt="-DFD_SETSIZE=1024 -MT" \
+            --with-ld-opt="user32.lib" \
+            --with-openssl="$SSL_STAGE" \
             --with-pcre="$DEPS/pcre2-10.44" \
             --with-zlib="$DEPS/zlib-1.3.1" \
             --with-http_ssl_module \
@@ -230,6 +257,27 @@ jobs:
       # Building the two .lib files first sidesteps it: nmake then finds them
       # already present and proceeds. A failure here is a real failure, so the
       # step is not tolerant of a bad exit.
+      # auto/lib/openssl/make emits a rule making
+      # <stage>/openssl/include/openssl/ssl.h depend on objs/Makefile, whose
+      # recipe builds OpenSSL from source. configure writes that makefile after
+      # the staged tree exists, so ssl.h is older than its dependency and nmake
+      # would rebuild a perfectly good prebuilt OpenSSL. Touching the staged
+      # headers and libs afterwards makes the rule already-satisfied.
+      #
+      # Junctions are transparent to timestamps, so this stamps the real vcpkg
+      # files. That is fine: they are throwaway CI state, not a shared cache.
+      - name: Mark the staged OpenSSL as up to date
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $now = Get-Date
+          foreach ($p in "$env:OPENSSL_STAGE\openssl\include\openssl\ssl.h",
+                         "$env:OPENSSL_STAGE\openssl\lib\libssl.lib",
+                         "$env:OPENSSL_STAGE\openssl\lib\libcrypto.lib") {
+            if (-not (Test-Path $p)) { throw "expected staged file missing: $p" }
+            (Get-Item $p).LastWriteTime = $now
+          }
+
       - name: Pre-build PCRE2 and zlib
         shell: cmd
         run: |
