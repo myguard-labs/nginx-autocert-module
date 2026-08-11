@@ -1,0 +1,258 @@
+# sync-sha: c21ff7e11e34920c8f98748f32594129ec764f38f6ad7f592706eee4473150d8
+name: Windows build
+
+# Build-only gate for the native Windows port (W17). This proves the module
+# COMPILES AND LINKS on win32; it does not prove it works. The Pebble e2e suite
+# runs Linux Docker containers (ci/tests/e2e/*.sh call `docker cp` against the
+# pebble image), and a windows-latest runner only supports Windows containers,
+# so runtime coverage on win32 is a separate problem tracked as W18.
+#
+# Kept out of build-test.yml deliberately: that workflow's jobs are Linux
+# (self-hosted builder02 for resolve, ubuntu for the matrices) and share the
+# build-<flavor> artifact contract, none of which applies here. A separate file
+# also means a win32 failure reads as "the Windows port broke" in the checks
+# list rather than as one red cell in an otherwise Linux matrix.
+#
+# Third-party actions pinned to commit SHAs for supply-chain safety.
+# Pin table (canonical for all workflow files — keep consistent):
+# actions/checkout@v5          -> 93cb6efe18208431cddfb8368fd83d5badbf9bfd
+# actions/upload-artifact@v5   -> 330a01c490aca151604b8cf639adc76d48f6c5d4
+
+on:
+  pull_request:
+    # Only the inputs that can break a win32 build. The Linux suite already
+    # gates src/ on every PR, and duplicating that here would double the wait
+    # for changes that cannot affect this job.
+    paths:
+      - 'src/**'
+      - 'config'
+      - '.github/workflows/windows-build.yml'
+      - '.github/versions.env'
+  push:
+    branches: [master]
+  workflow_dispatch: {}
+
+concurrency:
+  group: windows-build-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  msvc:
+    name: MSVC x64 static-link build
+    runs-on: windows-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout module
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          persist-credentials: false
+
+      # Same pin file the Linux workflows read, so win32 builds the same nginx
+      # the rest of CI does. Parsed with PowerShell rather than sourced, since
+      # this is the one job that does not run under bash.
+      - name: Load pinned nginx version
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Get-Content .github/versions.env |
+            Where-Object { $_ -match '^(NGINX_VERSION|NGINX_VERSION_SHA256)=' } |
+            ForEach-Object { $_ >> $env:GITHUB_ENV }
+
+      - name: Fetch and verify nginx
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $tarball = "nginx-$env:NGINX_VERSION.tar.gz"
+          Invoke-WebRequest -Uri "https://nginx.org/download/$tarball" -OutFile $tarball
+
+          # Same rule as the Linux fetches: a changed upstream archive fails the
+          # build rather than getting compiled. -ne on the string compare is
+          # case-sensitive, so normalise both sides first.
+          $actual = (Get-FileHash $tarball -Algorithm SHA256).Hash.ToLower()
+          $want = $env:NGINX_VERSION_SHA256.ToLower()
+          if ($actual -ne $want) {
+            throw "sha256 mismatch for ${tarball}: got $actual, want $want"
+          }
+          tar -xzf $tarball
+          if ($LASTEXITCODE -ne 0) { throw "tar failed with $LASTEXITCODE" }
+
+      # windows-latest ships OpenSSL and NASM, which is the reason this job runs
+      # here rather than on the winarc box: that machine has neither, and
+      # provisioning it is where this port has repeatedly stalled.
+      - name: Locate OpenSSL
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $ssl = "$env:VCPKG_INSTALLATION_ROOT\installed\x64-windows-static"
+          if (-not (Test-Path "$ssl\lib\libssl.lib")) {
+            # Fail loudly with what IS present. A silent fallback to a different
+            # OpenSSL would make the link line untrustworthy, which is the exact
+            # thing this job exists to verify.
+            Write-Host "vcpkg tree contents:"
+            Get-ChildItem "$env:VCPKG_INSTALLATION_ROOT\installed" -ErrorAction SilentlyContinue |
+              ForEach-Object { Write-Host "  $_" }
+            throw "libssl.lib not found under $ssl"
+          }
+          "OPENSSL_ROOT=$ssl" >> $env:GITHUB_ENV
+          Write-Host "using OpenSSL at $ssl"
+
+      # configure is a shell script, so it runs under the runner's bash even
+      # though the compiler is MSVC. Three constraints, each of which cost a
+      # round-trip when W0c established this recipe by hand:
+      #
+      #  1. --crossbuild=win32 is mandatory. Without it configure misdetects the
+      #     OS (bash `uname` reports MINGW64_NT) and dies "C compiler is not
+      #     found" before it ever tests cl.
+      #  2. --add-module needs a WINDOWS path. The MSYS form (/c/...) configures
+      #     fine and then fails under nmake with U1073, far from its cause.
+      #  3. There is no dynamic-module support on win32 (B1), so this is the
+      #     static-link path: the module is linked into nginx.exe itself.
+      - name: Configure
+        shell: bash
+        working-directory: nginx-${{ env.NGINX_VERSION }}
+        run: |
+          set -euo pipefail
+          # Both must be Windows paths with forward slashes: configure needs the
+          # drive-letter form (trap 2 above), while backslashes would be eaten
+          # as escapes by the shell and by the generated makefile.
+          MODULE_DIR=$(cygpath -w "$GITHUB_WORKSPACE")
+          MODULE_DIR=${MODULE_DIR//\\//}
+          SSL_DIR=${OPENSSL_ROOT//\\//}
+
+          ./configure \
+            --crossbuild=win32 \
+            --with-cc=cl \
+            --builddir=objs \
+            --prefix= \
+            --conf-path=conf/nginx.conf \
+            --pid-path=logs/nginx.pid \
+            --http-log-path=logs/access.log \
+            --error-log-path=logs/error.log \
+            --sbin-path=nginx.exe \
+            --http-client-body-temp-path=temp/client_body_temp \
+            --http-proxy-temp-path=temp/proxy_temp \
+            --http-fastcgi-temp-path=temp/fastcgi_temp \
+            --with-cc-opt="-DFD_SETSIZE=1024 -I$SSL_DIR/include" \
+            --with-ld-opt="-LIBPATH:$SSL_DIR/lib" \
+            --with-http_ssl_module \
+            --add-module="$MODULE_DIR"
+
+      # vcvars64.bat is located with vswhere rather than hardcoded: the runner
+      # image has shipped both the Enterprise and Community editions at
+      # different times, and the path embeds the edition name. vswhere itself
+      # is at a fixed, Microsoft-documented location.
+      - name: Locate vcvars64.bat
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          if (-not (Test-Path $vswhere)) { throw "vswhere.exe not found at $vswhere" }
+          $root = & $vswhere -latest -products * `
+            -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 `
+            -property installationPath
+          if (-not $root) { throw "vswhere found no VC++ toolchain" }
+          $vcvars = "$root\VC\Auxiliary\Build\vcvars64.bat"
+          if (-not (Test-Path $vcvars)) { throw "vcvars64.bat not found at $vcvars" }
+          "VCVARS=$vcvars" >> $env:GITHUB_ENV
+          Write-Host "using $vcvars"
+
+      - name: Build
+        shell: cmd
+        working-directory: nginx-${{ env.NGINX_VERSION }}
+        run: |
+          call "%VCVARS%" || exit /b 1
+          nmake -f objs/Makefile || exit /b 1
+
+      # A green nmake is not by itself proof the module went in: a config that
+      # silently failed to register the addon still builds a perfectly good
+      # stock nginx.exe. Assert the module is actually present.
+      - name: Verify the module linked in
+        shell: pwsh
+        working-directory: nginx-${{ env.NGINX_VERSION }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if (-not (Test-Path objs\nginx.exe)) { throw "objs\nginx.exe was not produced" }
+
+          $obj = 'objs\addon\src\ngx_http_autocert_module.obj'
+          if (-not (Test-Path $obj)) { throw "$obj missing - the addon did not compile" }
+
+          # The generated module table is what actually wires the module into
+          # the binary; a stale objs/ could leave the .obj above behind.
+          $table = Get-Content objs\ngx_modules.c -Raw
+          if ($table -notmatch 'ngx_http_autocert_module') {
+            throw "ngx_http_autocert_module absent from objs/ngx_modules.c"
+          }
+          Write-Host "module present in ngx_modules.c and objs/nginx.exe built"
+
+      # -t exercises the module's directive table: it registers autocert_* at
+      # module load, so an unknown-directive error here means the module is in
+      # the binary but not wired up. The negative control is what makes the
+      # positive result meaningful - without it, a config that silently ignored
+      # unknown directives would also "pass".
+      - name: Smoke-test the directive table
+        shell: pwsh
+        working-directory: nginx-${{ env.NGINX_VERSION }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force -Path conf, logs, temp | Out-Null
+
+          # autocert_store_path is NGX_HTTP_MAIN_CONF|NGX_CONF_TAKE1
+          # (ngx_http_autocert_module.c:205), so it goes directly in http{},
+          # not in a server block.
+          #
+          # Built by joining lines rather than with a PowerShell here-string:
+          # a here-string's terminator must sit at column 0, which would end
+          # this YAML block scalar early.
+          function Write-Conf([string]$directive) {
+            $lines = @(
+              'events { worker_connections 64; }',
+              'http {',
+              "    $directive",
+              '    server {',
+              '        listen 8099;',
+              '        server_name localhost;',
+              '    }',
+              '}'
+            )
+            Set-Content -Encoding ascii -Path conf/nginx.conf -Value $lines
+          }
+
+          # Positive: a real directive must be accepted.
+          Write-Conf 'autocert_store_path temp/store;'
+          $out = & .\objs\nginx.exe -p . -c conf/nginx.conf -t 2>&1 | Out-String
+          Write-Host $out
+          if ($LASTEXITCODE -ne 0) { throw "nginx -t rejected a valid autocert directive" }
+
+          # Negative control: a bogus directive must be REJECTED. If this passes,
+          # the check above proved nothing.
+          Write-Conf 'autocert_NOT_A_DIRECTIVE on;'
+          $out = & .\objs\nginx.exe -p . -c conf/nginx.conf -t 2>&1 | Out-String
+          Write-Host $out
+          if ($LASTEXITCODE -eq 0) {
+            throw "negative control passed: nginx -t accepted a bogus directive"
+          }
+          Write-Host "directive table verified (valid accepted, bogus rejected)"
+
+      - name: Upload nginx.exe
+        if: success()
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        with:
+          name: nginx-win32-msvc
+          path: nginx-${{ env.NGINX_VERSION }}/objs/nginx.exe
+          retention-days: 7
+
+      - name: Dump configure log on failure
+        if: failure()
+        shell: pwsh
+        working-directory: nginx-${{ env.NGINX_VERSION }}
+        run: |
+          foreach ($f in 'objs\autoconf.err', 'objs\Makefile') {
+            if (Test-Path $f) {
+              Write-Host "===== $f ====="
+              Get-Content $f -Tail 100
+            }
+          }
