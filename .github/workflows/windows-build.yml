@@ -1,4 +1,4 @@
-# sync-sha: 0415340a7f8361cdbb7a17d45a11a9ea8ecf8de04b7961a1cbeb6befb3a7ad0f
+# sync-sha: 74d5875e02bcca1e8637f0d20cf945bbaffc02dce46caa138deff366f4638b74
 name: Windows build
 
 # Build-only gate for the native Windows port (W17). This proves the module
@@ -412,14 +412,23 @@ jobs:
   # wrong here, and vice versa. Building both is what stops the win32 code from
   # being quietly MSVC-only.
   #
-  # Far shorter than the MSVC job because MSYS2 has a package manager: OpenSSL,
-  # PCRE2 and zlib arrive as real packages, which deletes the vcpkg install,
-  # the staged-tree junctions, the timestamp fixup and the hand-rolled
-  # pre-build of PCRE2/zlib in one go.
+  # MSYS2 supplies the toolchain only. It also packages OpenSSL, PCRE2 and zlib,
+  # and installing them looks like the obvious shortcut, but nginx never looks:
+  # auto/lib/{pcre,zlib,openssl}/conf each guard their whole probe block with
+  # `if [ "$NGX_PLATFORM" != win32 ]`, so on win32 no library is auto-detected
+  # for ANY compiler. A pacman-installed PCRE2 sitting in the MINGW64 prefix
+  # still ends in "the HTTP rewrite module requires the PCRE library".
+  #
+  # So this job feeds the same pinned source tarballs the MSVC job uses through
+  # --with-pcre/--with-zlib/--with-openssl and lets configure build them with
+  # gcc. Same sha256 pins, same versions, one fetch step shared in spirit with
+  # the MSVC half.
   mingw:
     name: MinGW-w64 x64 build
     runs-on: windows-latest
-    timeout-minutes: 30
+    # Longer than the MSVC job's 30: that one links a prebuilt vcpkg OpenSSL,
+    # while this one compiles OpenSSL, PCRE2 and zlib from source under gcc.
+    timeout-minutes: 60
 
     steps:
       - name: Checkout module
@@ -439,9 +448,7 @@ jobs:
           install: >-
             base-devel
             mingw-w64-x86_64-gcc
-            mingw-w64-x86_64-openssl
-            mingw-w64-x86_64-pcre2
-            mingw-w64-x86_64-zlib
+            perl
 
       - name: Load pinned nginx version
         shell: msys2 {0}
@@ -458,14 +465,37 @@ jobs:
           echo "${NGINX_VERSION_SHA256}  ${tarball}" | sha256sum -c -
           tar -xzf "$tarball"
 
+      # Versions and digests match the MSVC job's Fetch step; OpenSSL is pinned
+      # to the series vcpkg resolves there. Every archive is checked before it
+      # is unpacked, same rule as the Linux fetches.
+      - name: Fetch and verify PCRE2, zlib and OpenSSL
+        shell: msys2 {0}
+        run: |
+          set -euo pipefail
+          fetch() {
+            curl -fsSL -o "$2" "$1"
+            echo "$3  $2" | sha256sum -c -
+            tar -xzf "$2"
+          }
+          fetch https://github.com/PCRE2Project/pcre2/releases/download/pcre2-10.44/pcre2-10.44.tar.gz \
+                pcre2-10.44.tar.gz \
+                86b9cb0aa3bcb7994faa88018292bc704cdbb708e785f7c74352ff6ea7d3175b
+          fetch https://github.com/madler/zlib/releases/download/v1.3.1/zlib-1.3.1.tar.gz \
+                zlib-1.3.1.tar.gz \
+                9a93b2b7dfdac77ceba5a558a580e74667dd6fede4585b91eefb60f03b72df23
+          fetch https://github.com/openssl/openssl/releases/download/openssl-3.5.4/openssl-3.5.4.tar.gz \
+                openssl-3.5.4.tar.gz \
+                967311f84955316969bdb1d8d4b983718ef42338639c621ec4c34fddef355e99
+
       # --crossbuild=win32 for the same reason as the MSVC job: under MSYS2
       # `uname` reports MINGW64_NT, which configure does not recognise as a
       # supported OS and bails on before testing the compiler.
       #
-      # No --with-openssl/--with-pcre/--with-zlib here. Those flags mean
-      # "build this dependency from source at <path>"; pacman already installed
-      # all three into the MINGW64 prefix where the ordinary -l probes find
-      # them, and pointing at a source tree would rebuild them for nothing.
+      # All three libraries come in as source paths because the win32 branch of
+      # auto/lib/*/conf skips every probe (see the job comment). --with-pcre and
+      # --with-zlib take the unpacked trees; --with-openssl builds OpenSSL with
+      # the same gcc, so no staged-tree junction or timestamp fixup is needed
+      # here the way it is on the MSVC side.
       #
       # The module's own config picks -lssl -lcrypto off NGX_CC_NAME=gcc, so
       # the link line is GNU-shaped end to end.
@@ -488,15 +518,21 @@ jobs:
             --http-proxy-temp-path=temp/proxy_temp \
             --http-fastcgi-temp-path=temp/fastcgi_temp \
             --with-cc-opt="-DFD_SETSIZE=1024" \
+            --with-pcre="$(pwd)/../pcre2-10.44" \
+            --with-zlib="$(pwd)/../zlib-1.3.1" \
+            --with-openssl="$(pwd)/../openssl-3.5.4" \
             --with-http_ssl_module \
             --add-module="$(pwd)/.."
 
+      # Serial on purpose. nginx's generated makefile drives the OpenSSL and
+      # PCRE2 sub-builds as recipe chains rather than as real dependency edges,
+      # so -j races them against the targets that consume their output.
       - name: Build
         shell: msys2 {0}
         working-directory: nginx-${{ env.NGINX_VERSION }}
         run: |
           set -euo pipefail
-          make -j"$(nproc)"
+          make
 
       # Same assertion as the MSVC job, and for the same reason: a green build
       # proves nginx compiled, not that the addon was registered.
