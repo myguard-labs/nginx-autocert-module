@@ -1,4 +1,4 @@
-# sync-sha: d9a833457e24bfb9ea5c13f8e7e132d79e6ef2f97a8472ef84f940851c87b150
+# sync-sha: 0415340a7f8361cdbb7a17d45a11a9ea8ecf8de04b7961a1cbeb6befb3a7ad0f
 name: Windows build
 
 # Build-only gate for the native Windows port (W17). This proves the module
@@ -18,6 +18,7 @@ name: Windows build
 # actions/checkout@v5          -> 93cb6efe18208431cddfb8368fd83d5badbf9bfd
 # actions/cache@v4             -> 0057852bfaa89a56745cba8c7296529d2fc39830
 # actions/upload-artifact@v5   -> 330a01c490aca151604b8cf639adc76d48f6c5d4
+# msys2/setup-msys2@v2         -> 66cd2cce69caa17b53920067426061ca1de3a884 (v2.32.0)
 
 on:
   pull_request:
@@ -403,3 +404,164 @@ jobs:
               Get-Content $f -Tail 100
             }
           }
+
+  # The second win32 toolchain. Not redundant with the MSVC job: the two
+  # disagree about almost everything this port touches. MinGW-w64 ships the
+  # POSIX-shaped headers MSVC lacks (sys/stat.h with a real struct stat,
+  # mode_t, the O_* flags), so a shim branch that satisfies cl can still be
+  # wrong here, and vice versa. Building both is what stops the win32 code from
+  # being quietly MSVC-only.
+  #
+  # Far shorter than the MSVC job because MSYS2 has a package manager: OpenSSL,
+  # PCRE2 and zlib arrive as real packages, which deletes the vcpkg install,
+  # the staged-tree junctions, the timestamp fixup and the hand-rolled
+  # pre-build of PCRE2/zlib in one go.
+  mingw:
+    name: MinGW-w64 x64 build
+    runs-on: windows-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout module
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          persist-credentials: false
+
+      # msystem: MINGW64 selects the mingw-w64 GCC targeting the native Win32
+      # API. The MSYS toolchain in the same installation targets the msys2
+      # POSIX emulation layer instead, which would build something that is not
+      # a native win32 binary and would defeat the point of this job.
+      - name: Set up MSYS2
+        uses: msys2/setup-msys2@66cd2cce69caa17b53920067426061ca1de3a884 # v2.32.0
+        with:
+          msystem: MINGW64
+          update: false
+          install: >-
+            base-devel
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-openssl
+            mingw-w64-x86_64-pcre2
+            mingw-w64-x86_64-zlib
+
+      - name: Load pinned nginx version
+        shell: msys2 {0}
+        run: |
+          set -euo pipefail
+          grep -E '^(NGINX_VERSION|NGINX_VERSION_SHA256)=' .github/versions.env >> "$GITHUB_ENV"
+
+      - name: Fetch and verify nginx
+        shell: msys2 {0}
+        run: |
+          set -euo pipefail
+          tarball="nginx-${NGINX_VERSION}.tar.gz"
+          curl -fsSL -o "$tarball" "https://nginx.org/download/${tarball}"
+          echo "${NGINX_VERSION_SHA256}  ${tarball}" | sha256sum -c -
+          tar -xzf "$tarball"
+
+      # --crossbuild=win32 for the same reason as the MSVC job: under MSYS2
+      # `uname` reports MINGW64_NT, which configure does not recognise as a
+      # supported OS and bails on before testing the compiler.
+      #
+      # No --with-openssl/--with-pcre/--with-zlib here. Those flags mean
+      # "build this dependency from source at <path>"; pacman already installed
+      # all three into the MINGW64 prefix where the ordinary -l probes find
+      # them, and pointing at a source tree would rebuild them for nothing.
+      #
+      # The module's own config picks -lssl -lcrypto off NGX_CC_NAME=gcc, so
+      # the link line is GNU-shaped end to end.
+      - name: Configure
+        shell: msys2 {0}
+        working-directory: nginx-${{ env.NGINX_VERSION }}
+        run: |
+          set -euo pipefail
+          ./configure \
+            --crossbuild=win32 \
+            --with-cc=gcc \
+            --builddir=objs \
+            --prefix= \
+            --conf-path=conf/nginx.conf \
+            --pid-path=logs/nginx.pid \
+            --http-log-path=logs/access.log \
+            --error-log-path=logs/error.log \
+            --sbin-path=nginx.exe \
+            --http-client-body-temp-path=temp/client_body_temp \
+            --http-proxy-temp-path=temp/proxy_temp \
+            --http-fastcgi-temp-path=temp/fastcgi_temp \
+            --with-cc-opt="-DFD_SETSIZE=1024" \
+            --with-http_ssl_module \
+            --add-module="$(pwd)/.."
+
+      - name: Build
+        shell: msys2 {0}
+        working-directory: nginx-${{ env.NGINX_VERSION }}
+        run: |
+          set -euo pipefail
+          make -j"$(nproc)"
+
+      # Same assertion as the MSVC job, and for the same reason: a green build
+      # proves nginx compiled, not that the addon was registered.
+      - name: Verify the module linked in
+        shell: msys2 {0}
+        working-directory: nginx-${{ env.NGINX_VERSION }}
+        run: |
+          set -euo pipefail
+          test -f objs/nginx.exe || { echo "objs/nginx.exe was not produced"; exit 1; }
+          test -f objs/addon/src/ngx_http_autocert_module.o || {
+            echo "addon object missing - the addon did not compile"; exit 1; }
+          grep -q 'ngx_http_autocert_module' objs/ngx_modules.c || {
+            echo "ngx_http_autocert_module absent from objs/ngx_modules.c"; exit 1; }
+          echo "module present in ngx_modules.c and objs/nginx.exe built"
+
+      - name: Smoke-test the directive table
+        shell: msys2 {0}
+        working-directory: nginx-${{ env.NGINX_VERSION }}
+        run: |
+          set -euo pipefail
+          mkdir -p conf logs temp
+
+          write_conf() {
+            cat > conf/nginx.conf <<EOF
+          events { worker_connections 64; }
+          http {
+              $1
+              server {
+                  listen 8099;
+                  server_name localhost;
+              }
+          }
+          EOF
+          }
+
+          # Positive: a real directive must be accepted.
+          write_conf 'autocert_store_path temp/store;'
+          ./objs/nginx.exe -p . -c conf/nginx.conf -t
+
+          # Negative control: a bogus directive must be REJECTED, or the check
+          # above proved nothing. `!` rather than `|| true` so an unexpected
+          # zero exit fails the step.
+          write_conf 'autocert_NOT_A_DIRECTIVE on;'
+          if ./objs/nginx.exe -p . -c conf/nginx.conf -t 2>&1; then
+            echo "negative control passed: nginx -t accepted a bogus directive"
+            exit 1
+          fi
+          echo "directive table verified (valid accepted, bogus rejected)"
+
+      - name: Upload nginx.exe
+        if: success()
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        with:
+          name: nginx-win32-mingw
+          path: nginx-${{ env.NGINX_VERSION }}/objs/nginx.exe
+          retention-days: 7
+
+      - name: Dump configure log on failure
+        if: failure()
+        shell: msys2 {0}
+        working-directory: nginx-${{ env.NGINX_VERSION }}
+        run: |
+          for f in objs/autoconf.err objs/Makefile; do
+            if [ -f "$f" ]; then
+              echo "===== $f ====="
+              tail -100 "$f"
+            fi
+          done

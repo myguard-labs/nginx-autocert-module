@@ -79,14 +79,34 @@ AUTOCERT_DEPS="$ngx_addon_dir/src/ngx_autocert_driver.h \
 #   advapi32.lib - the Win32 security API (SetNamedSecurityInfo and friends),
 #                  needed for the key-file ACL that replaces fchmod(0600).
 #
-# The names are also not fixed: an OpenSSL built with MSVC ships
-# libssl.lib/libcrypto.lib, but MinGW-w64 builds the -l form against
-# libssl.a/libcrypto.a. NGX_AUTOCERT_WIN32_SSL_LIBS lets a builder override the
-# whole SSL half without patching this file; only the two system libs, which are
-# spelled identically for both toolchains, are appended unconditionally.
+# crypt32.lib joins them whenever OpenSSL is linked statically: libcrypto calls
+# CertOpenStore/CertFindCertificateInStore for the Windows certificate store,
+# and a static link has nothing else to resolve those from. A DLL build hides
+# the dependency inside libcrypto-3-x64.dll, so this only bites the static
+# configuration the CI gate uses.
+#
+# None of these names are fixed, and the split is by COMPILER rather than by
+# platform: MSVC takes .lib filenames on the command line, while MinGW-w64
+# drives a GNU ld that wants the -l form. Keying off NGX_PLATFORM alone would
+# hand MinGW the MSVC spelling and fail at link, which is why both CI cells
+# exist. NGX_CC_NAME is set by auto/cc/name before a module's config runs.
+# NGX_AUTOCERT_WIN32_SSL_LIBS still overrides the SSL half for a builder whose
+# OpenSSL is named neither way.
 if [ "${NGX_PLATFORM:-}" = win32 ]; then
-    AUTOCERT_SSL_LIBS="${NGX_AUTOCERT_WIN32_SSL_LIBS:-libssl.lib libcrypto.lib}"
-    AUTOCERT_LIBS="$AUTOCERT_SSL_LIBS ws2_32.lib advapi32.lib"
+    # The same clang|gcc split nginx core uses for its own win32 libraries
+    # (auto/os/win32:20-31), for the same reason: both halves of the line are
+    # spelled differently per toolchain, not just the OpenSSL half.
+    case "${NGX_CC_NAME:-}" in
+        clang | gcc)
+            AUTOCERT_SSL_LIBS="${NGX_AUTOCERT_WIN32_SSL_LIBS:--lssl -lcrypto}"
+            AUTOCERT_SYS_LIBS="-lws2_32 -ladvapi32 -lcrypt32"
+            ;;
+        *)
+            AUTOCERT_SSL_LIBS="${NGX_AUTOCERT_WIN32_SSL_LIBS:-libssl.lib libcrypto.lib}"
+            AUTOCERT_SYS_LIBS="ws2_32.lib advapi32.lib crypt32.lib"
+            ;;
+    esac
+    AUTOCERT_LIBS="$AUTOCERT_SSL_LIBS $AUTOCERT_SYS_LIBS"
 else
     AUTOCERT_LIBS="-lssl -lcrypto"
 fi
