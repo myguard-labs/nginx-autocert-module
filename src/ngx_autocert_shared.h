@@ -14,6 +14,8 @@
 #include <ngx_config.h>
 #include <ngx_core.h>
 
+#include "ngx_autocert_win32.h"   /* win32 shim types; empty on POSIX builds */
+
 #include <fcntl.h>
 #include <errno.h>
 
