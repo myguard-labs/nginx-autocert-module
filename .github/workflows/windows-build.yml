@@ -1,4 +1,4 @@
-# sync-sha: c21ff7e11e34920c8f98748f32594129ec764f38f6ad7f592706eee4473150d8
+# sync-sha: 356bc28284fc684058890139e2777562a5c54d1e4a3f3db8921d4d3da7fc539b
 name: Windows build
 
 # Build-only gate for the native Windows port (W17). This proves the module
@@ -16,6 +16,7 @@ name: Windows build
 # Third-party actions pinned to commit SHAs for supply-chain safety.
 # Pin table (canonical for all workflow files — keep consistent):
 # actions/checkout@v5          -> 93cb6efe18208431cddfb8368fd83d5badbf9bfd
+# actions/cache@v4             -> 0057852bfaa89a56745cba8c7296529d2fc39830
 # actions/upload-artifact@v5   -> 330a01c490aca151604b8cf639adc76d48f6c5d4
 
 on:
@@ -80,9 +81,33 @@ jobs:
           tar -xzf $tarball
           if ($LASTEXITCODE -ne 0) { throw "tar failed with $LASTEXITCODE" }
 
-      # windows-latest ships OpenSSL and NASM, which is the reason this job runs
-      # here rather than on the winarc box: that machine has neither, and
-      # provisioning it is where this port has repeatedly stalled.
+      # The runner ships vcpkg but installs no packages into it, so
+      # VCPKG_INSTALLATION_ROOT\installed is empty on a fresh image. Build the
+      # one port we need. --triplet x64-windows-static matters: it produces a
+      # static OpenSSL linked against the static CRT, which is what nginx's
+      # win32 build uses. Mixing CRT models links but crashes at runtime on the
+      # first allocation that crosses the boundary.
+      #
+      # Cached because a cold OpenSSL build is several minutes and the inputs
+      # move only when the vcpkg baseline does.
+      - name: Cache vcpkg OpenSSL
+        id: vcpkg-cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          # Literal path, not ${{ env.VCPKG_INSTALLATION_ROOT }}: that variable
+          # is set by the runner image rather than by this workflow, and the
+          # env context here would expand to empty, silently caching nothing.
+          path: C:\vcpkg\installed
+          key: vcpkg-openssl-x64-windows-static-${{ runner.os }}-v1
+
+      - name: Install OpenSSL via vcpkg
+        if: steps.vcpkg-cache.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          & "$env:VCPKG_INSTALLATION_ROOT\vcpkg.exe" install openssl:x64-windows-static
+          if ($LASTEXITCODE -ne 0) { throw "vcpkg install failed with $LASTEXITCODE" }
+
       - name: Locate OpenSSL
         shell: pwsh
         run: |
@@ -92,9 +117,9 @@ jobs:
             # Fail loudly with what IS present. A silent fallback to a different
             # OpenSSL would make the link line untrustworthy, which is the exact
             # thing this job exists to verify.
-            Write-Host "vcpkg tree contents:"
-            Get-ChildItem "$env:VCPKG_INSTALLATION_ROOT\installed" -ErrorAction SilentlyContinue |
-              ForEach-Object { Write-Host "  $_" }
+            Write-Host "contents of $ssl\lib:"
+            Get-ChildItem "$ssl\lib" -ErrorAction SilentlyContinue |
+              ForEach-Object { Write-Host "  $($_.Name)" }
             throw "libssl.lib not found under $ssl"
           }
           "OPENSSL_ROOT=$ssl" >> $env:GITHUB_ENV
@@ -111,6 +136,12 @@ jobs:
       #     fine and then fails under nmake with U1073, far from its cause.
       #  3. There is no dynamic-module support on win32 (B1), so this is the
       #     static-link path: the module is linked into nginx.exe itself.
+      #
+      # -MT pairs nginx with the static CRT, matching the x64-windows-static
+      # OpenSSL above. A mismatch here links cleanly and then fails at runtime,
+      # because the two CRTs keep separate heaps and allocator state.
+      # crypt32/user32 are OpenSSL's own win32 dependencies, which a static
+      # libcrypto does not pull in on its own.
       - name: Configure
         shell: bash
         working-directory: nginx-${{ env.NGINX_VERSION }}
@@ -136,8 +167,8 @@ jobs:
             --http-client-body-temp-path=temp/client_body_temp \
             --http-proxy-temp-path=temp/proxy_temp \
             --http-fastcgi-temp-path=temp/fastcgi_temp \
-            --with-cc-opt="-DFD_SETSIZE=1024 -I$SSL_DIR/include" \
-            --with-ld-opt="-LIBPATH:$SSL_DIR/lib" \
+            --with-cc-opt="-DFD_SETSIZE=1024 -MT -I$SSL_DIR/include" \
+            --with-ld-opt="-LIBPATH:$SSL_DIR/lib crypt32.lib user32.lib" \
             --with-http_ssl_module \
             --add-module="$MODULE_DIR"
 
