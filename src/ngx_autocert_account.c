@@ -388,7 +388,7 @@ ngx_autocert_account_save_key(ngx_autocert_account_t *acct, int dfd,
         ssize_t  n = write(fd, pem.data + off, pem.len - off);
 
         if (n < 0) {
-            if (ngx_errno == NGX_EINTR) {
+            if (ngx_autocert_err_is_intr(ngx_errno)) {
                 continue;
             }
             ngx_log_error(NGX_LOG_ERR, acct->log, ngx_errno,
@@ -405,7 +405,7 @@ ngx_autocert_account_save_key(ngx_autocert_account_t *acct, int dfd,
      * ENOENT, so a crash that left a zero/partial key would be refused forever.
      * fsync the file (EINTR-retried). */
     while (fsync(fd) != 0) {
-        if (ngx_errno == NGX_EINTR) {
+        if (ngx_autocert_err_is_intr(ngx_errno)) {
             continue;
         }
         ngx_log_error(NGX_LOG_ERR, acct->log, ngx_errno,
@@ -429,7 +429,7 @@ ngx_autocert_account_save_key(ngx_autocert_account_t *acct, int dfd,
      * written + fsynced + closed, so a dir fsync failure (e.g. a filesystem
      * that rejects directory fsync) must NOT delete it or fail the save. */
     while (fsync(dfd) != 0) {
-        if (ngx_errno == NGX_EINTR) {
+        if (ngx_autocert_err_is_intr(ngx_errno)) {
             continue;
         }
         ngx_log_error(NGX_LOG_WARN, acct->log, ngx_errno,

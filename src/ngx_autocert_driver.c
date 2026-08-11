@@ -2451,7 +2451,7 @@ ngx_autocert_driver_trylock(ngx_cycle_t *cycle)
         if (flock(ngx_autocert_lock_fd, LOCK_EX | LOCK_NB) == 0) {
             break;
         }
-        if (ngx_errno == NGX_EINTR) {
+        if (ngx_autocert_err_is_intr(ngx_errno)) {
             continue;                       /* interrupted by a signal; retry */
         }
         if (ngx_errno == NGX_EAGAIN || ngx_errno == EWOULDBLOCK) {

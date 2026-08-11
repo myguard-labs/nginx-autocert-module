@@ -20,6 +20,18 @@
 #include <errno.h>
 
 
+/*
+ * ngx_autocert_mode_t — POSIX side. The win32 side is typedef'd in
+ * ngx_autocert_win32.h (unsigned int; see its comment for why it cannot be
+ * `#define mode_t`, and for the security-descriptor translation W5b owns).
+ * On POSIX it is exactly mode_t, so this line is the only difference from the
+ * pre-shim signatures.
+ */
+#if !(NGX_WIN32)
+typedef mode_t  ngx_autocert_mode_t;
+#endif
+
+
 typedef struct {
     ngx_uint_t       configured;     /* 0 => autocert not present in http{} */
     ngx_str_t        email;          /* account contact email, "" if none */
@@ -98,6 +110,19 @@ ngx_int_t ngx_autocert_get_conf(ngx_cycle_t *cycle, ngx_autocert_conf_t *out);
 
 
 /*
+ * NGX_EINTR retry predicate, POSIX side. See ngx_autocert_win32.h for the
+ * win32 side (a compile-time-constant false there, since win32 has no
+ * signal-interrupted-syscall outcome for these calls) and the rationale for
+ * why the two need a shared name at all. Defined as a macro expanding to the
+ * exact same comparison the call sites used before this shim existed, so
+ * POSIX object code is unchanged.
+ */
+#if !(NGX_WIN32)
+#define ngx_autocert_err_is_intr(err)   ((err) == NGX_EINTR)
+#endif
+
+
+/*
  * renameat2(2) wrapper, shared by the store commit (order.c) and the account-key
  * migration (driver.c) — both fd-pinned, security-sensitive renames that must
  * not drift. Called via syscall() so the build needs no glibc renameat2 wrapper.
@@ -124,7 +149,8 @@ ngx_int_t ngx_autocert_get_conf(ngx_cycle_t *cycle, ngx_autocert_conf_t *out);
  * must be NUL-terminated. Returns an owned directory fd, or -1 with errno set.
  */
 static ngx_inline int
-ngx_autocert_open_dir_path(const char *path, ngx_uint_t create, mode_t mode)
+ngx_autocert_open_dir_path(const char *path, ngx_uint_t create,
+    ngx_autocert_mode_t mode)
 {
     char         name[NGX_MAX_PATH];
     const char  *p, *q;
@@ -285,14 +311,15 @@ ngx_autocert_openat(int dfd, const char *name, int flags)
  * to a security descriptor, not to a mode_t).
  */
 static ngx_inline int
-ngx_autocert_openat_mode(int dfd, const char *name, int flags, mode_t mode)
+ngx_autocert_openat_mode(int dfd, const char *name, int flags,
+    ngx_autocert_mode_t mode)
 {
     return openat(dfd, name, flags, mode);
 }
 
 
 static ngx_inline int
-ngx_autocert_mkdirat(int dfd, const char *name, mode_t mode)
+ngx_autocert_mkdirat(int dfd, const char *name, ngx_autocert_mode_t mode)
 {
     return mkdirat(dfd, name, mode);
 }
