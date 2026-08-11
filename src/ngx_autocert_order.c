@@ -17,10 +17,13 @@
 
 #include <fcntl.h>
 #include <sys/stat.h>
-#include <sys/wait.h>
 #include <signal.h>
 #include <time.h>
+
+#if !(NGX_WIN32)
+#include <sys/wait.h>          /* waitpid(2) — dns-01 hook reap (W8 ports this) */
 #include <unistd.h>
+#endif
 
 #include <openssl/bio.h>
 #include <openssl/pem.h>

@@ -14,7 +14,10 @@
 #include <openssl/pem.h>
 
 #include <fcntl.h>
+
+#if !(NGX_WIN32)
 #include <unistd.h>
+#endif
 
 
 static ngx_int_t ngx_autocert_account_load_key(ngx_autocert_account_t *acct);

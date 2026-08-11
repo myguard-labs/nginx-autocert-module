@@ -26,12 +26,15 @@
 #include <ngx_core.h>
 #include <ngx_event.h>
 
-#include <sys/file.h>          /* flock(2) — interprocess singleton gate */
 #include <sys/stat.h>          /* mkdirat(2) — M3 per-CA account dirs */
 #include <fcntl.h>             /* openat/AT_* — M3 atomic key migration */
-#include <unistd.h>            /* close(2), renameat(2) */
 #include <errno.h>             /* EINVAL/ENOTTY/EOPNOTSUPP for renameat2 */
+
+#if !(NGX_WIN32)
+#include <sys/file.h>          /* flock(2) — interprocess singleton gate */
+#include <unistd.h>            /* close(2), renameat(2) */
 #include <dirent.h>            /* A6: opendir/readdir the store container */
+#endif
 
 /*
  * M3: migrate the legacy account key with RENAME_NOREPLACE so it can never

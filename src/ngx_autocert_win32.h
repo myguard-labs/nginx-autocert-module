@@ -109,6 +109,65 @@ typedef int  ngx_autocert_dirfd_t;
 
 
 /*
+ * W7 — the trivial primitives.
+ *
+ * Only the mappings that are genuinely one-to-one live here. Anything with a
+ * semantic gap is deliberately absent and belongs to its own step: fchmod is
+ * W11 (no NTFS analogue without an ACL), flock is W10 (LockFileEx), fork/execve
+ * are W8 (CreateProcess + Job Object), fdopendir is W12.
+ *
+ * MinGW-w64 supplies POSIX spellings for several of these, but they are mapped
+ * unconditionally on win32 anyway: if the two toolchains take different code
+ * paths, only one of them is ever exercised by whichever CI lane runs, and the
+ * other rots silently.
+ */
+
+#define ngx_autocert_close(fd)          _close(fd)
+#define ngx_autocert_read(fd, b, n)     _read(fd, b, (unsigned int) (n))
+#define ngx_autocert_write(fd, b, n)    _write(fd, b, (unsigned int) (n))
+
+/*
+ * ftruncate -> _chsize_s. Note the return convention differs: ftruncate()
+ * returns -1 and sets errno, _chsize_s() RETURNS the errno value directly and
+ * leaves errno alone. Normalised here so callers keep their -1 test.
+ */
+#define ngx_autocert_ftruncate(fd, len)                                       \
+    (_chsize_s(fd, (__int64) (len)) == 0 ? 0 : -1)
+
+/*
+ * geteuid() has no win32 meaning. The POSIX callers use it only for a
+ * "are we root?" style check; on win32 that question is answered by token
+ * elevation, not a uid. Returning a non-zero constant makes the caller take
+ * the unprivileged branch, which is the safe default. W11 revisits privilege
+ * checks properly when it implements the key ACL.
+ */
+#define ngx_autocert_geteuid()          ((ngx_uid_t) 1)
+
+/*
+ * nanosleep -> Sleep. The POSIX call takes ns, Sleep takes whole ms; a sub-ms
+ * request must not become a busy-spin of Sleep(0), so it rounds UP to 1ms.
+ */
+#define ngx_autocert_sleep_ns(ns)                                             \
+    Sleep((DWORD) (((ns) + 999999LL) / 1000000LL))
+
+/*
+ * Monotonic milliseconds, for the dns-01 hook wait deadline.
+ *
+ * Mapped at the millisecond level rather than as a clock_gettime() shim: the
+ * only caller (ngx_autocert_dns_monotonic) immediately reduces a timespec to
+ * ms, so synthesising a struct timespec just to divide it again would add a
+ * conversion without adding fidelity.
+ *
+ * GetTickCount64, NOT QueryPerformanceCounter: the deadline needs a clock that
+ * is monotonic and cheap, not one that is high-resolution. QPC would also need
+ * a frequency division per call. GetTickCount64 is 64-bit, so it does not wrap
+ * (the 32-bit GetTickCount wraps after 49.7 days, which would silently expire
+ * a hook wait on a long-lived worker).
+ */
+#define ngx_autocert_monotonic_ms()     ((uint64_t) GetTickCount64())
+
+
+/*
  * Map GetLastError()/NTSTATUS to the errno values the seam's callers already
  * branch on (EEXIST, ENOENT, EAGAIN, ENOTEMPTY, ELOOP...).
  *

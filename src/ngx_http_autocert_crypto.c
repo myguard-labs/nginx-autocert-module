@@ -11,8 +11,11 @@
 #include <errno.h>
 #include <time.h>
 #include <fcntl.h>
-#include <unistd.h>
 #include <stdint.h>
+
+#if !(NGX_WIN32)
+#include <unistd.h>
+#endif
 
 #include <openssl/ec.h>
 #include <openssl/bn.h>
