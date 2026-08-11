@@ -85,6 +85,53 @@
 
 
 /*
+ * mode_t shim. MSVC's CRT does not define mode_t at all (a bare `mode_t`
+ * parameter is a hard parse error there); MinGW-w64's CRT DOES define it, so
+ * this must never `#define mode_t` — that would collide and fail to build on
+ * MinGW specifically. A distinct name sidesteps both problems and is usable
+ * from either toolchain.
+ *
+ * The value carried in this type is still a POSIX permission bitmask (e.g.
+ * 0600, 0700) exactly as the POSIX call sites already spell it — this header
+ * does not reinterpret it. W5b's win32 branch is what translates that
+ * bitmask into a security descriptor when it implements the shim bodies;
+ * nothing in W5a applies it to anything.
+ */
+typedef unsigned int  ngx_autocert_mode_t;
+
+
+/*
+ * POSIX open() flags the call sites spell (O_DIRECTORY, O_NOFOLLOW, O_CLOEXEC,
+ * O_NONBLOCK, ...) so the shared call sites in ngx_autocert_shared.h keep
+ * exactly one spelling on both platforms. On win32 these are NOT passed to a
+ * CRT _open()/_sopen_s() — the win32 branch of the shim (W5b) interprets each
+ * bit itself (e.g. O_NOFOLLOW selects FILE_FLAG_OPEN_REPARSE_POINT) and never
+ * forwards the raw flag word to the CRT or to CreateFileW/NtCreateFile. A call
+ * site's O_NOFOLLOW therefore remains meaningful on win32 even though there is
+ * no CRT-level equivalent of the flag itself.
+ *
+ * MinGW-w64's <fcntl.h> defines some of these already (its O_RDONLY etc. are
+ * CRT-meaningful and must be left alone); each shim-only flag is guarded with
+ * #ifndef so MinGW's own definition always wins where one exists, and MSVC
+ * (which defines none of them) picks up the shim value. Bits are placed at
+ * 0x01000000 and up specifically so they cannot collide with any low-bit flag
+ * either CRT already assigns to _O_* / O_* constants.
+ */
+#ifndef O_DIRECTORY
+#define O_DIRECTORY   0x01000000
+#endif
+#ifndef O_NOFOLLOW
+#define O_NOFOLLOW    0x02000000
+#endif
+#ifndef O_CLOEXEC
+#define O_CLOEXEC     0x04000000
+#endif
+#ifndef O_NONBLOCK
+#define O_NONBLOCK    0x08000000
+#endif
+
+
+/*
  * A pinned directory. The shim's public signatures stay int-fd-typed on both
  * platforms (see the helpers in ngx_autocert_shared.h): on win32 the int is a
  * CRT fd from _open_osfhandle(), and the HANDLE underneath is recovered with
@@ -178,6 +225,22 @@ typedef int  ngx_autocert_dirfd_t;
  * Defined in ngx_autocert_shared.h with the other shim bodies.
  */
 int ngx_autocert_win32_errno(DWORD err);
+
+
+/*
+ * NGX_EINTR retry predicate.
+ *
+ * nginx core does not define NGX_EINTR on win32 at all (src/os/win32/ngx_errno.h
+ * has no entry for it) — a bare `ngx_errno == NGX_EINTR` is therefore a hard
+ * compile error on win32, not merely a wrong answer. The retry loops that test
+ * it (e.g. the flock() spin at driver.c) exist because a POSIX blocking syscall
+ * can be interrupted by a caught signal mid-wait and must be retried. Win32 has
+ * no analogous "signal arrived during this syscall" outcome for these calls, so
+ * the predicate is a compile-time-constant false here: the branch it guards is
+ * simply unreachable on win32, which is the correct behaviour, not a gap being
+ * papered over.
+ */
+#define ngx_autocert_err_is_intr(err)   0
 
 #endif /* NGX_WIN32 */
 
