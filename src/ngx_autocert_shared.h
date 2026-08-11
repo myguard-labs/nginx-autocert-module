@@ -312,7 +312,13 @@ ngx_autocert_open_file_path(const char *path, int flags)
  * AT_REMOVEDIR and AT_SYMLINK_NOFOLLOW are load-bearing at their call sites,
  * and a helper that silently picked one would be a security change disguised as
  * a refactor.
+ *
+ * POSIX bodies below are guarded #if !(NGX_WIN32); the win32 bodies live in
+ * ngx_autocert_win32.h (W5c). Public signatures are byte-identical on both
+ * platforms — see DESIGN-win32-store-io.md § W1.
  */
+
+#if !(NGX_WIN32)
 
 static ngx_inline int
 ngx_autocert_openat(int dfd, const char *name, int flags)
@@ -388,6 +394,8 @@ ngx_autocert_renameat2(int oldfd, const char *oldp, int newfd,
     return NGX_DECLINED;
 #endif
 }
+
+#endif /* !(NGX_WIN32) */
 
 
 #endif /* _NGX_AUTOCERT_SHARED_H_INCLUDED_ */
