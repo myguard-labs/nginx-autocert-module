@@ -1007,7 +1007,7 @@ ngx_autocert_order_dns_hook(ngx_autocert_order_t *order, ngx_str_t *hook,
                 maxfd = 1024;
             }
             for (fd = 3; fd < maxfd; fd++) {
-                (void) close((int) fd);
+                (void) ngx_autocert_close((int) fd);
             }
         }
 
@@ -2305,12 +2305,12 @@ ngx_autocert_order_store(ngx_autocert_order_t *order)
         if (ngx_autocert_mkdirat(bfd, "live", 0755) == -1 && ngx_errno != NGX_EEXIST) {
             ngx_log_error(NGX_LOG_ERR, order->log, ngx_errno,
                           "autocert: mkdir(\"%s\") failed", cdir);
-            (void) close(bfd);
+            (void) ngx_autocert_close(bfd);
             return NGX_ERROR;
         }
         cfd = ngx_autocert_openat(bfd, "live",
                      O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
-        (void) close(bfd);
+        (void) ngx_autocert_close(bfd);
         if (cfd == -1) {
             ngx_log_error(NGX_LOG_ERR, order->log, ngx_errno,
                           "autocert: open store dir \"%s\" failed", cdir);
@@ -2331,7 +2331,7 @@ ngx_autocert_order_store(ngx_autocert_order_t *order)
         ngx_log_error(NGX_LOG_ERR, order->log, 0,
                       "autocert: store segment too long for \"%V\"",
                       &order->domain);
-        (void) close(cfd);
+        (void) ngx_autocert_close(cfd);
         return NGX_ERROR;
     }
     ngx_memcpy(dir, seg.data, seg.len);
@@ -2346,7 +2346,7 @@ ngx_autocert_order_store(ngx_autocert_order_t *order)
     if (ngx_autocert_mkdirat(cfd, (char *) staging, 0700) == -1) {
         ngx_log_error(NGX_LOG_ERR, order->log, ngx_errno,
                       "autocert: mkdir(\"%s\") failed", staging);
-        (void) close(cfd);
+        (void) ngx_autocert_close(cfd);
         return NGX_ERROR;
     }
 
@@ -2359,23 +2359,23 @@ ngx_autocert_order_store(ngx_autocert_order_t *order)
         ngx_log_error(NGX_LOG_ERR, order->log, ngx_errno,
                       "autocert: open staging \"%s\" failed", staging);
         ngx_autocert_order_rm_staging_at(cfd, (char *) staging);
-        (void) close(cfd);
+        (void) ngx_autocert_close(cfd);
         return NGX_ERROR;
     }
     if (fstat(sfd, &st) == -1 || !S_ISDIR(st.st_mode)) {
         ngx_log_error(NGX_LOG_ERR, order->log, ngx_errno,
                       "autocert: staging \"%s\" is not a directory", staging);
-        (void) close(sfd);
+        (void) ngx_autocert_close(sfd);
         ngx_autocert_order_rm_staging_at(cfd, (char *) staging);
-        (void) close(cfd);
+        (void) ngx_autocert_close(cfd);
         return NGX_ERROR;
     }
 
 #define NGX_AUTOCERT_STORE_FAIL()                                            \
     do {                                                                     \
-        (void) close(sfd);                                                   \
+        (void) ngx_autocert_close(sfd);                                                   \
         ngx_autocert_order_rm_staging_at(cfd, (char *) staging);            \
-        (void) close(cfd);                                                   \
+        (void) ngx_autocert_close(cfd);                                                   \
         return NGX_ERROR;                                                    \
     } while (0)
 
@@ -2437,7 +2437,7 @@ ngx_autocert_order_store(ngx_autocert_order_t *order)
     if (ngx_autocert_order_fsync_dirfd(order, sfd, (char *) staging) != NGX_OK) {
         NGX_AUTOCERT_STORE_FAIL();
     }
-    (void) close(sfd);
+    (void) ngx_autocert_close(sfd);
 
 #undef NGX_AUTOCERT_STORE_FAIL
 
@@ -2449,7 +2449,7 @@ ngx_autocert_order_store(ngx_autocert_order_t *order)
             ngx_log_error(NGX_LOG_ERR, order->log, ngx_errno,
                           "autocert: lstat(\"%s\") failed", dir);
             ngx_autocert_order_rm_staging_at(cfd, (char *) staging);
-            (void) close(cfd);
+            (void) ngx_autocert_close(cfd);
             return NGX_ERROR;
         }
 
@@ -2468,7 +2468,7 @@ ngx_autocert_order_store(ngx_autocert_order_t *order)
                           "atomically commit \"%s\" without risking a clobber; "
                           "deferring", dir);
             ngx_autocert_order_rm_staging_at(cfd, (char *) staging);
-            (void) close(cfd);
+            (void) ngx_autocert_close(cfd);
             return NGX_ERROR;
         }
         if (rc != NGX_OK) {
@@ -2476,11 +2476,11 @@ ngx_autocert_order_store(ngx_autocert_order_t *order)
                           "autocert: rename(\"%s\" -> \"%s\") failed",
                           staging, dir);
             ngx_autocert_order_rm_staging_at(cfd, (char *) staging);
-            (void) close(cfd);
+            (void) ngx_autocert_close(cfd);
             return NGX_ERROR;
         }
         rc = ngx_autocert_order_fsync_dirfd(order, cfd, (char *) cdir);
-        (void) close(cfd);
+        (void) ngx_autocert_close(cfd);
         return rc;
     }
 
@@ -2490,7 +2490,7 @@ ngx_autocert_order_store(ngx_autocert_order_t *order)
         ngx_log_error(NGX_LOG_ERR, order->log, 0,
                       "autocert: store path \"%s\" is not a directory", dir);
         ngx_autocert_order_rm_staging_at(cfd, (char *) staging);
-        (void) close(cfd);
+        (void) ngx_autocert_close(cfd);
         return NGX_ERROR;
     }
 
@@ -2501,12 +2501,12 @@ ngx_autocert_order_store(ngx_autocert_order_t *order)
         /* staging now holds the OLD pair; drop it. */
         ngx_autocert_order_rm_staging_at(cfd, (char *) staging);
         rc = ngx_autocert_order_fsync_dirfd(order, cfd, (char *) cdir);
-        (void) close(cfd);
+        (void) ngx_autocert_close(cfd);
         return rc;
     }
 
     ngx_autocert_order_rm_staging_at(cfd, (char *) staging);
-    (void) close(cfd);
+    (void) ngx_autocert_close(cfd);
 
     if (swap == NGX_ERROR) {
         return NGX_ERROR;
@@ -2579,7 +2579,7 @@ ngx_autocert_order_rm_staging_at(int cfd, const char *leaf)
             (void) ngx_autocert_unlinkat(fd, ngx_autocert_store_files[i], 0);
         }
     }
-    (void) close(fd);
+    (void) ngx_autocert_close(fd);
     (void) ngx_autocert_unlinkat(cfd, leaf, AT_REMOVEDIR);
 }
 
@@ -2668,7 +2668,7 @@ ngx_autocert_order_seed_staging_at(ngx_autocert_order_t *order, int cfd,
             ngx_log_error(NGX_LOG_ERR, order->log, ngx_errno,
                           "autocert: seed staging fstatat(\"%s\") failed; "
                           "aborting store to preserve the live cert", name);
-            (void) close(lfd);
+            (void) ngx_autocert_close(lfd);
             return NGX_ERROR;
         }
         if (!S_ISREG(st.st_mode)) {
@@ -2682,12 +2682,12 @@ ngx_autocert_order_seed_staging_at(ngx_autocert_order_t *order, int cfd,
             ngx_log_error(NGX_LOG_ERR, order->log, ngx_errno,
                           "autocert: seed staging linkat(\"%s\") failed; "
                           "aborting store to preserve the live cert", name);
-            (void) close(lfd);
+            (void) ngx_autocert_close(lfd);
             return NGX_ERROR;
         }
     }
 
-    (void) close(lfd);
+    (void) ngx_autocert_close(lfd);
     return NGX_OK;
 }
 
@@ -2745,7 +2745,7 @@ ngx_autocert_order_write_tmp_at(ngx_autocert_order_t *order, int sfd,
     if (fchmod(fd, (mode_t) mode) == -1) {
         ngx_log_error(NGX_LOG_ERR, order->log, ngx_errno,
                       "autocert: fchmod(\"%s\") failed", leaf);
-        (void) close(fd);
+        (void) ngx_autocert_close(fd);
         (void) ngx_autocert_unlinkat(sfd, leaf, 0);
         return NGX_ERROR;
     }
@@ -2759,7 +2759,7 @@ ngx_autocert_order_write_tmp_at(ngx_autocert_order_t *order, int sfd,
             }
             ngx_log_error(NGX_LOG_ERR, order->log, ngx_errno,
                           "autocert: write(\"%s\") failed", leaf);
-            (void) close(fd);
+            (void) ngx_autocert_close(fd);
             (void) ngx_autocert_unlinkat(sfd, leaf, 0);
             return NGX_ERROR;
         }
@@ -2767,7 +2767,7 @@ ngx_autocert_order_write_tmp_at(ngx_autocert_order_t *order, int sfd,
             /* zero progress on a non-empty remainder — fail rather than spin. */
             ngx_log_error(NGX_LOG_ERR, order->log, 0,
                           "autocert: write(\"%s\") made no progress", leaf);
-            (void) close(fd);
+            (void) ngx_autocert_close(fd);
             (void) ngx_autocert_unlinkat(sfd, leaf, 0);
             return NGX_ERROR;
         }
@@ -2776,12 +2776,12 @@ ngx_autocert_order_write_tmp_at(ngx_autocert_order_t *order, int sfd,
     if (fsync(fd) == -1) {
         ngx_log_error(NGX_LOG_ERR, order->log, ngx_errno,
                       "autocert: fsync(\"%s\") failed", leaf);
-        (void) close(fd);
+        (void) ngx_autocert_close(fd);
         (void) ngx_autocert_unlinkat(sfd, leaf, 0);
         return NGX_ERROR;
     }
 
-    if (close(fd) == -1) {
+    if (ngx_autocert_close(fd) == -1) {
         ngx_log_error(NGX_LOG_ERR, order->log, ngx_errno,
                       "autocert: close(\"%s\") failed", leaf);
         (void) ngx_autocert_unlinkat(sfd, leaf, 0);

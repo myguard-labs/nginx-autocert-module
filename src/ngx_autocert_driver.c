@@ -165,7 +165,16 @@ static ngx_event_t                  ngx_autocert_kick_timer;
  * The kernel drops the lock when the holder exits (clean or crash), and the
  * loser retries on a slow timer so the survivor takes over with no gap.
  */
-static ngx_fd_t                     ngx_autocert_lock_fd = -1;
+/*
+ * A CRT/POSIX int fd, not ngx_fd_t: it is assigned from
+ * ngx_autocert_openat_mode() (the int-returning pinned-open helper), passed
+ * to flock(), and closed via ngx_autocert_close(). ngx_fd_t is HANDLE on
+ * win32 (see os/win32/ngx_files.h); using it here would mean assigning a CRT
+ * int into a HANDLE-typed variable and later CloseHandle()'ing it, both
+ * wrong. int keeps this variable coherent with the shim family it is
+ * actually built on.
+ */
+static int                          ngx_autocert_lock_fd = -1;
 static ngx_event_t                  ngx_autocert_relock_timer;
 
 
@@ -204,7 +213,7 @@ ngx_autocert_mkdirat_secure(ngx_cycle_t *cycle, int pfd, const char *leaf)
     if (fstat(fd, &st) == -1 || !S_ISDIR(st.st_mode)) {
         ngx_log_error(NGX_LOG_ERR, cycle->log, ngx_errno,
                       "autocert: \"%s\" is not a directory", leaf);
-        (void) close(fd);
+        (void) ngx_autocert_close(fd);
         return -1;
     }
     return fd;
@@ -255,7 +264,7 @@ ngx_autocert_prepare_account_key(ngx_cycle_t *cycle, ngx_autocert_conf_t *acf,
     /* <path>/accounts then <path>/accounts/<ca_hash>, each pinned NOFOLLOW. */
     accfd = ngx_autocert_mkdirat_secure(cycle, bfd, "accounts");
     if (accfd == -1) {
-        (void) close(bfd);
+        (void) ngx_autocert_close(bfd);
         return NULL;
     }
 
@@ -263,9 +272,9 @@ ngx_autocert_prepare_account_key(ngx_cycle_t *cycle, ngx_autocert_conf_t *acf,
     hash[NGX_AUTOCERT_CA_HASH_HEX] = '\0';
 
     cafd = ngx_autocert_mkdirat_secure(cycle, accfd, hash);
-    (void) close(accfd);
+    (void) ngx_autocert_close(accfd);
     if (cafd == -1) {
-        (void) close(bfd);
+        (void) ngx_autocert_close(bfd);
         return NULL;
     }
 
@@ -273,8 +282,8 @@ ngx_autocert_prepare_account_key(ngx_cycle_t *cycle, ngx_autocert_conf_t *acf,
      * single-CA deploy's flat <path>/account.key belongs to the first CA; a
      * second CA must not claim it. */
     if (!migrate) {
-        (void) close(cafd);
-        (void) close(bfd);
+        (void) ngx_autocert_close(cafd);
+        (void) ngx_autocert_close(bfd);
         return key_path;
     }
 
@@ -323,8 +332,8 @@ ngx_autocert_prepare_account_key(ngx_cycle_t *cycle, ngx_autocert_conf_t *acf,
         }
     }
 
-    (void) close(cafd);
-    (void) close(bfd);
+    (void) ngx_autocert_close(cafd);
+    (void) ngx_autocert_close(bfd);
     return key_path;
 }
 
@@ -2154,7 +2163,7 @@ ngx_autocert_runtime_marker_write(ngx_cycle_t *cycle, ngx_autocert_conf_t *acf,
      */
     fd = ngx_autocert_openat_mode(dfd, NGX_AUTOCERT_RUNTIME_MARKER,
                 O_WRONLY | O_CREAT | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC, 0644);
-    (void) close(dfd);
+    (void) ngx_autocert_close(dfd);
     if (fd == -1) {
         ngx_log_error(NGX_LOG_ERR, cycle->log, ngx_errno,
                       "autocert: A6 failed to write runtime marker for \"%V\" "
@@ -2165,7 +2174,7 @@ ngx_autocert_runtime_marker_write(ngx_cycle_t *cycle, ngx_autocert_conf_t *acf,
     /* Only ever write into a regular file, and only one with a single link — a
      * hard link to someone else's file must not be truncated through this fd. */
     if (fstat(fd, &st) == -1 || !S_ISREG(st.st_mode) || st.st_nlink != 1) {
-        (void) close(fd);
+        (void) ngx_autocert_close(fd);
         ngx_log_error(NGX_LOG_ERR, cycle->log, 0,
                       "autocert: A6 refusing non-regular runtime marker path "
                       "for \"%V\"", host);
@@ -2174,7 +2183,7 @@ ngx_autocert_runtime_marker_write(ngx_cycle_t *cycle, ngx_autocert_conf_t *acf,
 
     /* now that the fd is known to be a plain, single-linked regular file */
     if (ftruncate(fd, 0) == -1) {
-        (void) close(fd);
+        (void) ngx_autocert_close(fd);
         ngx_log_error(NGX_LOG_ERR, cycle->log, ngx_errno,
                       "autocert: A6 failed to truncate runtime marker for \"%V\"",
                       host);
@@ -2187,7 +2196,7 @@ ngx_autocert_runtime_marker_write(ngx_cycle_t *cycle, ngx_autocert_conf_t *acf,
                       "for \"%V\"", host);
     }
 
-    (void) close(fd);
+    (void) ngx_autocert_close(fd);
 }
 
 
@@ -2232,7 +2241,7 @@ ngx_autocert_runtime_marker_remove(ngx_cycle_t *cycle,
                       "\"%V\" (restart may resurrect it)", host);
     }
 
-    (void) close(dfd);
+    (void) ngx_autocert_close(dfd);
 }
 
 
@@ -2297,7 +2306,7 @@ ngx_autocert_runtime_seed(ngx_cycle_t *cycle)
 
     dh = fdopendir(cfd);
     if (dh == NULL) {
-        (void) close(cfd);
+        (void) ngx_autocert_close(cfd);
         return;
     }
 
@@ -2330,7 +2339,7 @@ ngx_autocert_runtime_seed(ngx_cycle_t *cycle)
         mfd = ngx_autocert_openat(dfd, NGX_AUTOCERT_RUNTIME_MARKER,
                      O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
         if (mfd == -1) {
-            (void) close(dfd);
+            (void) ngx_autocert_close(dfd);
             continue;                    /* not a runtime dir (or config-only) */
         }
 
@@ -2338,14 +2347,14 @@ ngx_autocert_runtime_seed(ngx_cycle_t *cycle)
             || mst.st_size <= 0
             || (size_t) mst.st_size > NGX_AUTOCERT_REQUEST_NAME_MAX)
         {
-            (void) close(mfd);
-            (void) close(dfd);
+            (void) ngx_autocert_close(mfd);
+            (void) ngx_autocert_close(dfd);
             continue;                    /* not a plain, right-sized marker */
         }
 
         n = read(mfd, hostbuf, sizeof(hostbuf));
-        (void) close(mfd);
-        (void) close(dfd);
+        (void) ngx_autocert_close(mfd);
+        (void) ngx_autocert_close(dfd);
 
         if (n <= 0 || (size_t) n != (size_t) mst.st_size) {
             continue;                    /* short read / raced truncate: ignore */
@@ -2440,7 +2449,7 @@ ngx_autocert_driver_trylock(ngx_cycle_t *cycle)
     ngx_autocert_lock_fd = ngx_autocert_openat_mode(bfd, ".driver.lock",
                                   O_RDWR | O_CREAT | O_NOFOLLOW | O_CLOEXEC,
                                   0600);
-    (void) close(bfd);
+    (void) ngx_autocert_close(bfd);
     if (ngx_autocert_lock_fd == -1) {
         ngx_log_error(NGX_LOG_ERR, cycle->log, ngx_errno,
                       "autocert: open lock file in store \"%s\" failed", path);
@@ -2456,13 +2465,13 @@ ngx_autocert_driver_trylock(ngx_cycle_t *cycle)
         }
         if (ngx_errno == NGX_EAGAIN || ngx_errno == EWOULDBLOCK) {
             /* Another process (the prior generation's worker 0) holds it. */
-            (void) close(ngx_autocert_lock_fd);
+            (void) ngx_autocert_close(ngx_autocert_lock_fd);
             ngx_autocert_lock_fd = -1;
             return NGX_AGAIN;
         }
         ngx_log_error(NGX_LOG_ERR, cycle->log, ngx_errno,
                       "autocert: flock() lock file \"%s\" failed", path);
-        (void) close(ngx_autocert_lock_fd);
+        (void) ngx_autocert_close(ngx_autocert_lock_fd);
         ngx_autocert_lock_fd = -1;
         return NGX_ERROR;
     }
@@ -2677,7 +2686,7 @@ ngx_autocert_driver_exit_process(ngx_cycle_t *cycle)
     /* Release the singleton lock (kernel drops it on close) so the next
      * generation's worker 0 can take over immediately. */
     if (ngx_autocert_lock_fd != -1) {
-        (void) close(ngx_autocert_lock_fd);
+        (void) ngx_autocert_close(ngx_autocert_lock_fd);
         ngx_autocert_lock_fd = -1;
         ngx_log_error(NGX_LOG_NOTICE, cycle->log, 0,
                       "autocert: released driver lock, pid %P", ngx_pid);
@@ -2743,7 +2752,7 @@ ngx_autocert_driver_reload(ngx_cycle_t *cycle)
      * re-locks the same path when unchanged, moves to the new path when changed,
      * and stays unlocked (idle) when the new config has no issuable names. */
     if (ngx_autocert_lock_fd != -1) {
-        (void) close(ngx_autocert_lock_fd);
+        (void) ngx_autocert_close(ngx_autocert_lock_fd);
         ngx_autocert_lock_fd = -1;
     }
 
