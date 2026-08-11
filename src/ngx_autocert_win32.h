@@ -294,6 +294,19 @@ static ngx_inline int ngx_autocert_win32_errno(DWORD err);
  * and MinGW-w64 agree on.
  */
 
+/*
+ * NTSTATUS is part of that minimal surface and must be declared here: neither
+ * toolchain defines it from <windows.h> alone (it lives in <winternl.h> /
+ * <ntdef.h>, which this header deliberately does not pull in). It is a plain
+ * signed 32-bit status in the NT ABI, which MSVC and MinGW-w64 agree on.
+ * Guarded so that a TU which already included <winternl.h> for other reasons
+ * keeps the SDK's own typedef.
+ */
+#ifndef NGX_AUTOCERT_HAVE_NTSTATUS
+#define NGX_AUTOCERT_HAVE_NTSTATUS  1
+typedef LONG  NTSTATUS;
+#endif
+
 #ifndef NT_SUCCESS
 #define NT_SUCCESS(status)  (((NTSTATUS) (status)) >= 0)
 #endif
