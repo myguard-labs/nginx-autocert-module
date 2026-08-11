@@ -17,10 +17,13 @@
 
 #include <fcntl.h>
 #include <sys/stat.h>
-#include <sys/wait.h>
 #include <signal.h>
 #include <time.h>
+
+#if !(NGX_WIN32)
+#include <sys/wait.h>          /* waitpid(2) — dns-01 hook reap (W8 ports this) */
 #include <unistd.h>
+#endif
 
 #include <openssl/bio.h>
 #include <openssl/pem.h>
@@ -2299,13 +2302,13 @@ ngx_autocert_order_store(ngx_autocert_order_t *order)
                           &order->store_path);
             return NGX_ERROR;
         }
-        if (mkdirat(bfd, "live", 0755) == -1 && ngx_errno != NGX_EEXIST) {
+        if (ngx_autocert_mkdirat(bfd, "live", 0755) == -1 && ngx_errno != NGX_EEXIST) {
             ngx_log_error(NGX_LOG_ERR, order->log, ngx_errno,
                           "autocert: mkdir(\"%s\") failed", cdir);
             (void) close(bfd);
             return NGX_ERROR;
         }
-        cfd = openat(bfd, "live",
+        cfd = ngx_autocert_openat(bfd, "live",
                      O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
         (void) close(bfd);
         if (cfd == -1) {
@@ -2340,7 +2343,7 @@ ngx_autocert_order_store(ngx_autocert_order_t *order)
      * one we own (0700) relative to the pinned container. */
     ngx_autocert_order_rm_staging_at(cfd, (char *) staging);
 
-    if (mkdirat(cfd, (char *) staging, 0700) == -1) {
+    if (ngx_autocert_mkdirat(cfd, (char *) staging, 0700) == -1) {
         ngx_log_error(NGX_LOG_ERR, order->log, ngx_errno,
                       "autocert: mkdir(\"%s\") failed", staging);
         (void) close(cfd);
@@ -2350,7 +2353,7 @@ ngx_autocert_order_store(ngx_autocert_order_t *order)
     /* Re-open the staging dir we just made, NOFOLLOW, and verify it is a real
      * directory (defeats a swap of "<seg>.tmp" between mkdirat and this open).
      * All PEM writes go *at()-relative to this staging fd. */
-    sfd = openat(cfd, (char *) staging,
+    sfd = ngx_autocert_openat(cfd, (char *) staging,
                  O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
     if (sfd == -1) {
         ngx_log_error(NGX_LOG_ERR, order->log, ngx_errno,
@@ -2440,7 +2443,7 @@ ngx_autocert_order_store(ngx_autocert_order_t *order)
 
     /* Commit, relative to the pinned container. fstatat NOFOLLOW so a planted
      * symlink at "<seg>" is detected, not followed. */
-    if (fstatat(cfd, (char *) dir, &st, AT_SYMLINK_NOFOLLOW) == -1) {
+    if (ngx_autocert_fstatat(cfd, (char *) dir, &st, AT_SYMLINK_NOFOLLOW) == -1) {
 
         if (ngx_errno != NGX_ENOENT) {
             ngx_log_error(NGX_LOG_ERR, order->log, ngx_errno,
@@ -2554,14 +2557,14 @@ ngx_autocert_order_rm_staging_at(int cfd, const char *leaf)
 {
     int  fd;
 
-    fd = openat(cfd, leaf, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    fd = ngx_autocert_openat(cfd, leaf, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
     if (fd == -1) {
         if (ngx_errno == NGX_ENOENT) {
             return;                     /* nothing there */
         }
         /* symlink (ELOOP), a file (ENOTDIR), etc. — remove the entry itself,
          * relative to the pinned dir, without following it. */
-        (void) unlinkat(cfd, leaf, 0);
+        (void) ngx_autocert_unlinkat(cfd, leaf, 0);
         return;
     }
 
@@ -2573,11 +2576,11 @@ ngx_autocert_order_rm_staging_at(int cfd, const char *leaf)
     {
         int  i;
         for (i = 0; ngx_autocert_store_files[i] != NULL; i++) {
-            (void) unlinkat(fd, ngx_autocert_store_files[i], 0);
+            (void) ngx_autocert_unlinkat(fd, ngx_autocert_store_files[i], 0);
         }
     }
     (void) close(fd);
-    (void) unlinkat(cfd, leaf, AT_REMOVEDIR);
+    (void) ngx_autocert_unlinkat(cfd, leaf, AT_REMOVEDIR);
 }
 
 
@@ -2628,7 +2631,7 @@ ngx_autocert_order_seed_staging_at(ngx_autocert_order_t *order, int cfd,
     /* This keytype's own names — excluded from seeding (see CRITICAL above). */
     ngx_autocert_keytype_pem_names(skip_kt, &sp, &sc, &sl, &sr);
 
-    lfd = openat(cfd, dir, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    lfd = ngx_autocert_openat(cfd, dir, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
     if (lfd == -1) {
         /* No live dir yet (first issuance) or it is not a real dir — nothing to
          * carry forward; the commit handles a non-dir live entry. ONLY ENOENT/
@@ -2658,7 +2661,7 @@ ngx_autocert_order_seed_staging_at(ngx_autocert_order_t *order, int cfd,
          * file (ENOENT) is fine — the other keytype simply has not issued it.
          * Any other fstatat errno is a real failure on a possibly-PRESENT file:
          * continuing would silently drop it from staging, so fail the seed. */
-        if (fstatat(lfd, name, &st, AT_SYMLINK_NOFOLLOW) == -1) {
+        if (ngx_autocert_fstatat(lfd, name, &st, AT_SYMLINK_NOFOLLOW) == -1) {
             if (ngx_errno == NGX_ENOENT) {
                 continue;
             }
@@ -2729,7 +2732,7 @@ ngx_autocert_order_write_tmp_at(ngx_autocert_order_t *order, int sfd,
     size_t   off;
     ssize_t  n;
 
-    fd = openat(sfd, leaf,
+    fd = ngx_autocert_openat_mode(sfd, leaf,
                 O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW | O_CLOEXEC,
                 (mode_t) mode);
     if (fd == -1) {
@@ -2743,7 +2746,7 @@ ngx_autocert_order_write_tmp_at(ngx_autocert_order_t *order, int sfd,
         ngx_log_error(NGX_LOG_ERR, order->log, ngx_errno,
                       "autocert: fchmod(\"%s\") failed", leaf);
         (void) close(fd);
-        (void) unlinkat(sfd, leaf, 0);
+        (void) ngx_autocert_unlinkat(sfd, leaf, 0);
         return NGX_ERROR;
     }
 
@@ -2757,7 +2760,7 @@ ngx_autocert_order_write_tmp_at(ngx_autocert_order_t *order, int sfd,
             ngx_log_error(NGX_LOG_ERR, order->log, ngx_errno,
                           "autocert: write(\"%s\") failed", leaf);
             (void) close(fd);
-            (void) unlinkat(sfd, leaf, 0);
+            (void) ngx_autocert_unlinkat(sfd, leaf, 0);
             return NGX_ERROR;
         }
         if (n == 0) {
@@ -2765,7 +2768,7 @@ ngx_autocert_order_write_tmp_at(ngx_autocert_order_t *order, int sfd,
             ngx_log_error(NGX_LOG_ERR, order->log, 0,
                           "autocert: write(\"%s\") made no progress", leaf);
             (void) close(fd);
-            (void) unlinkat(sfd, leaf, 0);
+            (void) ngx_autocert_unlinkat(sfd, leaf, 0);
             return NGX_ERROR;
         }
     }
@@ -2774,14 +2777,14 @@ ngx_autocert_order_write_tmp_at(ngx_autocert_order_t *order, int sfd,
         ngx_log_error(NGX_LOG_ERR, order->log, ngx_errno,
                       "autocert: fsync(\"%s\") failed", leaf);
         (void) close(fd);
-        (void) unlinkat(sfd, leaf, 0);
+        (void) ngx_autocert_unlinkat(sfd, leaf, 0);
         return NGX_ERROR;
     }
 
     if (close(fd) == -1) {
         ngx_log_error(NGX_LOG_ERR, order->log, ngx_errno,
                       "autocert: close(\"%s\") failed", leaf);
-        (void) unlinkat(sfd, leaf, 0);
+        (void) ngx_autocert_unlinkat(sfd, leaf, 0);
         return NGX_ERROR;
     }
 
