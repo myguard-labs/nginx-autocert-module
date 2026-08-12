@@ -438,11 +438,20 @@ typedef NTSTATUS (NTAPI *ngx_autocert_pfn_NtQueryInformationFile_t)(
     PVOID FileInformation, ULONG Length, ULONG FileInformationClass);
 
 /*
- * Lazily resolved once per process. A benign data race on first-use (two
- * workers resolving concurrently) is acceptable: GetProcAddress is idempotent
- * for a given (module, symbol) and every writer stores the same value, so a
- * torn read is impossible on a pointer-sized, naturally aligned store on
- * x86/x64. No lock is worth adding for that.
+ * Lazily resolved once per process. ngx_autocert_pfn_NtCreateFile is both the
+ * fast-path gate below AND one of the three pointers published here, so the
+ * publication order is load-bearing, not benign: it is stored LAST, after a
+ * MemoryBarrier(), specifically so that a second thread observing it non-NULL
+ * through the gate is guaranteed to also observe
+ * ngx_autocert_pfn_NtSetInformationFile and ngx_autocert_pfn_NtQueryInformationFile
+ * already published. Any writer racing to resolve stores the same values
+ * (GetProcAddress is idempotent for a given (module, symbol)), so the only
+ * thing that needs ordering is which pointer becomes visible first — publish
+ * the two non-gate pointers, THEN the gate pointer, never the other way
+ * round. Getting this backwards (or reasoning about each pointer as
+ * independently benign) is exactly the bug this comment used to describe as
+ * safe: a torn read on any one pointer is impossible, but a reader is not
+ * limited to reading only the gate.
  */
 static ngx_autocert_pfn_NtCreateFile_t
     ngx_autocert_pfn_NtCreateFile = NULL;
@@ -455,6 +464,9 @@ static ngx_inline ngx_int_t
 ngx_autocert_win32_resolve_ntdll(void)
 {
     HMODULE  ntdll;
+    ngx_autocert_pfn_NtCreateFile_t            create_fn;
+    ngx_autocert_pfn_NtSetInformationFile_t    set_fn;
+    ngx_autocert_pfn_NtQueryInformationFile_t  query_fn;
 
     if (ngx_autocert_pfn_NtCreateFile != NULL) {
         return NGX_OK;
@@ -465,23 +477,24 @@ ngx_autocert_win32_resolve_ntdll(void)
         return NGX_ERROR;
     }
 
-    ngx_autocert_pfn_NtCreateFile =
-        (ngx_autocert_pfn_NtCreateFile_t)
+    create_fn = (ngx_autocert_pfn_NtCreateFile_t)
         (void *) GetProcAddress(ntdll, "NtCreateFile");
-    ngx_autocert_pfn_NtSetInformationFile =
-        (ngx_autocert_pfn_NtSetInformationFile_t)
+    set_fn = (ngx_autocert_pfn_NtSetInformationFile_t)
         (void *) GetProcAddress(ntdll, "NtSetInformationFile");
-    ngx_autocert_pfn_NtQueryInformationFile =
-        (ngx_autocert_pfn_NtQueryInformationFile_t)
+    query_fn = (ngx_autocert_pfn_NtQueryInformationFile_t)
         (void *) GetProcAddress(ntdll, "NtQueryInformationFile");
 
-    if (ngx_autocert_pfn_NtCreateFile == NULL
-        || ngx_autocert_pfn_NtSetInformationFile == NULL
-        || ngx_autocert_pfn_NtQueryInformationFile == NULL)
-    {
-        ngx_autocert_pfn_NtCreateFile = NULL;
+    if (create_fn == NULL || set_fn == NULL || query_fn == NULL) {
         return NGX_ERROR;
     }
+
+    /* Publish the two non-gate pointers first, then the gate pointer last,
+     * with a barrier between so no reader can observe the gate non-NULL
+     * before the other two stores are visible. */
+    ngx_autocert_pfn_NtSetInformationFile = set_fn;
+    ngx_autocert_pfn_NtQueryInformationFile = query_fn;
+    MemoryBarrier();
+    ngx_autocert_pfn_NtCreateFile = create_fn;
 
     return NGX_OK;
 }
@@ -687,9 +700,15 @@ ngx_autocert_win32_check_reparse(HANDLE h)
     if (!GetFileInformationByHandleEx(h, NGX_AUTOCERT_FileAttributeTagInfo,
                                        &info, sizeof(info)))
     {
-        /* Not a reparse point (or the query failed for an unrelated reason);
-         * either way there is nothing to reject. */
-        return NGX_OK;
+        /* The handle was opened with FILE_OPEN_REPARSE_POINT, so it may BE
+         * the reparse point/link itself; an undeterminable tag is not proof
+         * the object is not a link. Callers (e.g. the account private-key
+         * open in ngx_autocert_account.c) rely on O_NOFOLLOW actually
+         * refusing a planted link, so fail closed the same way the
+         * confirmed-link branch below does rather than letting an
+         * unreadable tag silently pass the open through. */
+        SetLastError(ERROR_TOO_MANY_LINKS);
+        return NGX_ERROR;
     }
 
     if ((info.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)
@@ -767,7 +786,8 @@ ngx_autocert_openat_mode(int dfd, const char *name, int flags,
     ngx_autocert_mode_t mode)
 {
     ULONG    desired_access, options, disposition;
-    int      crt_flags;
+    int      fd, crt_flags;
+    HANDLE   h;
 
     (void) mode; /* W11 (ACL translation) owns applying this; not yet wired */
 
@@ -784,8 +804,23 @@ ngx_autocert_openat_mode(int dfd, const char *name, int flags,
                   ? NGX_AUTOCERT_FILE_CREATE
                   : NGX_AUTOCERT_FILE_OPEN_IF;
 
-    return ngx_autocert_win32_ntopen(dfd, name, desired_access, disposition, options,
-                                      crt_flags);
+    fd = ngx_autocert_win32_ntopen(dfd, name, desired_access, disposition, options,
+                                    crt_flags);
+    if (fd == -1) {
+        return -1;
+    }
+
+    if (flags & O_NOFOLLOW) {
+        h = ngx_autocert_fd_handle(fd);
+        if (ngx_autocert_win32_check_reparse(h) != NGX_OK) {
+            DWORD  err = GetLastError();
+            _close(fd);
+            SetLastError(err);
+            return -1;
+        }
+    }
+
+    return fd;
 }
 
 
@@ -883,6 +918,17 @@ ngx_autocert_unlinkat(int dfd, const char *name, int flags)
  * reads (verified against S_ISDIR/S_ISREG/st_nlink/st_size uses in
  * driver.c/order.c) — st_mode is approximated from the directory attribute
  * bit and a fixed permission mask, per DESIGN's documented approximation.
+ *
+ * The target's file-vs-directory type is not known up front, so the first
+ * open is directory-agnostic: plain ngx_autocert_openat() sets
+ * NGX_AUTOCERT_FILE_NON_DIRECTORY_FILE, which makes NtCreateFile reject any
+ * directory with STATUS_FILE_IS_A_DIRECTORY (mapped to ERROR_CANNOT_MAKE by
+ * ngx_autocert_win32_errno_from_ntstatus) before the S_IFDIR branch below
+ * ever gets a chance to run. Retrying with O_DIRECTORY added on exactly that
+ * error — rather than changing ngx_autocert_win32_ntopen's signature to pass
+ * neither FILE_DIRECTORY_FILE nor FILE_NON_DIRECTORY_FILE — keeps this
+ * function's O_NOFOLLOW handling identical on both opens without touching the
+ * shared open helper's contract for every other caller.
  */
 static ngx_inline int
 ngx_autocert_fstatat(int dfd, const char *name, struct stat *st, int flags)
@@ -897,6 +943,9 @@ ngx_autocert_fstatat(int dfd, const char *name, struct stat *st, int flags)
     }
 
     fd = ngx_autocert_openat(dfd, name, ntflags);
+    if (fd == -1 && GetLastError() == ERROR_CANNOT_MAKE) {
+        fd = ngx_autocert_openat(dfd, name, ntflags | O_DIRECTORY);
+    }
     if (fd == -1) {
         return -1;
     }
