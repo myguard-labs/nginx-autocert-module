@@ -865,6 +865,7 @@ ngx_autocert_win32_oa(NGX_AUTOCERT_OBJECT_ATTRIBUTES *oa,
     n = MultiByteToWideChar(CP_UTF8, 0, name, -1, wname, wname_cap);
     if (n <= 0) {
         SetLastError(ERROR_BAD_PATHNAME);
+        errno = ngx_autocert_win32_errno(ERROR_BAD_PATHNAME);
         return NGX_ERROR;
     }
 
@@ -909,6 +910,7 @@ ngx_autocert_win32_ntopen(int dfd, const char *name, ULONG desired_access,
 
     if (ngx_autocert_win32_resolve_ntdll() != NGX_OK) {
         SetLastError(ERROR_PROC_NOT_FOUND);
+        errno = ngx_autocert_win32_errno(ERROR_PROC_NOT_FOUND);
         return -1;
     }
 
@@ -931,7 +933,9 @@ ngx_autocert_win32_ntopen(int dfd, const char *name, ULONG desired_access,
         NULL, 0);
 
     if (!NT_SUCCESS(status)) {
-        SetLastError(ngx_autocert_win32_errno_from_ntstatus(status));
+        DWORD  mapped = ngx_autocert_win32_errno_from_ntstatus(status);
+        SetLastError(mapped);
+        errno = ngx_autocert_win32_errno(mapped);
         return -1;
     }
 
@@ -939,6 +943,7 @@ ngx_autocert_win32_ntopen(int dfd, const char *name, ULONG desired_access,
     if (fd == -1) {
         CloseHandle(h);
         SetLastError(ERROR_NOT_ENOUGH_MEMORY);
+        errno = ngx_autocert_win32_errno(ERROR_NOT_ENOUGH_MEMORY);
         return -1;
     }
 
@@ -970,6 +975,7 @@ ngx_autocert_win32_check_reparse(HANDLE h)
          * confirmed-link branch below does rather than letting an
          * unreadable tag silently pass the open through. */
         SetLastError(ERROR_TOO_MANY_LINKS);
+        errno = ngx_autocert_win32_errno(ERROR_TOO_MANY_LINKS);
         return NGX_ERROR;
     }
 
@@ -977,6 +983,7 @@ ngx_autocert_win32_check_reparse(HANDLE h)
         && ngx_autocert_reparse_is_link(info.ReparseTag))
     {
         SetLastError(ERROR_TOO_MANY_LINKS);
+        errno = ngx_autocert_win32_errno(ERROR_TOO_MANY_LINKS);
         return NGX_ERROR;
     }
 
@@ -1028,6 +1035,7 @@ ngx_autocert_openat(int dfd, const char *name, int flags)
             DWORD  err = GetLastError();
             _close(fd);
             SetLastError(err);
+            errno = ngx_autocert_win32_errno(err);
             return -1;
         }
     }
@@ -1078,6 +1086,7 @@ ngx_autocert_openat_mode(int dfd, const char *name, int flags,
             DWORD  err = GetLastError();
             _close(fd);
             SetLastError(err);
+            errno = ngx_autocert_win32_errno(err);
             return -1;
         }
     }
@@ -1164,6 +1173,7 @@ ngx_autocert_unlinkat(int dfd, const char *name, int flags)
         DWORD  mapped = ngx_autocert_win32_errno_from_ntstatus(status);
         _close(fd);
         SetLastError(mapped);
+        errno = ngx_autocert_win32_errno(mapped);
         return -1;
     }
 
@@ -1218,6 +1228,7 @@ ngx_autocert_fstatat(int dfd, const char *name, ngx_autocert_stat_t *st, int fla
         DWORD  err = GetLastError();
         _close(fd);
         SetLastError(err);
+        errno = ngx_autocert_win32_errno(err);
         return -1;
     }
 
@@ -1251,10 +1262,12 @@ ngx_autocert_fstat(int fd, ngx_autocert_stat_t *st)
     h = ngx_autocert_fd_handle(fd);
     if (h == INVALID_HANDLE_VALUE) {
         SetLastError(ERROR_INVALID_HANDLE);
+        errno = ngx_autocert_win32_errno(ERROR_INVALID_HANDLE);
         return -1;
     }
 
     if (!GetFileInformationByHandle(h, &info)) {
+        errno = ngx_autocert_win32_errno(GetLastError());
         return -1;
     }
 
@@ -1349,6 +1362,7 @@ ngx_autocert_fdopendir(int fd)
     dh = malloc(sizeof(ngx_autocert_dir_t));
     if (dh == NULL) {
         SetLastError(ERROR_NOT_ENOUGH_MEMORY);
+        errno = ngx_autocert_win32_errno(ERROR_NOT_ENOUGH_MEMORY);
         return NULL;
     }
 
@@ -1415,6 +1429,7 @@ ngx_autocert_readdir(ngx_autocert_dir_t *dh)
         if (dh->pos == NULL) {
             if (ngx_autocert_win32_resolve_ntdll() != NGX_OK) {
                 SetLastError(ERROR_PROC_NOT_FOUND);
+                errno = ngx_autocert_win32_errno(ERROR_PROC_NOT_FOUND);
                 dh->eof = 1;
                 return NULL;
             }
@@ -1432,7 +1447,9 @@ ngx_autocert_readdir(ngx_autocert_dir_t *dh)
             }
 
             if (!NT_SUCCESS(status)) {
-                SetLastError(ngx_autocert_win32_errno_from_ntstatus(status));
+                DWORD  mapped = ngx_autocert_win32_errno_from_ntstatus(status);
+                SetLastError(mapped);
+                errno = ngx_autocert_win32_errno(mapped);
                 dh->eof = 1;
                 return NULL;
             }
@@ -1448,6 +1465,7 @@ ngx_autocert_readdir(ngx_autocert_dir_t *dh)
              * Clamp here, before dh->end is computed, not after. */
             if (iosb.Information > sizeof(dh->buf.bytes)) {
                 SetLastError(ERROR_GEN_FAILURE);
+                errno = ngx_autocert_win32_errno(ERROR_GEN_FAILURE);
                 dh->eof = 1;
                 return NULL;
             }
@@ -1580,6 +1598,7 @@ ngx_autocert_renameat2(int oldfd, const char *oldp, int newfd,
 
     if (ngx_autocert_win32_resolve_ntdll() != NGX_OK) {
         SetLastError(ERROR_PROC_NOT_FOUND);
+        errno = ngx_autocert_win32_errno(ERROR_PROC_NOT_FOUND);
         return NGX_ERROR;
     }
 
@@ -1604,6 +1623,7 @@ ngx_autocert_renameat2(int oldfd, const char *oldp, int newfd,
     if (n <= 0) {
         _close(fd);
         SetLastError(ERROR_BAD_PATHNAME);
+        errno = ngx_autocert_win32_errno(ERROR_BAD_PATHNAME);
         return NGX_ERROR;
     }
 
@@ -1627,6 +1647,7 @@ ngx_autocert_renameat2(int oldfd, const char *oldp, int newfd,
         if (struct_len > sizeof(buf)) {
             _close(fd);
             SetLastError(ERROR_BUFFER_OVERFLOW);
+            errno = ngx_autocert_win32_errno(ERROR_BUFFER_OVERFLOW);
             return NGX_ERROR;
         }
 
@@ -1654,7 +1675,9 @@ ngx_autocert_renameat2(int oldfd, const char *oldp, int newfd,
          * sends that status to ERROR_ALREADY_EXISTS == NGX_EEXIST, so no
          * special case is needed beyond what the mapper already does.
          */
-        SetLastError(ngx_autocert_win32_errno_from_ntstatus(status));
+        DWORD  mapped = ngx_autocert_win32_errno_from_ntstatus(status);
+        SetLastError(mapped);
+        errno = ngx_autocert_win32_errno(mapped);
         return NGX_ERROR;
     }
 
@@ -1694,11 +1717,13 @@ ngx_autocert_linkat(int oldfd, const char *oldpath, int newfd,
 
     if (flags != 0) {
         SetLastError(ERROR_INVALID_PARAMETER);
+        errno = ngx_autocert_win32_errno(ERROR_INVALID_PARAMETER);
         return -1;
     }
 
     if (ngx_autocert_win32_resolve_ntdll() != NGX_OK) {
         SetLastError(ERROR_PROC_NOT_FOUND);
+        errno = ngx_autocert_win32_errno(ERROR_PROC_NOT_FOUND);
         return -1;
     }
 
@@ -1723,6 +1748,7 @@ ngx_autocert_linkat(int oldfd, const char *oldpath, int newfd,
     if (n <= 0) {
         _close(fd);
         SetLastError(ERROR_BAD_PATHNAME);
+        errno = ngx_autocert_win32_errno(ERROR_BAD_PATHNAME);
         return -1;
     }
 
@@ -1744,6 +1770,7 @@ ngx_autocert_linkat(int oldfd, const char *oldpath, int newfd,
         if (struct_len > sizeof(buf)) {
             _close(fd);
             SetLastError(ERROR_BUFFER_OVERFLOW);
+            errno = ngx_autocert_win32_errno(ERROR_BUFFER_OVERFLOW);
             return -1;
         }
 
@@ -1767,7 +1794,9 @@ ngx_autocert_linkat(int oldfd, const char *oldpath, int newfd,
          * on above) is exactly the case order.c's caller tolerates: the
          * ReplaceIfExists==FALSE destination-exists refusal.
          */
-        SetLastError(ngx_autocert_win32_errno_from_ntstatus(status));
+        DWORD  mapped = ngx_autocert_win32_errno_from_ntstatus(status);
+        SetLastError(mapped);
+        errno = ngx_autocert_win32_errno(mapped);
         return -1;
     }
 
