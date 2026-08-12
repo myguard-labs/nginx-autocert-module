@@ -2270,12 +2270,12 @@ ngx_autocert_runtime_marker_remove(ngx_cycle_t *cycle,
 static void
 ngx_autocert_runtime_seed(ngx_cycle_t *cycle)
 {
-    ngx_autocert_conf_t  acf;
+    ngx_autocert_conf_t   acf;
     u_char                container[NGX_MAX_PATH];
-    u_char               *p;
+    u_char                *p;
     size_t                clen;
-    DIR                  *dh;
-    struct dirent        *de;
+    ngx_autocert_dir_t    *dh;
+    ngx_autocert_dirent_t *de;
     int                   dfd, mfd, cfd;
     ssize_t               n;
     ngx_autocert_stat_t   mst;
@@ -2308,7 +2308,7 @@ ngx_autocert_runtime_seed(ngx_cycle_t *cycle)
         return;                          /* no store yet: nothing to seed */
     }
 
-    dh = fdopendir(cfd);
+    dh = ngx_autocert_fdopendir(cfd);
     if (dh == NULL) {
         (void) ngx_autocert_close(cfd);
         return;
@@ -2318,7 +2318,7 @@ ngx_autocert_runtime_seed(ngx_cycle_t *cycle)
              ? ((ngx_uint_t *) acf.cert_key_types->elts)[0]
              : NGX_HTTP_AUTOCERT_KEY_P256;
 
-    while ((de = readdir(dh)) != NULL) {
+    while ((de = ngx_autocert_readdir(dh)) != NULL) {
         if (de->d_name[0] == '.') {
             continue;                    /* skip ".", "..", any dotfile entry */
         }
@@ -2402,7 +2402,7 @@ ngx_autocert_runtime_seed(ngx_cycle_t *cycle)
                       &host);
     }
 
-    (void) closedir(dh);                 /* also closes cfd via fdopendir */
+    (void) ngx_autocert_closedir(dh);     /* also closes cfd via fdopendir */
 }
 
 
