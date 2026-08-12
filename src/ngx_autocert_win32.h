@@ -56,6 +56,8 @@
 #include <io.h>                /* _open_osfhandle, _get_osfhandle, _close */
 #include <fcntl.h>             /* _O_RDONLY and friends for _open_osfhandle */
 #include <errno.h>
+#include <stdlib.h>            /* malloc/free — ngx_autocert_dir_t (W12) */
+#include <stddef.h>            /* offsetof — ngx_autocert_readdir (W12) */
 
 
 /*
@@ -407,6 +409,17 @@ typedef LONG  NTSTATUS;
 #ifndef STATUS_REPARSE_POINT_ENCOUNTERED
 #define STATUS_REPARSE_POINT_ENCOUNTERED ((NTSTATUS) 0xC0000280L)
 #endif
+/*
+ * STATUS_NO_MORE_FILES — NtQueryDirectoryFile's clean-end-of-enumeration
+ * status (W12). A warning-severity code (top two bits 10), so NT_SUCCESS()
+ * on it is false; it is not routed through ngx_autocert_win32_errno_from_ntstatus
+ * below because it is not an error — ngx_autocert_readdir() checks for it
+ * explicitly and maps it to POSIX readdir()'s "NULL, errno left alone"
+ * end-of-directory contract, never to a mapped ERROR_* code.
+ */
+#ifndef STATUS_NO_MORE_FILES
+#define STATUS_NO_MORE_FILES             ((NTSTATUS) 0x80000006L)
+#endif
 
 /*
  * FILE_ATTRIBUTE_TAG_INFO / FileAttributeTagInfo / GetFileInformationByHandleEx
@@ -445,6 +458,38 @@ typedef struct {
 WINBASEAPI BOOL WINAPI GetFileInformationByHandleEx(HANDLE FileHandle,
     int FileInformationClass, LPVOID FileInformation,
     DWORD BufferSize);
+#endif
+
+/*
+ * FileDirectoryInformation / FILE_DIRECTORY_INFORMATION (W12) — the
+ * NtQueryDirectoryFile counterpart to FileAttributeTagInfo above. Same
+ * minimal-NT-surface style: FileInformationClass value 1 is ABI-fixed (ntddk.h
+ * FILE_INFORMATION_CLASS enumerator), not probed or guarded against a real
+ * enum constant for the same reason NGX_AUTOCERT_FileAttributeTagInfo isn't.
+ * The struct is variable-length in the real ABI (FileName is a trailing
+ * array whose size is FileNameLength bytes, NOT NUL-terminated); FileName[1]
+ * here is only a placement anchor for pointer arithmetic, never indexed past
+ * FileNameLength bytes. NextEntryOffset chains consecutive entries inside one
+ * query's buffer; 0 marks the last entry in the buffer (not necessarily the
+ * last entry in the directory — the caller re-queries when the buffer drains).
+ */
+#define NGX_AUTOCERT_FileDirectoryInformation  1
+
+#ifndef NGX_AUTOCERT_HAVE_FILE_DIRECTORY_INFORMATION
+#define NGX_AUTOCERT_HAVE_FILE_DIRECTORY_INFORMATION  1
+typedef struct {
+    ULONG          NextEntryOffset;
+    ULONG          FileIndex;
+    LARGE_INTEGER  CreationTime;
+    LARGE_INTEGER  LastAccessTime;
+    LARGE_INTEGER  LastWriteTime;
+    LARGE_INTEGER  ChangeTime;
+    LARGE_INTEGER  EndOfFile;
+    LARGE_INTEGER  AllocationSize;
+    ULONG          FileAttributes;
+    ULONG          FileNameLength;
+    WCHAR          FileName[1];
+} NGX_AUTOCERT_FILE_DIRECTORY_INFORMATION;
 #endif
 
 typedef struct {
@@ -504,20 +549,35 @@ typedef NTSTATUS (NTAPI *ngx_autocert_pfn_NtQueryInformationFile_t)(
     PVOID FileInformation, ULONG Length, ULONG FileInformationClass);
 
 /*
+ * NtQueryDirectoryFile (W12) — ApcRoutine/ApcContext/FileName are always NULL
+ * at our call site (no APC completion, no wildcard filter: the shim reads
+ * every entry and lets the caller filter), so they are typed PVOID rather
+ * than pulling in PIO_APC_ROUTINE/PUNICODE_STRING from the headers this file
+ * deliberately does not include. FileInformationClass is ULONG, matching the
+ * bare-int style already used for GetFileInformationByHandleEx's class param
+ * above, rather than declaring the real FILE_INFORMATION_CLASS enum.
+ */
+typedef NTSTATUS (NTAPI *ngx_autocert_pfn_NtQueryDirectoryFile_t)(
+    HANDLE FileHandle, HANDLE Event, PVOID ApcRoutine, PVOID ApcContext,
+    NGX_AUTOCERT_IO_STATUS_BLOCK *IoStatusBlock, PVOID FileInformation,
+    ULONG Length, ULONG FileInformationClass, BOOLEAN ReturnSingleEntry,
+    PVOID FileName, BOOLEAN RestartScan);
+
+/*
  * Lazily resolved once per process. ngx_autocert_pfn_NtCreateFile is both the
- * fast-path gate below AND one of the three pointers published here, so the
+ * fast-path gate below AND one of the four pointers published here, so the
  * publication order is load-bearing, not benign: it is stored LAST, after a
  * MemoryBarrier(), specifically so that a second thread observing it non-NULL
  * through the gate is guaranteed to also observe
- * ngx_autocert_pfn_NtSetInformationFile and ngx_autocert_pfn_NtQueryInformationFile
- * already published. Any writer racing to resolve stores the same values
- * (GetProcAddress is idempotent for a given (module, symbol)), so the only
- * thing that needs ordering is which pointer becomes visible first — publish
- * the two non-gate pointers, THEN the gate pointer, never the other way
- * round. Getting this backwards (or reasoning about each pointer as
- * independently benign) is exactly the bug this comment used to describe as
- * safe: a torn read on any one pointer is impossible, but a reader is not
- * limited to reading only the gate.
+ * ngx_autocert_pfn_NtSetInformationFile, ngx_autocert_pfn_NtQueryInformationFile
+ * and ngx_autocert_pfn_NtQueryDirectoryFile already published. Any writer
+ * racing to resolve stores the same values (GetProcAddress is idempotent for
+ * a given (module, symbol)), so the only thing that needs ordering is which
+ * pointer becomes visible first — publish the three non-gate pointers, THEN
+ * the gate pointer, never the other way round. Getting this backwards (or
+ * reasoning about each pointer as independently benign) is exactly the bug
+ * this comment used to describe as safe: a torn read on any one pointer is
+ * impossible, but a reader is not limited to reading only the gate.
  */
 static ngx_autocert_pfn_NtCreateFile_t
     ngx_autocert_pfn_NtCreateFile = NULL;
@@ -525,6 +585,8 @@ static ngx_autocert_pfn_NtSetInformationFile_t
     ngx_autocert_pfn_NtSetInformationFile = NULL;
 static ngx_autocert_pfn_NtQueryInformationFile_t
     ngx_autocert_pfn_NtQueryInformationFile = NULL;
+static ngx_autocert_pfn_NtQueryDirectoryFile_t
+    ngx_autocert_pfn_NtQueryDirectoryFile = NULL;
 
 static ngx_inline ngx_int_t
 ngx_autocert_win32_resolve_ntdll(void)
@@ -533,6 +595,7 @@ ngx_autocert_win32_resolve_ntdll(void)
     ngx_autocert_pfn_NtCreateFile_t            create_fn;
     ngx_autocert_pfn_NtSetInformationFile_t    set_fn;
     ngx_autocert_pfn_NtQueryInformationFile_t  query_fn;
+    ngx_autocert_pfn_NtQueryDirectoryFile_t    querydir_fn;
 
     if (ngx_autocert_pfn_NtCreateFile != NULL) {
         return NGX_OK;
@@ -549,16 +612,21 @@ ngx_autocert_win32_resolve_ntdll(void)
         (void *) GetProcAddress(ntdll, "NtSetInformationFile");
     query_fn = (ngx_autocert_pfn_NtQueryInformationFile_t)
         (void *) GetProcAddress(ntdll, "NtQueryInformationFile");
+    querydir_fn = (ngx_autocert_pfn_NtQueryDirectoryFile_t)
+        (void *) GetProcAddress(ntdll, "NtQueryDirectoryFile");
 
-    if (create_fn == NULL || set_fn == NULL || query_fn == NULL) {
+    if (create_fn == NULL || set_fn == NULL || query_fn == NULL
+        || querydir_fn == NULL)
+    {
         return NGX_ERROR;
     }
 
-    /* Publish the two non-gate pointers first, then the gate pointer last,
+    /* Publish the three non-gate pointers first, then the gate pointer last,
      * with a barrier between so no reader can observe the gate non-NULL
-     * before the other two stores are visible. */
+     * before the other three stores are visible. */
     ngx_autocert_pfn_NtSetInformationFile = set_fn;
     ngx_autocert_pfn_NtQueryInformationFile = query_fn;
+    ngx_autocert_pfn_NtQueryDirectoryFile = querydir_fn;
     MemoryBarrier();
     ngx_autocert_pfn_NtCreateFile = create_fn;
 
@@ -1072,6 +1140,281 @@ ngx_autocert_fstat(int fd, ngx_autocert_stat_t *st)
     st->st_uid = ngx_autocert_geteuid();
 
     return 0;
+}
+
+
+/*
+ * ngx_autocert_dirent_t (W12) — the only member any call site reads is
+ * d_name (grepped for every `->d_name`/`.d_name` in src/: the A6 store scan
+ * in driver.c is the sole reader). Sized to NGX_MAX_PATH bytes of UTF-8,
+ * always NUL-terminated by ngx_autocert_readdir() below — never a raw slice
+ * of the NT UTF-16 buffer, which is neither NUL-terminated nor UTF-8.
+ */
+typedef struct {
+    char  d_name[NGX_MAX_PATH];
+} NGX_AUTOCERT_DIRENT;
+
+typedef NGX_AUTOCERT_DIRENT  ngx_autocert_dirent_t;
+
+/*
+ * ngx_autocert_dir_t (W12) — a pinned directory handle plus the
+ * NtQueryDirectoryFile batch-query state. `fd` is the same CRT int fd
+ * ngx_autocert_fdopendir() was handed (not dup'd — ownership matches POSIX
+ * fdopendir/closedir exactly, see the shared.h contract comment). `buf` holds
+ * one FILE_DIRECTORY_INFORMATION batch; `pos` is the next unread entry inside
+ * it (NULL when the batch is exhausted and a re-query is due); `eof` latches
+ * once STATUS_NO_MORE_FILES has been seen so a caller that keeps calling
+ * ngx_autocert_readdir() past the end keeps getting NULL without re-querying
+ * the now-exhausted handle. `dirent` is the entry returned to the caller,
+ * overwritten on each call — same single-buffer-reuse contract glibc's
+ * readdir() has, so callers must not hold a `de` pointer across the next
+ * ngx_autocert_readdir() call (the existing driver.c loop does not).
+ *
+ * Heap-allocated (ngx_autocert_fdopendir mallocs it) rather than a fixed-size
+ * value type: the public shim signature mirrors POSIX's `DIR *`, an opaque
+ * pointer the caller only ever holds, never copies or embeds by value.
+ */
+#define NGX_AUTOCERT_DIR_QUERY_BUF_SIZE  8192
+
+typedef struct {
+    int             fd;
+    ngx_uint_t      eof;
+    unsigned char  *pos;
+    unsigned char  *end;
+    /*
+     * buf.bytes is the actual query output; buf.align_force is never read
+     * or written — its only purpose is to force this member to 8-byte
+     * alignment. FILE_DIRECTORY_INFORMATION contains LARGE_INTEGER members,
+     * and NtQueryDirectoryFile needs an aligned output buffer (an unaligned
+     * one can fail with STATUS_DATATYPE_MISALIGNMENT on some filesystem
+     * drivers/architectures). A bare `unsigned char[]` has alignment 1; it
+     * would only land on an 8-byte boundary here by accident, because the
+     * pointer-sized members above it happen to sum to a multiple of 8 — a
+     * later field reorder could silently break that. The union makes the
+     * requirement explicit instead of incidental.
+     */
+    union {
+        unsigned char  bytes[NGX_AUTOCERT_DIR_QUERY_BUF_SIZE];
+        LARGE_INTEGER  align_force;
+    } buf;
+    ngx_autocert_dirent_t  dirent;
+} NGX_AUTOCERT_DIR;
+
+typedef NGX_AUTOCERT_DIR  ngx_autocert_dir_t;
+
+
+/*
+ * fdopendir(3) -> malloc the enumeration state, remember the fd. No NT call
+ * happens here — the first ngx_autocert_readdir() call issues the first
+ * NtQueryDirectoryFile, matching POSIX fdopendir()'s lazy-first-read
+ * behaviour closely enough for this shim's one caller.
+ *
+ * On malloc failure, ownership of `fd` does NOT transfer (mirrors POSIX
+ * fdopendir() failing without touching the fd): the caller still owns and
+ * must close it. This function must never close `fd` itself on any path.
+ */
+static ngx_inline ngx_autocert_dir_t *
+ngx_autocert_fdopendir(int fd)
+{
+    ngx_autocert_dir_t  *dh;
+
+    dh = malloc(sizeof(ngx_autocert_dir_t));
+    if (dh == NULL) {
+        SetLastError(ERROR_NOT_ENOUGH_MEMORY);
+        return NULL;
+    }
+
+    dh->fd = fd;
+    dh->eof = 0;
+    dh->pos = NULL;
+    dh->end = NULL;
+
+    return dh;
+}
+
+
+/*
+ * readdir(3) -> NtQueryDirectoryFile on the pinned handle (never
+ * FindFirstFileW/FindNextFileW — see the file banner). Batches entries into
+ * dh->buf (FILE_DIRECTORY_INFORMATION records chained by NextEntryOffset) and
+ * re-queries only once the batch is drained, never ReturnSingleEntry — a
+ * syscall per file would make a large store container's warm-start scan
+ * (A6) pay one round trip per entry.
+ *
+ * "." and ".." are returned exactly as NtQueryDirectoryFile yields them
+ * (unlike FindFirstFileW, it does not filter them out itself) — matching
+ * POSIX readdir(), which also returns them. The existing driver.c call site
+ * already skips any d_name[0] == '.' itself; filtering here instead would be
+ * a silent behaviour difference between the two platform bodies of this
+ * shim.
+ *
+ * An entry whose name cannot be converted to UTF-8, or does not fit in
+ * NGX_MAX_PATH bytes including the NUL, is skipped — advance to the next
+ * entry, never return a truncated name and never abort the scan. This is a
+ * deliberate security-relevant choice, not an oversight: a name this shim
+ * cannot represent cannot match any name the store creates (every name this
+ * module writes to disk is a DNS label or a fixed literal it chose), so
+ * skipping it costs nothing a real store scan needs and avoids feeding a
+ * mangled or truncated name into the caller's marker-read/openat logic.
+ * The same distrust applies to the record's own shape: the fixed header and
+ * FileNameLength are bounds-checked against what NtQueryDirectoryFile
+ * actually returned before anything reads through info->FileName, exactly
+ * like the NextEntryOffset check below — a name isn't the only field a
+ * malformed response can lie about.
+ *
+ * End-of-directory vs error: STATUS_NO_MORE_FILES is mapped to a clean NULL
+ * return with the error channel left alone (matching POSIX readdir(), which
+ * also returns NULL at end-of-directory without touching errno) — it is
+ * deliberately not passed through ngx_autocert_win32_errno_from_ntstatus(),
+ * which is reserved for genuine failures. Any other unsuccessful status maps
+ * through that function and SetLastError(), the same as every other shim
+ * body in this file.
+ */
+static ngx_inline ngx_autocert_dirent_t *
+ngx_autocert_readdir(ngx_autocert_dir_t *dh)
+{
+    NGX_AUTOCERT_FILE_DIRECTORY_INFORMATION  *info;
+    NGX_AUTOCERT_IO_STATUS_BLOCK              iosb;
+    NTSTATUS                                  status;
+    HANDLE                                    h;
+    int                                       n;
+
+    if (dh->eof) {
+        return NULL;
+    }
+
+    for ( ;; ) {
+        if (dh->pos == NULL) {
+            if (ngx_autocert_win32_resolve_ntdll() != NGX_OK) {
+                SetLastError(ERROR_PROC_NOT_FOUND);
+                dh->eof = 1;
+                return NULL;
+            }
+
+            h = ngx_autocert_fd_handle(dh->fd);
+            ngx_memzero(&iosb, sizeof(iosb));
+
+            status = ngx_autocert_pfn_NtQueryDirectoryFile(h, NULL, NULL,
+                NULL, &iosb, dh->buf.bytes, sizeof(dh->buf.bytes),
+                NGX_AUTOCERT_FileDirectoryInformation, FALSE, NULL, FALSE);
+
+            if (status == STATUS_NO_MORE_FILES) {
+                dh->eof = 1;
+                return NULL;                /* clean end: errno untouched */
+            }
+
+            if (!NT_SUCCESS(status)) {
+                SetLastError(ngx_autocert_win32_errno_from_ntstatus(status));
+                dh->eof = 1;
+                return NULL;
+            }
+
+            /* iosb.Information is the check every other check in this
+             * function depends on: dh->end is derived from it, and the
+             * NextEntryOffset / FileNameLength bounds checks below all
+             * compare against dh->end. If the kernel ever reported more
+             * bytes than the buffer it was actually given, dh->end would
+             * point past the real allocation and every check derived from
+             * it would validate against the wrong boundary — silently
+             * passing exactly the malformed input they exist to catch.
+             * Clamp here, before dh->end is computed, not after. */
+            if (iosb.Information > sizeof(dh->buf.bytes)) {
+                SetLastError(ERROR_GEN_FAILURE);
+                dh->eof = 1;
+                return NULL;
+            }
+
+            dh->pos = dh->buf.bytes;
+            dh->end = dh->buf.bytes + (size_t) iosb.Information;
+
+            if (dh->pos >= dh->end) {
+                /* Zero-byte success is not documented but not impossible;
+                 * treat exactly like STATUS_NO_MORE_FILES rather than
+                 * spinning. */
+                dh->eof = 1;
+                return NULL;
+            }
+        }
+
+        info = (NGX_AUTOCERT_FILE_DIRECTORY_INFORMATION *) dh->pos;
+
+        /* Distrust the record's shape before reading any field beyond the
+         * pointer itself: the fixed header, up to and including
+         * FileNameLength, must actually fit in what NtQueryDirectoryFile
+         * returned. A batch too short for even one full header is treated
+         * as end-of-batch, same rationale as the NextEntryOffset and
+         * FileNameLength checks below. */
+        if ((size_t) (dh->end - dh->pos)
+            < offsetof(NGX_AUTOCERT_FILE_DIRECTORY_INFORMATION, FileName))
+        {
+            dh->pos = NULL;
+            continue;
+        }
+
+        /* Advance the cursor for the NEXT call before any `continue` below,
+         * so a skipped entry never gets re-read. NextEntryOffset == 0 marks
+         * the last entry in THIS batch, not the last entry in the directory
+         * — dh->pos == NULL makes the next call re-query.
+         *
+         * NextEntryOffset is NEVER trusted blindly: NTFS always terminates a
+         * batch with NextEntryOffset == 0, so a nonzero offset that would
+         * walk the cursor to or past dh->end can only come from a malformed
+         * response (e.g. a third-party filesystem filter/redirector on the
+         * store's volume) — treat that the same as end-of-batch rather than
+         * dereferencing past dh->buf on the next call. The kernel's own scan
+         * position inside the handle already advanced past whatever this
+         * call returned regardless of how much of it we trust, so the next
+         * re-query resumes cleanly; it does not re-read the entries we
+         * declined to walk into. */
+        dh->pos = (info->NextEntryOffset != 0
+                   && dh->pos + info->NextEntryOffset < dh->end)
+                  ? dh->pos + info->NextEntryOffset : NULL;
+
+        /* FileNameLength is untrusted exactly like NextEntryOffset above: a
+         * garbage value would otherwise make WideCharToMultiByte read past
+         * dh->buf looking for wide chars that were never there. Compare via
+         * subtraction against the bytes actually remaining after
+         * info->FileName, not by adding FileNameLength to a pointer, so a
+         * hostile length cannot overflow the comparison itself. `info` still
+         * points at the current (unadvanced) record; dh->end is the current
+         * batch's boundary and is untouched by the dh->pos advance above. */
+        if (info->FileNameLength
+            > (size_t) (dh->end - (unsigned char *) info->FileName))
+        {
+            continue;          /* untrusted length: skip, not abort */
+        }
+
+        n = WideCharToMultiByte(CP_UTF8, 0, info->FileName,
+                (int) (info->FileNameLength / sizeof(WCHAR)),
+                dh->dirent.d_name, (int) sizeof(dh->dirent.d_name) - 1,
+                NULL, NULL);
+
+        if (n <= 0 || (size_t) n >= sizeof(dh->dirent.d_name)) {
+            continue;      /* unrepresentable or oversized: skip, not abort */
+        }
+
+        dh->dirent.d_name[n] = '\0';
+
+        return &dh->dirent;
+    }
+}
+
+
+/*
+ * closedir(3) -> free the enumeration state and close the fd it owns — the
+ * same fd ngx_autocert_fdopendir() was handed, per the ownership contract in
+ * shared.h. Matches POSIX closedir(dh)'s "also closes the underlying fd"
+ * behaviour exactly; the caller must not close that fd separately.
+ */
+static ngx_inline int
+ngx_autocert_closedir(ngx_autocert_dir_t *dh)
+{
+    int  fd;
+
+    fd = dh->fd;
+    free(dh);
+
+    return _close(fd);
 }
 
 

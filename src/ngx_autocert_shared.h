@@ -266,6 +266,48 @@ ngx_autocert_renameat2(int oldfd, const char *oldp, int newfd,
 #endif
 }
 
+/*
+ * Store-scan directory enumeration (W12). Every call site takes the fd from
+ * ngx_autocert_open_dir_path()/ngx_autocert_openat(dfd, ..., O_DIRECTORY) — an
+ * already-pinned directory — and enumerates it via fd, never by re-deriving
+ * and re-opening a path (that would reintroduce the TOCTOU the pinning walk
+ * exists to defeat). The win32 bodies (W12) resolve this to
+ * NtQueryDirectoryFile on the same handle rather than FindFirstFileW/
+ * FindNextFileW, which only take a path — see DESIGN-win32-store-io.md § W1.
+ * Public signatures are byte-identical on both platforms.
+ *
+ * Ownership: ngx_autocert_closedir(dh) closes the fd that was handed to
+ * ngx_autocert_fdopendir(fd) — the caller must not close it separately. If
+ * ngx_autocert_fdopendir() fails, ownership does NOT transfer: the caller
+ * still owns and must close the fd itself (see driver.c's A6 store scan,
+ * the only caller, for the exact failure-path contract this preserves).
+ */
+#include <dirent.h>
+
+typedef DIR            ngx_autocert_dir_t;
+typedef struct dirent  ngx_autocert_dirent_t;
+
+
+static ngx_inline ngx_autocert_dir_t *
+ngx_autocert_fdopendir(int fd)
+{
+    return fdopendir(fd);
+}
+
+
+static ngx_inline ngx_autocert_dirent_t *
+ngx_autocert_readdir(ngx_autocert_dir_t *dh)
+{
+    return readdir(dh);
+}
+
+
+static ngx_inline int
+ngx_autocert_closedir(ngx_autocert_dir_t *dh)
+{
+    return closedir(dh);
+}
+
 #endif /* !(NGX_WIN32) */
 
 
