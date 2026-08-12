@@ -404,11 +404,15 @@ ngx_autocert_fsync(int fd)
  * filesystem that simply cannot fsync a directory (several do not) must not
  * turn into a hard failure there.
  *
- * On win32 this is therefore a documented no-op that reports success: NTFS's
- * own metadata journal already gives directory-entry durability guarantees
- * POSIX callers rely on fsync(dfd) for, so "no-op, report success" is not a
- * silently-swallowed failure, it is the correct behavior for a platform where
- * the operation this call requests genuinely does not exist. This must stay
+ * On win32 this is therefore a documented no-op that reports success. Note
+ * what this does and does not buy: NTFS's metadata journal gives crash
+ * *consistency* for directory entries, NOT the persistent-media guarantee a
+ * POSIX fsync(dfd) provides — directory-entry durability here is best effort,
+ * and this shim deliberately does not claim parity with fsync(dfd). Reporting
+ * success is still correct rather than a silently-swallowed failure, because
+ * the operation requested genuinely does not exist on this platform
+ * (FlushFileBuffers is documented for file and volume handles only), and the
+ * callers are best-effort by construction. This must stay
  * a SEPARATE shim from ngx_autocert_fsync() above — folding the two together
  * would make a real file-flush failure disappear the same way, which is not
  * acceptable on any platform.
