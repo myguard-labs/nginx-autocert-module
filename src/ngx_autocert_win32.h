@@ -228,7 +228,7 @@ typedef int  ngx_autocert_dirfd_t;
  *
  * Only the mappings that are genuinely one-to-one live here. Anything with a
  * semantic gap is deliberately absent and belongs to its own step: fchmod is
- * W11 (no NTFS analogue without an ACL), flock is W10 (LockFileEx), fork/execve
+ * W11 (no NTFS analogue without an ACL), flock is W13 (LockFileEx), fork/execve
  * are W8 (CreateProcess + Job Object), fdopendir is W12.
  *
  * MinGW-w64 supplies POSIX spellings for several of these, but they are mapped
@@ -280,6 +280,56 @@ typedef int  ngx_autocert_dirfd_t;
  * a hook wait on a long-lived worker).
  */
 #define ngx_autocert_monotonic_ms()     ((uint64_t) GetTickCount64())
+
+/*
+ * W13 — flock(fd, LOCK_EX | LOCK_NB) -> LockFileEx.
+ *
+ * The POSIX side locks the whole file with a single flock() call; the win32
+ * analogue locks a byte range, so the whole conceptual file is locked with
+ * the standard 0..0xFFFFFFFFFFFFFFFF idiom (offset 0, length as large as the
+ * OVERLAPPED's two DWORD halves can express). LOCKFILE_FAIL_IMMEDIATELY is
+ * what makes this non-blocking, matching LOCK_NB; LOCKFILE_EXCLUSIVE_LOCK
+ * matches LOCK_EX.
+ *
+ * Same return convention as flock(): 0 on success, -1 on failure with errno
+ * set. Contention (another process already holds the lock) must surface as
+ * EAGAIN — the sole caller (driver.c's singleton-gate trylock) branches on
+ * exactly that to tell "another process holds it, retry later" apart from a
+ * hard failure. LockFileEx failing immediately for that reason sets
+ * ERROR_LOCK_VIOLATION or ERROR_SHARING_VIOLATION; ngx_autocert_win32_errno()
+ * maps both to EAGAIN, so SetLastError() of the mapped value is what makes
+ * the caller's `ngx_errno == EWOULDBLOCK` test (EAGAIN and EWOULDBLOCK are
+ * the same CRT constant) succeed. errno is set explicitly too, per the W5h
+ * pattern of failure paths setting both errno and SetLastError, since a
+ * caller may read either.
+ */
+static ngx_inline int
+ngx_autocert_flock_ex_nb(int fd)
+{
+    HANDLE      h;
+    OVERLAPPED  ov;
+    int         mapped;
+
+    h = ngx_autocert_fd_handle(fd);
+    if (h == INVALID_HANDLE_VALUE) {
+        SetLastError(ERROR_INVALID_HANDLE);
+        errno = EBADF;
+        return -1;
+    }
+
+    ngx_memzero(&ov, sizeof(OVERLAPPED));
+
+    if (LockFileEx(h, LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY,
+                    0, 0xFFFFFFFF, 0xFFFFFFFF, &ov))
+    {
+        return 0;
+    }
+
+    mapped = ngx_autocert_win32_errno(GetLastError());
+    SetLastError(mapped);
+    errno = mapped;
+    return -1;
+}
 
 
 /*
