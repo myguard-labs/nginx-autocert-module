@@ -1032,8 +1032,7 @@ ngx_autocert_fstatat(int dfd, const char *name, ngx_autocert_stat_t *st, int fla
                   ? (S_IFDIR | 0700) : (S_IFREG | 0600);
     st->st_nlink = (short) (info.nNumberOfLinks > 0
                              ? info.nNumberOfLinks : 1);
-    st->st_size = (info.nFileSizeHigh == 0)
-                  ? (off_t) info.nFileSizeLow : (off_t) -1;
+    st->st_size = ngx_file_size(&info);
     st->st_mtime = ngx_file_mtime(&info);
     st->st_uid = ngx_autocert_geteuid();
 
@@ -1068,8 +1067,7 @@ ngx_autocert_fstat(int fd, ngx_autocert_stat_t *st)
                   ? (S_IFDIR | 0700) : (S_IFREG | 0600);
     st->st_nlink = (short) (info.nNumberOfLinks > 0
                              ? info.nNumberOfLinks : 1);
-    st->st_size = (info.nFileSizeHigh == 0)
-                  ? (off_t) info.nFileSizeLow : (off_t) -1;
+    st->st_size = ngx_file_size(&info);
     st->st_mtime = ngx_file_mtime(&info);
     st->st_uid = ngx_autocert_geteuid();
 
