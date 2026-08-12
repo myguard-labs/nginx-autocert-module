@@ -415,7 +415,7 @@ ngx_autocert_account_save_key(ngx_autocert_account_t *acct, int dfd,
     /* Durably persist before close: the O_EXCL load path only regenerates on
      * ENOENT, so a crash that left a zero/partial key would be refused forever.
      * fsync the file (EINTR-retried). */
-    while (fsync(fd) != 0) {
+    while (ngx_autocert_fsync(fd) != 0) {
         if (ngx_autocert_err_is_intr(ngx_errno)) {
             continue;
         }
@@ -439,7 +439,7 @@ ngx_autocert_account_save_key(ngx_autocert_account_t *acct, int dfd,
      * key's dentry is durable too. The key file itself is already fully
      * written + fsynced + closed, so a dir fsync failure (e.g. a filesystem
      * that rejects directory fsync) must NOT delete it or fail the save. */
-    while (fsync(dfd) != 0) {
+    while (ngx_autocert_fsync_dir(dfd) != 0) {
         if (ngx_autocert_err_is_intr(ngx_errno)) {
             continue;
         }

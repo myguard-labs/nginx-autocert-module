@@ -356,6 +356,76 @@ ngx_autocert_flock_ex_nb(int fd)
 
 
 /*
+ * W5i — fsync(fd) -> FlushFileBuffers.
+ *
+ * Same return convention as fsync(2): 0 on success, -1 on failure with errno
+ * set. On failure both errno and SetLastError() are set explicitly, per the
+ * W13 pattern above (not W5f/linkat's SetLastError-only shape, which is a
+ * known inconsistency tracked separately as W5h) — a caller may read either.
+ *
+ * ngx_autocert_win32_errno() is forward-declared above this shim's first use,
+ * same ordering requirement as ngx_autocert_flock_ex_nb(): MSVC does not
+ * diagnose use-before-declaration of a static ngx_inline function but MinGW
+ * does, so the declaration must precede every caller in this header's
+ * textual order regardless of which compiler happens to validate it.
+ */
+static ngx_inline int
+ngx_autocert_fsync(int fd)
+{
+    HANDLE  h;
+    int     mapped;
+
+    h = ngx_autocert_fd_handle(fd);
+    if (h == INVALID_HANDLE_VALUE) {
+        SetLastError(ERROR_INVALID_HANDLE);
+        errno = EBADF;
+        return -1;
+    }
+
+    if (FlushFileBuffers(h)) {
+        return 0;
+    }
+
+    mapped = ngx_autocert_win32_errno(GetLastError());
+    SetLastError(mapped);
+    errno = mapped;
+    return -1;
+}
+
+
+/*
+ * W5i — directory fsync has no win32 analogue: FlushFileBuffers() fails
+ * outright on a directory handle (ERROR_INVALID_FUNCTION / equivalent). Every
+ * call site that fsyncs a directory fd through this seam already treats it as
+ * best-effort durability, not a correctness requirement (see the doc comments
+ * at ngx_autocert_account.c's key-dir fsync and ngx_autocert_order.c's
+ * ngx_autocert_order_fsync_dirfd()) — those callers exist to make an already-
+ * complete, already-fsynced file's directory entry durable sooner, and a
+ * filesystem that simply cannot fsync a directory (several do not) must not
+ * turn into a hard failure there.
+ *
+ * On win32 this is therefore a documented no-op that reports success. Note
+ * what this does and does not buy: NTFS's metadata journal gives crash
+ * *consistency* for directory entries, NOT the persistent-media guarantee a
+ * POSIX fsync(dfd) provides — directory-entry durability here is best effort,
+ * and this shim deliberately does not claim parity with fsync(dfd). Reporting
+ * success is still correct rather than a silently-swallowed failure, because
+ * the operation requested genuinely does not exist on this platform
+ * (FlushFileBuffers is documented for file and volume handles only), and the
+ * callers are best-effort by construction. This must stay
+ * a SEPARATE shim from ngx_autocert_fsync() above — folding the two together
+ * would make a real file-flush failure disappear the same way, which is not
+ * acceptable on any platform.
+ */
+static ngx_inline int
+ngx_autocert_fsync_dir(int fd)
+{
+    (void) fd;
+    return 0;
+}
+
+
+/*
  * NGX_EINTR retry predicate.
  *
  * nginx core does not define NGX_EINTR on win32 at all (src/os/win32/ngx_errno.h
