@@ -282,6 +282,22 @@ typedef int  ngx_autocert_dirfd_t;
 #define ngx_autocert_monotonic_ms()     ((uint64_t) GetTickCount64())
 
 /*
+ * Map GetLastError()/NTSTATUS to the errno values the seam's callers already
+ * branch on (EEXIST, ENOENT, EAGAIN, ENOTEMPTY, ELOOP...).
+ *
+ * Deliberately not _doserrno / _get_errno: the CRT's mapping is narrower and
+ * collapses distinctions the callers depend on — notably ERROR_SHARING_VIOLATION,
+ * which must surface as EAGAIN so the lock path retries rather than failing hard.
+ *
+ * Declared here, ahead of the first body that calls it; defined below with the
+ * other shim bodies. static ngx_inline, like every other body in this header: a
+ * non-static definition in a header included by six translation units is a
+ * duplicate-symbol link error at win32 link time.
+ */
+static ngx_inline int ngx_autocert_win32_errno(DWORD err);
+
+
+/*
  * W13 — flock(fd, LOCK_EX | LOCK_NB) -> LockFileEx.
  *
  * The POSIX side locks the whole file with a single flock() call; the win32
@@ -302,6 +318,13 @@ typedef int  ngx_autocert_dirfd_t;
  * the same CRT constant) succeed. errno is set explicitly too, per the W5h
  * pattern of failure paths setting both errno and SetLastError, since a
  * caller may read either.
+ *
+ * ngx_autocert_win32_errno() is forward-declared just above rather than left to
+ * its declaration further down: this body CALLS it, and a call that precedes any
+ * declaration is an implicit-declaration error under MinGW's C99 (and then a
+ * "static declaration follows non-static declaration" error when the real
+ * declaration is reached). MSVC does not diagnose it, so the ordering must be
+ * kept correct here rather than trusted to one compiler.
  */
 static ngx_inline int
 ngx_autocert_flock_ex_nb(int fd)
@@ -330,21 +353,6 @@ ngx_autocert_flock_ex_nb(int fd)
     errno = mapped;
     return -1;
 }
-
-
-/*
- * Map GetLastError()/NTSTATUS to the errno values the seam's callers already
- * branch on (EEXIST, ENOENT, EAGAIN, ENOTEMPTY, ELOOP...).
- *
- * Deliberately not _doserrno / _get_errno: the CRT's mapping is narrower and
- * collapses distinctions the callers depend on — notably ERROR_SHARING_VIOLATION,
- * which must surface as EAGAIN so the lock path retries rather than failing hard.
- *
- * Defined below with the other shim bodies. static ngx_inline, like every
- * other body in this header: a non-static definition in a header included by
- * six translation units is a duplicate-symbol link error at win32 link time.
- */
-static ngx_inline int ngx_autocert_win32_errno(DWORD err);
 
 
 /*
