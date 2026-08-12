@@ -2677,7 +2677,9 @@ ngx_autocert_order_seed_staging_at(ngx_autocert_order_t *order, int cfd,
             continue;
         }
 
-        if (linkat(lfd, name, sfd, name, 0) == -1 && ngx_errno != NGX_EEXIST) {
+        if (ngx_autocert_linkat(lfd, name, sfd, name, 0) == -1
+            && ngx_errno != NGX_EEXIST)
+        {
             /* A PRESENT regular file we could not carry forward. Failing the
              * seed here keeps the live dir intact (caller aborts before any
              * swap) rather than publishing a dir that drops this file. */
