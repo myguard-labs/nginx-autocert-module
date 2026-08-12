@@ -57,6 +57,7 @@
 #include <fcntl.h>             /* _O_RDONLY and friends for _open_osfhandle */
 #include <errno.h>
 #include <stdlib.h>            /* malloc/free — ngx_autocert_dir_t (W12) */
+#include <stddef.h>            /* offsetof — ngx_autocert_readdir (W12) */
 
 
 /*
@@ -1255,6 +1256,11 @@ ngx_autocert_fdopendir(int fd)
  * module writes to disk is a DNS label or a fixed literal it chose), so
  * skipping it costs nothing a real store scan needs and avoids feeding a
  * mangled or truncated name into the caller's marker-read/openat logic.
+ * The same distrust applies to the record's own shape: the fixed header and
+ * FileNameLength are bounds-checked against what NtQueryDirectoryFile
+ * actually returned before anything reads through info->FileName, exactly
+ * like the NextEntryOffset check below — a name isn't the only field a
+ * malformed response can lie about.
  *
  * End-of-directory vs error: STATUS_NO_MORE_FILES is mapped to a clean NULL
  * return with the error channel left alone (matching POSIX readdir(), which
@@ -1317,6 +1323,19 @@ ngx_autocert_readdir(ngx_autocert_dir_t *dh)
 
         info = (NGX_AUTOCERT_FILE_DIRECTORY_INFORMATION *) dh->pos;
 
+        /* Distrust the record's shape before reading any field beyond the
+         * pointer itself: the fixed header, up to and including
+         * FileNameLength, must actually fit in what NtQueryDirectoryFile
+         * returned. A batch too short for even one full header is treated
+         * as end-of-batch, same rationale as the NextEntryOffset and
+         * FileNameLength checks below. */
+        if ((size_t) (dh->end - dh->pos)
+            < offsetof(NGX_AUTOCERT_FILE_DIRECTORY_INFORMATION, FileName))
+        {
+            dh->pos = NULL;
+            continue;
+        }
+
         /* Advance the cursor for the NEXT call before any `continue` below,
          * so a skipped entry never gets re-read. NextEntryOffset == 0 marks
          * the last entry in THIS batch, not the last entry in the directory
@@ -1335,6 +1354,20 @@ ngx_autocert_readdir(ngx_autocert_dir_t *dh)
         dh->pos = (info->NextEntryOffset != 0
                    && dh->pos + info->NextEntryOffset < dh->end)
                   ? dh->pos + info->NextEntryOffset : NULL;
+
+        /* FileNameLength is untrusted exactly like NextEntryOffset above: a
+         * garbage value would otherwise make WideCharToMultiByte read past
+         * dh->buf looking for wide chars that were never there. Compare via
+         * subtraction against the bytes actually remaining after
+         * info->FileName, not by adding FileNameLength to a pointer, so a
+         * hostile length cannot overflow the comparison itself. `info` still
+         * points at the current (unadvanced) record; dh->end is the current
+         * batch's boundary and is untouched by the dh->pos advance above. */
+        if (info->FileNameLength
+            > (size_t) (dh->end - (unsigned char *) info->FileName))
+        {
+            continue;          /* untrusted length: skip, not abort */
+        }
 
         n = WideCharToMultiByte(CP_UTF8, 0, info->FileName,
                 (int) (info->FileNameLength / sizeof(WCHAR)),
