@@ -51,18 +51,6 @@
 #endif
 
 
-/*
- * FILE_ATTRIBUTE_TAG_INFO / GetFileInformationByHandleEx are Vista+ API and
- * are gated on _WIN32_WINNT. Declare the floor before <windows.h> is pulled
- * in; respect a higher value the build already set.
- */
-#ifndef _WIN32_WINNT
-#define _WIN32_WINNT 0x0600
-#elif _WIN32_WINNT < 0x0600
-#undef _WIN32_WINNT
-#define _WIN32_WINNT 0x0600
-#endif
-
 #include <windows.h>
 #include <winioctl.h>          /* IO_REPARSE_TAG_*; needs windows.h first */
 #include <io.h>                /* _open_osfhandle, _get_osfhandle, _close */
@@ -352,6 +340,45 @@ typedef LONG  NTSTATUS;
 #endif
 #ifndef STATUS_REPARSE_POINT_ENCOUNTERED
 #define STATUS_REPARSE_POINT_ENCOUNTERED ((NTSTATUS) 0xC0000280L)
+#endif
+
+/*
+ * FILE_ATTRIBUTE_TAG_INFO / FileAttributeTagInfo / GetFileInformationByHandleEx
+ * are Vista+ API gated behind _WIN32_WINNT in the SDK headers. Raising that
+ * floor here is a dead end: <ngx_config.h> above has already pulled in and
+ * fully expanded <windows.h> at whatever _WIN32_WINNT nginx's own
+ * src/os/win32/ngx_win32_config.h set (0x0501), so a later #define in this
+ * header changes nothing (confirmed against CI run 31548004561 — a
+ * _WIN32_WINNT floor here produced a byte-identical error set). Declare the
+ * pieces ourselves instead, same minimal-NT-surface style as NTSTATUS above.
+ *
+ * FileAttributeTagInfo is normally a FILE_INFO_BY_HANDLE_CLASS enumerator,
+ * not a macro, so it cannot be probed or guarded with #ifndef without risking
+ * a redefinition against a real enum constant of the same name. Use a
+ * private macro name instead and pass it at the (single) call site; its
+ * value (9) is fixed by the win32 ABI, identical to the SDK's own
+ * FileAttributeTagInfo.
+ */
+#define NGX_AUTOCERT_FileAttributeTagInfo  9
+
+#ifndef NGX_AUTOCERT_HAVE_FILE_ATTRIBUTE_TAG_INFO
+#define NGX_AUTOCERT_HAVE_FILE_ATTRIBUTE_TAG_INFO  1
+typedef struct {
+    DWORD  FileAttributes;
+    DWORD  ReparseTag;
+} NGX_AUTOCERT_FILE_ATTRIBUTE_TAG_INFO;
+#endif
+
+#ifndef NGX_AUTOCERT_HAVE_GETFILEINFORMATIONBYHANDLEEX
+#define NGX_AUTOCERT_HAVE_GETFILEINFORMATIONBYHANDLEEX  1
+/* kernel32 export, present on every supported OS; not declared by the SDK
+ * headers reachable here because they gate the prototype on the same
+ * _WIN32_WINNT floor that is a dead end above. Plain extern declaration —
+ * kernel32 is always already linked, so this resolves at link time without
+ * GetProcAddress. */
+WINBASEAPI BOOL WINAPI GetFileInformationByHandleEx(HANDLE FileHandle,
+    int FileInformationClass, LPVOID FileInformation,
+    DWORD BufferSize);
 #endif
 
 typedef struct {
@@ -655,10 +682,10 @@ ngx_autocert_win32_ntopen(int dfd, const char *name, ULONG desired_access,
 static ngx_inline int
 ngx_autocert_win32_check_reparse(HANDLE h)
 {
-    FILE_ATTRIBUTE_TAG_INFO  info;
+    NGX_AUTOCERT_FILE_ATTRIBUTE_TAG_INFO  info;
 
-    if (!GetFileInformationByHandleEx(h, FileAttributeTagInfo, &info,
-                                       sizeof(info)))
+    if (!GetFileInformationByHandleEx(h, NGX_AUTOCERT_FileAttributeTagInfo,
+                                       &info, sizeof(info)))
     {
         /* Not a reparse point (or the query failed for an unrelated reason);
          * either way there is nothing to reject. */
@@ -955,8 +982,9 @@ ngx_autocert_renameat2(int oldfd, const char *oldp, int newfd,
     wchar_t                       wnewp[NGX_MAX_PATH];
     int                           n;
     size_t                        struct_len;
-    unsigned char                 buf[sizeof(FILE_ATTRIBUTE_TAG_INFO)
-                                       + sizeof(wchar_t) * NGX_MAX_PATH + 32];
+    unsigned char
+        buf[sizeof(NGX_AUTOCERT_FILE_ATTRIBUTE_TAG_INFO)
+            + sizeof(wchar_t) * NGX_MAX_PATH + 32];
 
     if (flags & RENAME_EXCHANGE) {
         return NGX_DECLINED;
