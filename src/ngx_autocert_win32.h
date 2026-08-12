@@ -1591,6 +1591,119 @@ ngx_autocert_renameat2(int oldfd, const char *oldp, int newfd,
     return NGX_OK;
 }
 
+
+/*
+ * linkat -> FILE_LINK_INFORMATION via NtSetInformationFile. Mirrors
+ * ngx_autocert_renameat2 immediately above: same dfd-relative resolution,
+ * same hand-laid variable-length buffer (FILE_LINK_INFORMATION has the
+ * identical ReplaceIfExists/RootDirectory/FileNameLength/FileName shape as
+ * FILE_RENAME_INFORMATION), same status-to-errno path.
+ *
+ * The sole call site (order.c's store-seed hardlink) always passes flags==0
+ * and depends on ngx_errno == NGX_EEXIST when the destination is already
+ * present, exactly like POSIX linkat(..., 0) — it must fail, never replace,
+ * an existing staged file. ReplaceIfExists is therefore hardcoded FALSE, not
+ * derived from `flags`; any nonzero flags value is rejected outright since
+ * this shim has no primitive for AT_* link flags and silently ignoring one
+ * would be a behavior change disguised as a passthrough.
+ */
+static ngx_inline int
+ngx_autocert_linkat(int oldfd, const char *oldpath, int newfd,
+    const char *newpath, int flags)
+{
+    NGX_AUTOCERT_IO_STATUS_BLOCK  iosb;
+    HANDLE                        oldh, newdirh;
+    NTSTATUS                      status;
+    int                           fd;
+    wchar_t                       wnewp[NGX_MAX_PATH];
+    int                           n;
+    size_t                        struct_len;
+    unsigned char
+        buf[sizeof(NGX_AUTOCERT_FILE_ATTRIBUTE_TAG_INFO)
+            + sizeof(wchar_t) * NGX_MAX_PATH + 32];
+
+    if (flags != 0) {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return -1;
+    }
+
+    if (ngx_autocert_win32_resolve_ntdll() != NGX_OK) {
+        SetLastError(ERROR_PROC_NOT_FOUND);
+        return -1;
+    }
+
+    /* Open the source no-follow; FILE_LINK_INFORMATION needs a handle with
+     * access sufficient to create a hard link to it — the docs specify
+     * DELETE, matching the rename path's access mask. */
+    fd = ngx_autocert_win32_ntopen(oldfd, oldpath,
+        DELETE | SYNCHRONIZE | FILE_READ_ATTRIBUTES,
+        NGX_AUTOCERT_FILE_OPEN,
+        NGX_AUTOCERT_FILE_OPEN_REPARSE_POINT
+        | NGX_AUTOCERT_FILE_OPEN_FOR_BACKUP_INTENT,
+        _O_RDONLY);
+    if (fd == -1) {
+        return -1;
+    }
+    oldh = ngx_autocert_fd_handle(fd);
+
+    newdirh = ngx_autocert_fd_handle(newfd);
+
+    n = MultiByteToWideChar(CP_UTF8, 0, newpath, -1, wnewp,
+                             (int) (sizeof(wnewp) / sizeof(wnewp[0])));
+    if (n <= 0) {
+        _close(fd);
+        SetLastError(ERROR_BAD_PATHNAME);
+        return -1;
+    }
+
+    {
+        /*
+         * FILE_LINK_INFORMATION, laid out by hand for the same reason
+         * FILE_RENAME_INFORMATION is above: SDK headers disagree on the
+         * trailing FileName field's declared type. ReplaceIfExists is
+         * hardcoded FALSE (see the function doc comment) — this is the one
+         * field that must NOT mirror the rename body's flag-derived value.
+         */
+        struct {
+            BOOLEAN  ReplaceIfExists;
+            HANDLE   RootDirectory;
+            ULONG    FileNameLength;
+        } *hdr;
+
+        struct_len = sizeof(*hdr) + (size_t) (n - 1) * sizeof(wchar_t);
+        if (struct_len > sizeof(buf)) {
+            _close(fd);
+            SetLastError(ERROR_BUFFER_OVERFLOW);
+            return -1;
+        }
+
+        hdr = (void *) buf;
+        hdr->ReplaceIfExists = FALSE;
+        hdr->RootDirectory = newdirh;
+        hdr->FileNameLength = (ULONG) ((n - 1) * sizeof(wchar_t));
+        ngx_memcpy(buf + sizeof(*hdr), wnewp, hdr->FileNameLength);
+
+        ngx_memzero(&iosb, sizeof(iosb));
+        status = ngx_autocert_pfn_NtSetInformationFile(oldh, &iosb, buf,
+            (ULONG) struct_len, 11 /* FileLinkInformation */);
+    }
+
+    _close(fd);
+
+    if (!NT_SUCCESS(status)) {
+        /*
+         * STATUS_OBJECT_NAME_COLLISION -> ERROR_ALREADY_EXISTS -> NGX_EEXIST
+         * via the generic mapper (same mapping ngx_autocert_renameat2 relies
+         * on above) is exactly the case order.c's caller tolerates: the
+         * ReplaceIfExists==FALSE destination-exists refusal.
+         */
+        SetLastError(ngx_autocert_win32_errno_from_ntstatus(status));
+        return -1;
+    }
+
+    return 0;
+}
+
 #endif /* NGX_WIN32 */
 
 

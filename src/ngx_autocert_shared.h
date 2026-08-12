@@ -246,6 +246,21 @@ ngx_autocert_fstatat(int dfd, const char *name, ngx_autocert_stat_t *st, int fla
 
 
 /*
+ * linkat(2) wrapper — the store-seed hardlink at order.c's staging step. Both
+ * fds are dir fds from the same pinned-walk family as the rest of this
+ * region. flags is forwarded as-is (the sole call site always passes 0, i.e.
+ * "fail EEXIST rather than replace" — see the win32 body's doc comment for
+ * why that MUST stay true there too).
+ */
+static ngx_inline int
+ngx_autocert_linkat(int oldfd, const char *oldpath, int newfd,
+    const char *newpath, int flags)
+{
+    return linkat(oldfd, oldpath, newfd, newpath, flags);
+}
+
+
+/*
  * fstat(2) on an already-open int fd from this family (ngx_autocert_open_file_path,
  * ngx_autocert_openat_mode, ...). Kept distinct from ngx_autocert_fstatat above:
  * that one stats a NAME relative to a pinned dir fd, this one stats the fd
