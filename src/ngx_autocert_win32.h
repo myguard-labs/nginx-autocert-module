@@ -1309,6 +1309,21 @@ ngx_autocert_readdir(ngx_autocert_dir_t *dh)
                 return NULL;
             }
 
+            /* iosb.Information is the check every other check in this
+             * function depends on: dh->end is derived from it, and the
+             * NextEntryOffset / FileNameLength bounds checks below all
+             * compare against dh->end. If the kernel ever reported more
+             * bytes than the buffer it was actually given, dh->end would
+             * point past the real allocation and every check derived from
+             * it would validate against the wrong boundary — silently
+             * passing exactly the malformed input they exist to catch.
+             * Clamp here, before dh->end is computed, not after. */
+            if (iosb.Information > sizeof(dh->buf.bytes)) {
+                SetLastError(ERROR_GEN_FAILURE);
+                dh->eof = 1;
+                return NULL;
+            }
+
             dh->pos = dh->buf.bytes;
             dh->end = dh->buf.bytes + (size_t) iosb.Information;
 
