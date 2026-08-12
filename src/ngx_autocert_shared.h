@@ -155,6 +155,18 @@ ngx_int_t ngx_autocert_get_conf(ngx_cycle_t *cycle, ngx_autocert_conf_t *out);
 
 
 /*
+ * ngx_autocert_flock_ex_nb — non-blocking exclusive interprocess lock, POSIX
+ * side. The win32 side is defined in ngx_autocert_win32.h's W13 primitives
+ * region (LockFileEx). Returns 0 on success, -1 on failure with errno set —
+ * the same convention flock(2) already uses, so the single call site at
+ * driver.c keeps its `== 0` / `-1` tests unchanged.
+ */
+#if !(NGX_WIN32)
+#define ngx_autocert_flock_ex_nb(fd)    flock(fd, LOCK_EX | LOCK_NB)
+#endif
+
+
+/*
  * renameat2(2) wrapper, shared by the store commit (order.c) and the account-key
  * migration (driver.c) — both fd-pinned, security-sensitive renames that must
  * not drift. Called via syscall() so the build needs no glibc renameat2 wrapper.

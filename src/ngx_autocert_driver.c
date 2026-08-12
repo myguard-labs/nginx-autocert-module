@@ -2461,7 +2461,7 @@ ngx_autocert_driver_trylock(ngx_cycle_t *cycle)
     }
 
     for ( ;; ) {
-        if (flock(ngx_autocert_lock_fd, LOCK_EX | LOCK_NB) == 0) {
+        if (ngx_autocert_flock_ex_nb(ngx_autocert_lock_fd) == 0) {
             break;
         }
         if (ngx_autocert_err_is_intr(ngx_errno)) {
