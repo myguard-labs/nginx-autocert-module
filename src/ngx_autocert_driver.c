@@ -26,7 +26,9 @@
 #include <ngx_core.h>
 #include <ngx_event.h>
 
+#if !(NGX_WIN32)
 #include <sys/stat.h>          /* mkdirat(2) — M3 per-CA account dirs */
+#endif
 #include <fcntl.h>             /* openat/AT_* — M3 atomic key migration */
 #include <errno.h>             /* EINVAL/ENOTTY/EOPNOTSUPP for renameat2 */
 
@@ -195,8 +197,8 @@ static ngx_event_t                  ngx_autocert_relock_timer;
 static int
 ngx_autocert_mkdirat_secure(ngx_cycle_t *cycle, int pfd, const char *leaf)
 {
-    int          fd;
-    struct stat  st;
+    int                   fd;
+    ngx_autocert_stat_t   st;
 
     if (ngx_autocert_mkdirat(pfd, leaf, 0700) == -1 && ngx_errno != NGX_EEXIST) {
         ngx_log_error(NGX_LOG_ERR, cycle->log, ngx_errno,
@@ -210,7 +212,7 @@ ngx_autocert_mkdirat_secure(ngx_cycle_t *cycle, int pfd, const char *leaf)
                       "autocert: \"%s\" is not a directory", leaf);
         return -1;
     }
-    if (fstat(fd, &st) == -1 || !S_ISDIR(st.st_mode)) {
+    if (ngx_autocert_fstat(fd, &st) == -1 || !S_ISDIR(st.st_mode)) {
         ngx_log_error(NGX_LOG_ERR, cycle->log, ngx_errno,
                       "autocert: \"%s\" is not a directory", leaf);
         (void) ngx_autocert_close(fd);
@@ -239,7 +241,7 @@ ngx_autocert_prepare_account_key(ngx_cycle_t *cycle, ngx_autocert_conf_t *acf,
 {
     u_char                   *key_path, *base, *p;
     int                       bfd, accfd, cafd;
-    struct stat               st;
+    ngx_autocert_stat_t       st;
     char                      hash[NGX_AUTOCERT_CA_HASH_HEX + 1];
 
     key_path = ca->account_key_path.data;       /* config pool; outlives worker */
@@ -2117,10 +2119,10 @@ static void
 ngx_autocert_runtime_marker_write(ngx_cycle_t *cycle, ngx_autocert_conf_t *acf,
     ngx_str_t *host)
 {
-    u_char       dir[NGX_MAX_PATH];
-    size_t       dlen;
-    int          dfd, fd;
-    struct stat  st;
+    u_char                dir[NGX_MAX_PATH];
+    size_t                dlen;
+    int                   dfd, fd;
+    ngx_autocert_stat_t   st;
 
     dlen = ngx_autocert_runtime_dir(acf, host, dir, sizeof(dir));
     if (dlen == 0) {
@@ -2184,7 +2186,7 @@ ngx_autocert_runtime_marker_write(ngx_cycle_t *cycle, ngx_autocert_conf_t *acf,
     }
 
     /* now that the fd is known to be a plain, single-linked regular file */
-    if (ftruncate(fd, 0) == -1) {
+    if (ngx_autocert_ftruncate(fd, 0) == -1) {
         (void) ngx_autocert_close(fd);
         ngx_log_error(NGX_LOG_ERR, cycle->log, ngx_errno,
                       "autocert: A6 failed to truncate runtime marker for \"%V\"",
@@ -2276,7 +2278,7 @@ ngx_autocert_runtime_seed(ngx_cycle_t *cycle)
     struct dirent        *de;
     int                   dfd, mfd, cfd;
     ssize_t               n;
-    struct stat           mst;
+    ngx_autocert_stat_t   mst;
     u_char                hostbuf[NGX_AUTOCERT_REQUEST_NAME_MAX];
     ngx_str_t             host;
     ngx_uint_t            key_type;
@@ -2345,7 +2347,7 @@ ngx_autocert_runtime_seed(ngx_cycle_t *cycle)
             continue;                    /* not a runtime dir (or config-only) */
         }
 
-        if (fstat(mfd, &mst) == -1 || !S_ISREG(mst.st_mode)
+        if (ngx_autocert_fstat(mfd, &mst) == -1 || !S_ISREG(mst.st_mode)
             || mst.st_size <= 0
             || (size_t) mst.st_size > NGX_AUTOCERT_REQUEST_NAME_MAX)
         {

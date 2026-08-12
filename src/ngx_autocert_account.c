@@ -251,7 +251,7 @@ ngx_autocert_account_load_key(ngx_autocert_account_t *acct)
 
     /* present -> read whole file, parse PEM */
     {
-        struct stat  st;
+        ngx_autocert_stat_t  st;
 
         if (ngx_autocert_fstat(fd, &st) == -1
             || st.st_size <= 0

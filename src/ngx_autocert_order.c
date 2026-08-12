@@ -16,7 +16,9 @@
 #include "ngx_autocert_shared.h"        /* shared ngx_autocert_renameat2() */
 
 #include <fcntl.h>
+#if !(NGX_WIN32)
 #include <sys/stat.h>
+#endif
 #include <signal.h>
 #include <time.h>
 
@@ -2216,17 +2218,17 @@ ngx_autocert_keytype_pem_names(ngx_uint_t kt, const char **priv,
 static ngx_int_t
 ngx_autocert_order_store(ngx_autocert_order_t *order)
 {
-    u_char       *cdir, *p;
-    u_char        dir[NGX_AUTOCERT_DOMAIN_SEG_MAX + 1];
-    u_char        staging[NGX_AUTOCERT_DOMAIN_SEG_MAX + sizeof(".tmp")];
-    int           cfd, sfd;
-    size_t        clen;
-    struct stat   st;
-    ngx_int_t     rc, swap;
-    ngx_uint_t    certbot;
-    ngx_str_t     seg;
-    const char   *priv_name, *chain_name, *leaf_name, *rest_name;
-    u_char        seg_buf[NGX_AUTOCERT_DOMAIN_SEG_MAX];
+    u_char               *cdir, *p;
+    u_char                dir[NGX_AUTOCERT_DOMAIN_SEG_MAX + 1];
+    u_char                staging[NGX_AUTOCERT_DOMAIN_SEG_MAX + sizeof(".tmp")];
+    int                   cfd, sfd;
+    size_t                clen;
+    ngx_autocert_stat_t   st;
+    ngx_int_t             rc, swap;
+    ngx_uint_t            certbot;
+    ngx_str_t             seg;
+    const char           *priv_name, *chain_name, *leaf_name, *rest_name;
+    u_char                seg_buf[NGX_AUTOCERT_DOMAIN_SEG_MAX];
 
     if (order->store_path.len == 0) {
         ngx_log_error(NGX_LOG_ERR, order->log, 0,
@@ -2362,7 +2364,7 @@ ngx_autocert_order_store(ngx_autocert_order_t *order)
         (void) ngx_autocert_close(cfd);
         return NGX_ERROR;
     }
-    if (fstat(sfd, &st) == -1 || !S_ISDIR(st.st_mode)) {
+    if (ngx_autocert_fstat(sfd, &st) == -1 || !S_ISDIR(st.st_mode)) {
         ngx_log_error(NGX_LOG_ERR, order->log, ngx_errno,
                       "autocert: staging \"%s\" is not a directory", staging);
         (void) ngx_autocert_close(sfd);
@@ -2623,10 +2625,10 @@ static ngx_int_t
 ngx_autocert_order_seed_staging_at(ngx_autocert_order_t *order, int cfd,
     const char *dir, int sfd, ngx_uint_t skip_kt)
 {
-    int           lfd, i;
-    struct stat   st;
-    const char   *name;
-    const char   *sp, *sc, *sl, *sr;
+    int                   lfd, i;
+    ngx_autocert_stat_t   st;
+    const char           *name;
+    const char           *sp, *sc, *sl, *sr;
 
     /* This keytype's own names — excluded from seeding (see CRITICAL above). */
     ngx_autocert_keytype_pem_names(skip_kt, &sp, &sc, &sl, &sr);

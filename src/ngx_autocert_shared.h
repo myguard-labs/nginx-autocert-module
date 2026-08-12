@@ -32,6 +32,21 @@ typedef mode_t  ngx_autocert_mode_t;
 #endif
 
 
+/*
+ * ngx_autocert_stat_t — POSIX side. The win32 side is defined in
+ * ngx_autocert_win32.h (its own struct, not UCRT's `struct stat`; see that
+ * file's W5d comment for why `<sys/stat.h>` cannot be used at all under
+ * MSVC). On POSIX it is exactly `struct stat`, so no call site or field
+ * access differs from the pre-shim code. Included here directly rather than
+ * relying on ngx_posix_config.h to have pulled `<sys/stat.h>` in already, so
+ * this typedef is self-sufficient.
+ */
+#if !(NGX_WIN32)
+#include <sys/stat.h>
+typedef struct stat  ngx_autocert_stat_t;
+#endif
+
+
 typedef struct {
     ngx_uint_t       configured;     /* 0 => autocert not present in http{} */
     ngx_str_t        email;          /* account contact email, "" if none */
@@ -159,6 +174,102 @@ ngx_int_t ngx_autocert_get_conf(ngx_cycle_t *cycle, ngx_autocert_conf_t *out);
 
 
 /*
+ * The dir-fd operation family. Every call site below takes a `dfd` that came
+ * from ngx_autocert_open_dir_path(), i.e. a directory whose every ancestor was
+ * pinned during the walk. Routing them through the seam means the win32 port
+ * (W5) touches this header instead of the four .c files.
+ *
+ * The flags parameters stay explicit rather than being folded into the helper:
+ * AT_REMOVEDIR and AT_SYMLINK_NOFOLLOW are load-bearing at their call sites,
+ * and a helper that silently picked one would be a security change disguised as
+ * a refactor.
+ *
+ * POSIX bodies below are guarded #if !(NGX_WIN32); the win32 bodies live in
+ * ngx_autocert_win32.h (W5c). Public signatures are byte-identical on both
+ * platforms — see DESIGN-win32-store-io.md § W1.
+ */
+
+#if !(NGX_WIN32)
+
+static ngx_inline int
+ngx_autocert_openat(int dfd, const char *name, int flags)
+{
+    return openat(dfd, name, flags);
+}
+
+
+/*
+ * O_CREAT variant. Split from the 3-argument form rather than made variadic:
+ * a variadic wrapper cannot portably forward its mode to openat(), and the
+ * win32 branch needs the creation mode as a distinct parameter anyway (it maps
+ * to a security descriptor, not to a mode_t).
+ */
+static ngx_inline int
+ngx_autocert_openat_mode(int dfd, const char *name, int flags,
+    ngx_autocert_mode_t mode)
+{
+    return openat(dfd, name, flags, mode);
+}
+
+
+static ngx_inline int
+ngx_autocert_mkdirat(int dfd, const char *name, ngx_autocert_mode_t mode)
+{
+    return mkdirat(dfd, name, mode);
+}
+
+
+static ngx_inline int
+ngx_autocert_unlinkat(int dfd, const char *name, int flags)
+{
+    return unlinkat(dfd, name, flags);
+}
+
+
+static ngx_inline int
+ngx_autocert_fstatat(int dfd, const char *name, ngx_autocert_stat_t *st, int flags)
+{
+    return fstatat(dfd, name, st, flags);
+}
+
+
+/*
+ * fstat(2) on an already-open int fd from this family (ngx_autocert_open_file_path,
+ * ngx_autocert_openat_mode, ...). Kept distinct from ngx_autocert_fstatat above:
+ * that one stats a NAME relative to a pinned dir fd, this one stats the fd
+ * itself once it is already open — the two call sites never overlap.
+ */
+static ngx_inline int
+ngx_autocert_fstat(int fd, ngx_autocert_stat_t *st)
+{
+    return fstat(fd, st);
+}
+
+
+static ngx_inline ngx_int_t
+ngx_autocert_renameat2(int oldfd, const char *oldp, int newfd,
+    const char *newp, unsigned int flags)
+{
+#if defined(__linux__) && defined(SYS_renameat2)
+    if (syscall(SYS_renameat2, oldfd, oldp, newfd, newp, flags) == 0) {
+        return NGX_OK;
+    }
+    if (ngx_errno == NGX_ENOSYS || ngx_errno == EINVAL
+        || ngx_errno == ENOTTY || ngx_errno == EOPNOTSUPP)
+    {
+        return NGX_DECLINED;
+    }
+    return NGX_ERROR;
+#else
+    (void) oldfd; (void) oldp; (void) newfd; (void) newp; (void) flags;
+    return NGX_DECLINED;
+#endif
+}
+
+#endif /* !(NGX_WIN32) */
+
+
+/*
  * Open a directory without trusting any component of `path`. O_NOFOLLOW on a
  * single open(path) protects only the leaf; this walk pins every ancestor with
  * openat() before descending into the next component. If `create` is set,
@@ -212,16 +323,16 @@ ngx_autocert_open_dir_path(const char *path, ngx_uint_t create,
 
         ngx_memcpy(name, p, len);
         name[len] = '\0';
-        nfd = openat(dfd, name,
+        nfd = ngx_autocert_openat(dfd, name,
                      O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
         if (nfd == -1 && create && errno == ENOENT) {
-            if (mkdirat(dfd, name, mode) == -1 && errno != EEXIST) {
+            if (ngx_autocert_mkdirat(dfd, name, mode) == -1 && errno != EEXIST) {
                 err = errno;
                 (void) ngx_autocert_close(dfd);
                 errno = err;
                 return -1;
             }
-            nfd = openat(dfd, name,
+            nfd = ngx_autocert_openat(dfd, name,
                          O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
         }
         if (nfd == -1) {
@@ -295,107 +406,13 @@ ngx_autocert_open_file_path(const char *path, int flags)
         return -1;
     }
 
-    fd = openat(dfd, leaf, flags | O_NOFOLLOW | O_CLOEXEC);
+    fd = ngx_autocert_openat(dfd, leaf, flags | O_NOFOLLOW | O_CLOEXEC);
     err = errno;
     (void) ngx_autocert_close(dfd);
     errno = err;
 
     return fd;
 }
-/*
- * The dir-fd operation family. Every call site below takes a `dfd` that came
- * from ngx_autocert_open_dir_path(), i.e. a directory whose every ancestor was
- * pinned during the walk. Routing them through the seam means the win32 port
- * (W5) touches this header instead of the four .c files.
- *
- * The flags parameters stay explicit rather than being folded into the helper:
- * AT_REMOVEDIR and AT_SYMLINK_NOFOLLOW are load-bearing at their call sites,
- * and a helper that silently picked one would be a security change disguised as
- * a refactor.
- *
- * POSIX bodies below are guarded #if !(NGX_WIN32); the win32 bodies live in
- * ngx_autocert_win32.h (W5c). Public signatures are byte-identical on both
- * platforms — see DESIGN-win32-store-io.md § W1.
- */
-
-#if !(NGX_WIN32)
-
-static ngx_inline int
-ngx_autocert_openat(int dfd, const char *name, int flags)
-{
-    return openat(dfd, name, flags);
-}
-
-
-/*
- * O_CREAT variant. Split from the 3-argument form rather than made variadic:
- * a variadic wrapper cannot portably forward its mode to openat(), and the
- * win32 branch needs the creation mode as a distinct parameter anyway (it maps
- * to a security descriptor, not to a mode_t).
- */
-static ngx_inline int
-ngx_autocert_openat_mode(int dfd, const char *name, int flags,
-    ngx_autocert_mode_t mode)
-{
-    return openat(dfd, name, flags, mode);
-}
-
-
-static ngx_inline int
-ngx_autocert_mkdirat(int dfd, const char *name, ngx_autocert_mode_t mode)
-{
-    return mkdirat(dfd, name, mode);
-}
-
-
-static ngx_inline int
-ngx_autocert_unlinkat(int dfd, const char *name, int flags)
-{
-    return unlinkat(dfd, name, flags);
-}
-
-
-static ngx_inline int
-ngx_autocert_fstatat(int dfd, const char *name, struct stat *st, int flags)
-{
-    return fstatat(dfd, name, st, flags);
-}
-
-
-/*
- * fstat(2) on an already-open int fd from this family (ngx_autocert_open_file_path,
- * ngx_autocert_openat_mode, ...). Kept distinct from ngx_autocert_fstatat above:
- * that one stats a NAME relative to a pinned dir fd, this one stats the fd
- * itself once it is already open — the two call sites never overlap.
- */
-static ngx_inline int
-ngx_autocert_fstat(int fd, struct stat *st)
-{
-    return fstat(fd, st);
-}
-
-
-static ngx_inline ngx_int_t
-ngx_autocert_renameat2(int oldfd, const char *oldp, int newfd,
-    const char *newp, unsigned int flags)
-{
-#if defined(__linux__) && defined(SYS_renameat2)
-    if (syscall(SYS_renameat2, oldfd, oldp, newfd, newp, flags) == 0) {
-        return NGX_OK;
-    }
-    if (ngx_errno == NGX_ENOSYS || ngx_errno == EINVAL
-        || ngx_errno == ENOTTY || ngx_errno == EOPNOTSUPP)
-    {
-        return NGX_DECLINED;
-    }
-    return NGX_ERROR;
-#else
-    (void) oldfd; (void) oldp; (void) newfd; (void) newp; (void) flags;
-    return NGX_DECLINED;
-#endif
-}
-
-#endif /* !(NGX_WIN32) */
 
 
 #endif /* _NGX_AUTOCERT_SHARED_H_INCLUDED_ */
