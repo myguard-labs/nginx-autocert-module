@@ -23,7 +23,9 @@
 #include <openssl/x509v3.h>
 
 #include <fcntl.h>
+#if !(NGX_WIN32)
 #include <sys/stat.h>
+#endif
 
 
 /*
@@ -1049,23 +1051,23 @@ ngx_http_autocert_cache_reload(ngx_autocert_cert_t *c, ngx_uint_t slot,
     ngx_str_t *host, ngx_str_t *verify, ngx_autocert_serve_ctx_t *sctx,
     ngx_log_t *log)
 {
-    u_char             chain_path[NGX_MAX_PATH], key_path[NGX_MAX_PATH];
-    u_char            *p;
-    size_t             base;
+    u_char              chain_path[NGX_MAX_PATH], key_path[NGX_MAX_PATH];
+    u_char             *p;
+    size_t              base;
     ngx_autocert_slot_t *sl = &c->slots[slot];
-    const char        *chain_leaf = ngx_autocert_slot_chain_name[slot];
-    const char        *key_leaf = ngx_autocert_slot_key_name[slot];
-    size_t             chain_leaf_len = ngx_strlen(chain_leaf);
-    size_t             key_leaf_len = ngx_strlen(key_leaf);
-    ngx_str_t          chain_pem, key_pem, seg;
-    struct stat        st;
-    int                fd;
-    BIO               *bio = NULL;
-    X509              *leaf = NULL, *x;
-    STACK_OF(X509)    *chain = NULL;
-    EVP_PKEY          *key = NULL;
-    ngx_int_t          rc = NGX_ERROR;
-    ngx_pool_t        *tmp;
+    const char         *chain_leaf = ngx_autocert_slot_chain_name[slot];
+    const char         *key_leaf = ngx_autocert_slot_key_name[slot];
+    size_t              chain_leaf_len = ngx_strlen(chain_leaf);
+    size_t              key_leaf_len = ngx_strlen(key_leaf);
+    ngx_str_t           chain_pem, key_pem, seg;
+    ngx_autocert_stat_t st;
+    int                 fd;
+    BIO                *bio = NULL;
+    X509               *leaf = NULL, *x;
+    STACK_OF(X509)     *chain = NULL;
+    EVP_PKEY           *key = NULL;
+    ngx_int_t           rc = NGX_ERROR;
+    ngx_pool_t         *tmp;
 
     /* Reject a host that could escape the store as a path segment. */
     if (host->len == 0
@@ -1307,12 +1309,12 @@ static ngx_int_t
 ngx_http_autocert_read_file(ngx_pool_t *pool, u_char *path, ngx_str_t *out,
     time_t *mtime)
 {
-    int              fd;
-    struct stat      st;
-    ssize_t          n;
-    off_t            fsize;
-    size_t           size;
-    u_char          *buf;
+    int                  fd;
+    ngx_autocert_stat_t  st;
+    ssize_t              n;
+    off_t                fsize;
+    size_t               size;
+    u_char              *buf;
 
     /* Pin every ancestor and the final leaf before reading. */
     fd = ngx_autocert_open_file_path((const char *) path, O_RDONLY);

@@ -101,6 +101,72 @@ typedef unsigned int  ngx_autocert_mode_t;
 
 
 /*
+ * ngx_autocert_stat_t (W5d) and the `<sys/stat.h>` macros the call sites use.
+ *
+ * `<sys/stat.h>` cannot be included in ANY nginx TU under MSVC: nginx's
+ * ngx_win32_config.h does `typedef __int64 off_t;` then `#define
+ * _OFF_T_DEFINED`. That guard covers BOTH `off_t` and `_off_t` in UCRT, so
+ * `_off_t` is never typedef'd, and UCRT's `<sys/stat.h>` — whose `struct
+ * _stat32` has an `_off_t st_size` member — fails to parse. This is not an
+ * include-order or `_WIN32_WINNT` problem; the header is simply unusable
+ * here. So this struct and these macros are our own, not UCRT's.
+ *
+ * Five members: st_mode, st_nlink, st_size, st_mtime, st_uid are the only
+ * fields any call site in this repo reads (grepped for every `\.st_[a-z]+`/
+ * `->st_[a-z]+` against a `struct stat`/`ngx_autocert_stat_t` in src/ —
+ * account.c's ownership check reads st_uid, ngx_http_autocert_cache_reload's
+ * and ngx_http_autocert_read_file's mtime-reload logic in serve.c reads
+ * st_mtime). st_size is `off_t` — nginx's own `__int64` typedef on win32 —
+ * so the existing `<= 0` / `> NGX_AUTOCERT_REQUEST_NAME_MAX` checks keep
+ * 64-bit semantics; a `_off_t` (32-bit on UCRT, and undefined here
+ * regardless) would silently truncate them. st_mode uses
+ * ngx_autocert_mode_t, matching the POSIX side. st_mtime is populated via
+ * nginx's own `ngx_file_mtime()` FILETIME conversion (ngx_files.h), the same
+ * one the core win32 file-info path already uses. st_uid has no win32
+ * meaning, same as ngx_autocert_geteuid() above (W7): the shim bodies set it
+ * to the identical placeholder ngx_autocert_geteuid() returns, so
+ * account.c's `st.st_uid != ngx_autocert_geteuid()` ownership check keeps
+ * compiling and takes the same "always unprivileged, always safe default"
+ * branch geteuid() already documents — this is not a new privilege decision,
+ * real ownership verification is still W11 (key ACL) as already noted above.
+ *
+ * The `S_IF*`/`S_IS*`/`S_IRWX*` macros are `#ifndef`-guarded rather than
+ * defined unconditionally: MinGW-w64's own headers may already supply some
+ * of these transitively, and its definitions must win where present so both
+ * toolchains see one set of values.
+ */
+typedef struct {
+    ngx_autocert_mode_t  st_mode;
+    short                st_nlink;
+    off_t                st_size;
+    time_t               st_mtime;
+    ngx_uid_t            st_uid;
+} ngx_autocert_stat_t;
+
+#ifndef S_IFMT
+#define S_IFMT   0170000
+#endif
+#ifndef S_IFDIR
+#define S_IFDIR  0040000
+#endif
+#ifndef S_IFREG
+#define S_IFREG  0100000
+#endif
+#ifndef S_ISDIR
+#define S_ISDIR(m)  (((m) & S_IFMT) == S_IFDIR)
+#endif
+#ifndef S_ISREG
+#define S_ISREG(m)  (((m) & S_IFMT) == S_IFREG)
+#endif
+#ifndef S_IRWXG
+#define S_IRWXG  0000070
+#endif
+#ifndef S_IRWXO
+#define S_IRWXO  0000007
+#endif
+
+
+/*
  * POSIX open() flags the call sites spell (O_DIRECTORY, O_NOFOLLOW, O_CLOEXEC,
  * O_NONBLOCK, ...) so the shared call sites in ngx_autocert_shared.h keep
  * exactly one spelling on both platforms. On win32 these are NOT passed to a
@@ -931,7 +997,7 @@ ngx_autocert_unlinkat(int dfd, const char *name, int flags)
  * shared open helper's contract for every other caller.
  */
 static ngx_inline int
-ngx_autocert_fstatat(int dfd, const char *name, struct stat *st, int flags)
+ngx_autocert_fstatat(int dfd, const char *name, ngx_autocert_stat_t *st, int flags)
 {
     BY_HANDLE_FILE_INFORMATION  info;
     HANDLE                      h;
@@ -966,8 +1032,9 @@ ngx_autocert_fstatat(int dfd, const char *name, struct stat *st, int flags)
                   ? (S_IFDIR | 0700) : (S_IFREG | 0600);
     st->st_nlink = (short) (info.nNumberOfLinks > 0
                              ? info.nNumberOfLinks : 1);
-    st->st_size = (info.nFileSizeHigh == 0)
-                  ? (_off_t) info.nFileSizeLow : (_off_t) -1;
+    st->st_size = ngx_file_size(&info);
+    st->st_mtime = ngx_file_mtime(&info);
+    st->st_uid = ngx_autocert_geteuid();
 
     return 0;
 }
@@ -980,7 +1047,7 @@ ngx_autocert_fstatat(int dfd, const char *name, struct stat *st, int flags)
  * so there is nothing left to resolve).
  */
 static ngx_inline int
-ngx_autocert_fstat(int fd, struct stat *st)
+ngx_autocert_fstat(int fd, ngx_autocert_stat_t *st)
 {
     BY_HANDLE_FILE_INFORMATION  info;
     HANDLE                      h;
@@ -1000,8 +1067,9 @@ ngx_autocert_fstat(int fd, struct stat *st)
                   ? (S_IFDIR | 0700) : (S_IFREG | 0600);
     st->st_nlink = (short) (info.nNumberOfLinks > 0
                              ? info.nNumberOfLinks : 1);
-    st->st_size = (info.nFileSizeHigh == 0)
-                  ? (_off_t) info.nFileSizeLow : (_off_t) -1;
+    st->st_size = ngx_file_size(&info);
+    st->st_mtime = ngx_file_mtime(&info);
+    st->st_uid = ngx_autocert_geteuid();
 
     return 0;
 }
