@@ -167,6 +167,30 @@ ngx_int_t ngx_autocert_get_conf(ngx_cycle_t *cycle, ngx_autocert_conf_t *out);
 
 
 /*
+ * ngx_autocert_fsync / ngx_autocert_fsync_dir (W5i) — POSIX side. The win32
+ * side is defined in ngx_autocert_win32.h's W5i primitives region
+ * (FlushFileBuffers). Both take an already-open fd from this family and
+ * return 0 on success, -1 on failure with errno set, matching fsync(2)'s own
+ * convention so the account.c/order.c call sites keep their `!= 0`/`== -1`
+ * tests unchanged.
+ *
+ * Split in two because a directory fd has no win32 analogue:
+ * FlushFileBuffers() fails outright on a directory handle. Every dir-fsync
+ * call site here is already best-effort by design (durability nicety, never
+ * a correctness requirement — see the doc comments at its call sites), so
+ * ngx_autocert_fsync_dir() is the seam that is allowed to be a real fsync on
+ * POSIX and a documented no-op on win32; ngx_autocert_fsync() itself stays a
+ * real flush on both platforms and must never be widened to swallow a
+ * directory's failure too, or a genuine file-flush failure would go silently
+ * unreported.
+ */
+#if !(NGX_WIN32)
+#define ngx_autocert_fsync(fd)          fsync(fd)
+#define ngx_autocert_fsync_dir(fd)      fsync(fd)
+#endif
+
+
+/*
  * renameat2(2) wrapper, shared by the store commit (order.c) and the account-key
  * migration (driver.c) — both fd-pinned, security-sensitive renames that must
  * not drift. Called via syscall() so the build needs no glibc renameat2 wrapper.

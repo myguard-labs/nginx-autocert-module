@@ -2537,7 +2537,7 @@ static ngx_int_t
 ngx_autocert_order_fsync_dirfd(ngx_autocert_order_t *order, int fd,
     const char *label)
 {
-    if (fsync(fd) == -1) {
+    if (ngx_autocert_fsync_dir(fd) == -1) {
         ngx_log_error(NGX_LOG_ERR, order->log, ngx_errno,
                       "autocert: fsync(\"%s\") failed", label);
         return NGX_ERROR;
@@ -2777,7 +2777,7 @@ ngx_autocert_order_write_tmp_at(ngx_autocert_order_t *order, int sfd,
         }
     }
 
-    if (fsync(fd) == -1) {
+    if (ngx_autocert_fsync(fd) == -1) {
         ngx_log_error(NGX_LOG_ERR, order->log, ngx_errno,
                       "autocert: fsync(\"%s\") failed", leaf);
         (void) ngx_autocert_close(fd);
