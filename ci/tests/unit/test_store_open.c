@@ -41,6 +41,31 @@
 #include "../../../src/ngx_autocert_shared.h"
 
 
+/*
+ * Link stubs: W5g-gap routed ngx_autocert_open_file_path() through
+ * ngx_autocert_win32_classify_root() (same as test_win32_split_root.c), so
+ * this test now links ngx_string.o for ngx_snprintf/ngx_strlchr, which drags
+ * in refs to ngx_cycle / ngx_log_error_core / ngx_pnalloc via ngx_sort/
+ * ngx_pstrdup that this test never calls. Same trivial-stub pattern as
+ * test_win32_split_root.c and test_ratecap.c.
+ */
+volatile ngx_cycle_t  *ngx_cycle;
+
+void ngx_log_error_core(ngx_uint_t level, ngx_log_t *log, ngx_err_t err,
+    const char *fmt, ...);
+void ngx_log_error_core(ngx_uint_t level, ngx_log_t *log, ngx_err_t err,
+    const char *fmt, ...)
+{ (void) level; (void) log; (void) err; (void) fmt; }
+
+void *ngx_pnalloc(ngx_pool_t *pool, size_t size);
+void *ngx_pnalloc(ngx_pool_t *pool, size_t size)
+{ (void) pool; (void) size; return NULL; }
+
+void *ngx_alloc(size_t size, ngx_log_t *log);
+void *ngx_alloc(size_t size, ngx_log_t *log)
+{ (void) size; (void) log; return NULL; }
+
+
 static int   failures;
 static char  store[] = "/tmp/ac-store-XXXXXX";
 
@@ -228,6 +253,105 @@ main(void)
     fd = ngx_autocert_open_file_path("", O_RDONLY);
     CHECK(fd == -1 && errno == EINVAL, "empty path rejected (EINVAL)");
     if (fd != -1) { (void) close(fd); }
+
+    /*
+     * 7-9 (W5g-gap). ngx_autocert_open_file_path() now routes its
+     * parent/leaf split through ngx_autocert_win32_classify_root() -- the
+     * same normalise-then-classify half ngx_autocert_split_root() already
+     * uses on the directory side -- so a win32-spelled path resolves
+     * identically to its '/'-spelled form instead of being silently
+     * mis-split. The classifier is compiled unconditionally (no
+     * NGX_WIN32 guard), so these checks exercise the real production
+     * function here on Linux, not a stand-in. All three build the path
+     * from `store` (a real '/'-rooted temp dir), so the '\'-spelled
+     * variants below are relative-looking strings that this process's cwd
+     * does NOT contain -- proving the split, not a coincidental hit.
+     */
+
+    /* 7 (a). A '\'-only path has no '/' at all. Pre-fix this split at
+     * slash==NULL and opened "." with the WHOLE string as leaf -- a
+     * relative open of a literally-named file, silently wrong rather than
+     * an error. Post-fix, classify_root folds '\' to '/' first, so this
+     * resolves to the SAME store/example.com/fullchain.pem as check 1. */
+    {
+        char  winpath[1024], slashpath[1024];
+
+        snprintf(winpath, sizeof(winpath), "%s", store);
+        /* store is an absolute '/'-rooted mkdtemp path (no backslashes to
+         * fold), so build a purely '\'-spelled path relative to nothing
+         * meaningful is not representative; instead exercise the fold on
+         * the component separators after the store root, which is what a
+         * real win32 caller would hand in for its OWN absolute prefix.
+         * Build "<store>\example.com\fullchain.pem" (backslash component
+         * separators, forward-slash store root) and confirm it reads back
+         * identically to the '/'-spelled form. */
+        snprintf(winpath, sizeof(winpath), "%s\\example.com\\fullchain.pem",
+                 store);
+        snprintf(slashpath, sizeof(slashpath),
+                 "%s/example.com/fullchain.pem", store);
+
+        memset(buf, 0, sizeof(buf));
+        n = open_and_read(winpath, buf, sizeof(buf) - 1);
+        CHECK(n == (ssize_t) strlen(CERT_BODY)
+              && memcmp(buf, CERT_BODY, strlen(CERT_BODY)) == 0,
+              "(a) '\\'-only leaf ('<store>\\example.com\\fullchain.pem') "
+              "resolves like its '/'-spelled form, not a relative literal");
+
+        /* Cross-check against the intentionally-wrong pre-fix reading: the
+         * literal filename "<store>\example.com\fullchain.pem" (with the
+         * backslashes taken as literal bytes, not separators) must NOT
+         * exist relative to cwd -- otherwise this check could pass by
+         * accident rather than by the fix. */
+        errno = 0;
+        {
+            int  badfd = open(winpath, O_RDONLY | O_NOFOLLOW);
+            CHECK(badfd == -1,
+                  "sanity: the pre-fix literal-filename reading of the "
+                  "'\\'-only path does not exist relative to cwd");
+            if (badfd != -1) { (void) close(badfd); }
+        }
+    }
+
+    /* 8 (b). Mixed '/' and '\' in the same path: pre-fix this split at the
+     * '/' and handed the un-normalised "store\key.pem" on as a leaf name
+     * (which does not exist -- ENOENT/EINVAL, never the real file).
+     * Post-fix it must read back the same store/example.com/fullchain.pem
+     * bytes as check 1. */
+    {
+        char  mixed[1024];
+
+        snprintf(mixed, sizeof(mixed), "%s/example.com\\fullchain.pem",
+                 store);
+        memset(buf, 0, sizeof(buf));
+        n = open_and_read(mixed, buf, sizeof(buf) - 1);
+        CHECK(n == (ssize_t) strlen(CERT_BODY)
+              && memcmp(buf, CERT_BODY, strlen(CERT_BODY)) == 0,
+              "(b) mixed '<store>/example.com\\fullchain.pem' resolves "
+              "like its fully '/'-spelled form");
+    }
+
+    /* 9 (c). A '..\' leaf must be rejected exactly like '../' -- the same
+     * bypass W5g's directory-side rule 1 closes. Pre-fix, the raw scan for
+     * '/' only would see leaf = "..\\" (never matching the '.'/'..'
+     * EINVAL guard, which compares '..' with nothing after it) and hand it
+     * to openat(), walking OUT of the intended host dir. */
+    {
+        char  p[1024];
+
+        snprintf(p, sizeof(p), "%s\\example.com\\..\\", store);
+        errno = 0;
+        fd = ngx_autocert_open_file_path(p, O_RDONLY);
+        CHECK(fd == -1 && errno == EINVAL,
+              "(c) '..\\' leaf rejected (EINVAL), same as '../'");
+        if (fd != -1) { (void) close(fd); }
+
+        snprintf(p, sizeof(p), "%s\\example.com\\..", store);
+        errno = 0;
+        fd = ngx_autocert_open_file_path(p, O_RDONLY);
+        CHECK(fd == -1 && errno == EINVAL,
+              "(c) '..' leaf reached via '\\' separators rejected (EINVAL)");
+        if (fd != -1) { (void) close(fd); }
+    }
 
     /* Best-effort cleanup (temp dir; leave it if a step already bailed). */
     (void) unlink("/tmp/ac-store-secret");
