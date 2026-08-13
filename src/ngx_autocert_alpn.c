@@ -12,6 +12,8 @@
  * always found. A caller that keyed on a mixed-case name would silently miss.
  */
 
+#include <ngx_config.h>
+
 #include "ngx_autocert_alpn.h"
 
 

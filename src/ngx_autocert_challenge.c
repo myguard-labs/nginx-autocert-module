@@ -4,6 +4,8 @@
  * keyed by crc32(token) with the full token compared on collision.
  */
 
+#include <ngx_config.h>
+
 #include "ngx_autocert_challenge.h"
 
 

@@ -11,6 +11,8 @@
  * could run concurrently, though the ACME flow issues them one at a time.
  */
 
+#include <ngx_config.h>
+
 #include "ngx_autocert_acme.h"
 
 #include <openssl/x509v3.h>
@@ -499,7 +501,7 @@ ngx_autocert_acme_check_origin(ngx_autocert_acme_request_t *r)
     }
 
     if (r->port != c->origin_port
-        || (r->host_is_ipv6 ? 1 : 0) != c->origin_is_ipv6
+        || (r->host_is_ipv6 ? 1 : 0) != (c->origin_is_ipv6 ? 1 : 0)
         || r->host.len != c->origin_host.len
         || ngx_strncasecmp(r->host.data, c->origin_host.data, r->host.len) != 0)
     {

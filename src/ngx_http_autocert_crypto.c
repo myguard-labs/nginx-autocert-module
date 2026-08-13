@@ -3,6 +3,8 @@
  * See ngx_http_autocert_crypto.h for the contract.
  */
 
+#include <ngx_config.h>
+
 #include "ngx_http_autocert_crypto.h"
 #include "ngx_autocert_shared.h"
 #include "ngx_autocert_ident.h"         /* ngx_autocert_str_is_ip, _cert_covers */

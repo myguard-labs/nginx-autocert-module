@@ -6,6 +6,8 @@
  * handler(NGX_ERROR).
  */
 
+#include <ngx_config.h>
+
 #include "ngx_autocert_shared.h"
 #include "ngx_autocert_account.h"
 #include "ngx_autocert_json.h"

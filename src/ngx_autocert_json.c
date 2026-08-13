@@ -7,6 +7,8 @@
  * document cannot blow the C stack. The grammar follows RFC 8259.
  */
 
+#include <ngx_config.h>
+
 #include "ngx_autocert_json.h"
 
 
