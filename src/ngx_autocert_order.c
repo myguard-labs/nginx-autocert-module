@@ -1177,7 +1177,20 @@ ngx_autocert_dns_hook_spawn(ngx_autocert_order_t *order, ngx_str_t *hook,
      * stronger than, the POSIX close-every-fd-above-stderr loop. CREATE_
      * SUSPENDED: hold the process before it can run (or spawn a child that
      * escapes the job) until AssignProcessToJobObject() below completes --
-     * the win32 analogue of the double-setpgid race guard. */
+     * the win32 analogue of the double-setpgid race guard.
+     *
+     * KNOWN DIVERGENCE from the POSIX arm, deliberate and scoped to W8: with
+     * bInheritHandles = FALSE and a zeroed STARTUPINFOW the child starts with
+     * NO standard handles, so hook stdout/stderr is discarded. The POSIX arm
+     * closes only descriptors above stderr, so hook output still reaches the
+     * nginx error log. The contract holds either way -- the exit code drives
+     * success/failure -- but an operator debugging a failing hook on win32
+     * sees only that code. Closing this needs the child to inherit exactly
+     * three handles and nothing else: open NUL (or a drained pipe) with
+     * bInheritHandle = TRUE, set STARTF_USESTDHANDLES, and pass
+     * bInheritHandles = TRUE with a PROC_THREAD_ATTRIBUTE_HANDLE_LIST naming
+     * only those three -- never a bare bInheritHandles = TRUE, which would
+     * hand the hook every inheritable worker handle. Ledgered as W8b. */
     if (!CreateProcessW(hook_w, cmdline_w, NULL, NULL, FALSE,
                          CREATE_SUSPENDED, NULL, NULL, &si, &pi))
     {
