@@ -92,22 +92,39 @@ AUTOCERT_DEPS="$ngx_addon_dir/src/ngx_autocert_driver.h \
 # exist. NGX_CC_NAME is set by auto/cc/name before a module's config runs.
 # NGX_AUTOCERT_WIN32_SSL_LIBS still overrides the SSL half for a builder whose
 # OpenSSL is named neither way.
+#
+# The default for AUTOCERT_SSL_LIBS is EMPTY, not a bare -lssl/libssl.lib. A
+# win32 build configured with --with-openssl=<srcdir> already has nginx core
+# (auto/lib/openssl/conf) append the built OpenSSL archives to CORE_LIBS BY
+# ABSOLUTE PATH, so a module-added bare SSL flag with no -L/-LIBPATH pointing
+# at that build is redundant on every win32 configuration nginx itself
+# supports, and FATAL (ld/link cannot resolve the name) on any configuration
+# where no import library of that name is on the default search path — which
+# is exactly what happened on the MinGW CI cell (W22). A builder who links
+# OpenSSL some other way (prebuilt/system OpenSSL not passed via
+# --with-openssl) can still opt back in via NGX_AUTOCERT_WIN32_SSL_LIBS.
 if [ "${NGX_PLATFORM:-}" = win32 ]; then
     # The same clang|gcc split nginx core uses for its own win32 libraries
     # (auto/os/win32:20-31), for the same reason: both halves of the line are
     # spelled differently per toolchain, not just the OpenSSL half.
     case "${NGX_CC_NAME:-}" in
         clang | gcc)
-            AUTOCERT_SSL_LIBS="${NGX_AUTOCERT_WIN32_SSL_LIBS:--lssl -lcrypto}"
+            AUTOCERT_SSL_LIBS="${NGX_AUTOCERT_WIN32_SSL_LIBS:-}"
             AUTOCERT_SYS_LIBS="-lws2_32 -ladvapi32 -lcrypt32"
             ;;
         *)
-            AUTOCERT_SSL_LIBS="${NGX_AUTOCERT_WIN32_SSL_LIBS:-libssl.lib libcrypto.lib}"
+            AUTOCERT_SSL_LIBS="${NGX_AUTOCERT_WIN32_SSL_LIBS:-}"
             AUTOCERT_SYS_LIBS="ws2_32.lib advapi32.lib crypt32.lib"
             ;;
     esac
     AUTOCERT_LIBS="$AUTOCERT_SSL_LIBS $AUTOCERT_SYS_LIBS"
 else
+    # POSIX is untouched by the win32 fix above: here the module builds as a
+    # dynamic .so (auto/module's DYNAMIC path) that is NOT linked against
+    # nginx core's static OpenSSL archives, so -lssl -lcrypto are the module's
+    # own real, load-bearing dependency, resolved normally via the system
+    # linker's default -L search path (no absolute-path duplication problem
+    # exists on this arm).
     AUTOCERT_LIBS="-lssl -lcrypto"
 fi
 
