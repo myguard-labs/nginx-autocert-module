@@ -615,7 +615,7 @@ certificates. Either `--with-http_ssl_module` or `--with-http_v3_module` provide
 it (the latter turns SSL support on implicitly). `configure` rejects a build with
 neither.
 
-Build as a standard dynamic module:
+Build as a standard dynamic module (Linux):
 
 ```sh
 cd nginx-<version>
@@ -625,7 +625,7 @@ make modules
 # -> objs/ngx_http_autocert_module.so
 ```
 
-The single shipped artifact is `ngx_http_autocert_module.so`. Load it with
+On Linux, the shipped artifact is `ngx_http_autocert_module.so`. Load it with
 `load_module modules/ngx_http_autocert_module.so;` and enable it per the config
 above.
 
@@ -646,6 +646,31 @@ the e2e suite under `ci/tests/e2e/*.sh` runs the actual server binary (`objs/ngi
 
 (The e2e harness uses [Pebble](https://github.com/letsencrypt/pebble) as a local
 ACME server.)
+
+### Windows
+
+Windows support for nginx has no dynamic-module mechanism; the module must be
+**statically linked into `nginx.exe`** via `--add-module=` at build time, not
+`--add-dynamic-module=`.
+
+Two toolchains are built in CI:
+
+- **MinGW-w64 x64**: builds OpenSSL 3.5.4, PCRE2 10.44 and zlib 1.3.1 from
+  pinned source tarballs under `gcc` with `--crossbuild=win32`. Produces
+  `nginx.exe` with the module statically linked. Build succeeds on each PR.
+
+- **MSVC x64 static link**: uses vcpkg's prebuilt `openssl:x64-windows-static`,
+  staged into an `openssl/{include,lib}` tree so `configure`'s hardcoded paths
+  resolve correctly. Configures and links with MSVC's `cl` and `nmake`. Under
+  active development.
+
+Both lanes run `configure --crossbuild=win32` to sidestep MSYS2's `uname` output,
+then assert `ngx_http_autocert_module` appears in the generated `objs/ngx_modules.c`
+and that `nginx -t` accepts `autocert_store_path` directives.
+
+**Runtime coverage**: None on Windows. The Pebble e2e suite under `ci/tests/e2e/`
+runs Linux Docker containers; a `windows-latest` runner cannot host them. A `win32`
+build proves the module compiles and links, but not that it functions at runtime.
 
 ---
 
