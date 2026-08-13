@@ -542,6 +542,107 @@ ngx_autocert_win32_classify_root(const char *path, char *norm,
 }
 
 
+/*
+ * win32 command-line quoting for one argv element, per the CommandLineToArgvW
+ * rules (the same parser CreateProcessW's child uses to split back apart
+ * whatever lpCommandLine string it was given): wrap the argument in double
+ * quotes; a run of backslashes only needs doubling when it is immediately
+ * followed by a quote (either an embedded `"` or the closing quote this
+ * function appends), otherwise backslashes pass through literally; an
+ * embedded `"` becomes `\"`. Appends a single leading space before the
+ * quoted argument so callers can concatenate several results directly into
+ * one lpCommandLine (the first argument's leading space is harmless —
+ * CreateProcessW/the CRT parser skip leading whitespace).
+ *
+ * Writes into `out` (size `out_cap`) starting at offset `off`, returns the
+ * new offset (== the string length so far) on success, or -1 with errno set
+ * (ENAMETOOLONG) if `out` is too small. Never partially writes past `out_cap`
+ * — on overflow the caller must treat `out` as undefined and abort, not use
+ * a truncated command line.
+ *
+ * Compiled unconditionally (not #if NGX_WIN32-guarded), same reasoning as
+ * ngx_autocert_win32_classify_root() above: pure string logic, no win32-header
+ * dependency, so the Linux unit suite can call the real production function
+ * instead of a hand-copied stand-in that could drift from it. This is the
+ * injection surface for the dns-01 hook spawn (W8) — CreateProcessW takes one
+ * flat command-line string, not an argv array, so getting this wrong is a
+ * command-injection bug, not a cosmetic one.
+ */
+static ngx_inline ngx_int_t
+ngx_autocert_win32_quote_arg(const char *arg, char *out, size_t out_cap,
+    size_t off)
+{
+    size_t  len, need, i, backslashes;
+
+#define NGX_AUTOCERT_QA_PUT(ch)                                              \
+    do {                                                                     \
+        if (off >= out_cap) {                                                \
+            errno = ENAMETOOLONG;                                            \
+            return -1;                                                       \
+        }                                                                    \
+        out[off++] = (ch);                                                   \
+    } while (0)
+
+    len = ngx_strlen(arg);
+
+    /* Worst case: every input byte becomes two ('\' doubling or '"' -> '\"')
+     * plus a leading space, two wrapping quotes and the NUL. Cheap upper
+     * bound checked once so the per-byte loop below never re-checks. */
+    need = off + 1 /* space */ + 1 /* opening quote */
+           + (len * 2) + 1 /* closing quote */ + 1 /* NUL */;
+    if (need > out_cap) {
+        errno = ENAMETOOLONG;
+        return -1;
+    }
+
+    NGX_AUTOCERT_QA_PUT(' ');
+    NGX_AUTOCERT_QA_PUT('"');
+
+    backslashes = 0;
+    for (i = 0; i < len; i++) {
+        if (arg[i] == '\\') {
+            backslashes++;
+            continue;
+        }
+
+        if (arg[i] == '"') {
+            /* Every pending backslash doubles, THEN escape the quote. */
+            while (backslashes > 0) {
+                NGX_AUTOCERT_QA_PUT('\\');
+                NGX_AUTOCERT_QA_PUT('\\');
+                backslashes--;
+            }
+            NGX_AUTOCERT_QA_PUT('\\');
+            NGX_AUTOCERT_QA_PUT('"');
+            continue;
+        }
+
+        /* Ordinary byte: any pending backslashes were NOT before a quote,
+         * so they pass through undoubled. */
+        while (backslashes > 0) {
+            NGX_AUTOCERT_QA_PUT('\\');
+            backslashes--;
+        }
+        NGX_AUTOCERT_QA_PUT(arg[i]);
+    }
+
+    /* Trailing backslashes sit immediately before the closing quote this
+     * function appends, so they double too. */
+    while (backslashes > 0) {
+        NGX_AUTOCERT_QA_PUT('\\');
+        NGX_AUTOCERT_QA_PUT('\\');
+        backslashes--;
+    }
+
+    NGX_AUTOCERT_QA_PUT('"');
+    out[off] = '\0';
+
+#undef NGX_AUTOCERT_QA_PUT
+
+    return (ngx_int_t) off;
+}
+
+
 #if !(NGX_WIN32)
 
 static ngx_inline int
