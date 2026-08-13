@@ -138,12 +138,19 @@ ngx_int_t ngx_autocert_get_conf(ngx_cycle_t *cycle, ngx_autocert_conf_t *out);
 
 
 /*
- * ngx_autocert_close/read/write/ftruncate/geteuid — POSIX side. The win32
- * side is defined in ngx_autocert_win32.h on the MSVCRT int-fd API (_close,
- * _read, _write, _chsize_s); see that file's W7 comment for why the fd stays
- * a plain CRT int rather than a HANDLE. Defined here as thin macros to the
- * POSIX call so every call site goes through one shim spelling regardless of
- * platform, with POSIX object code unchanged.
+ * ngx_autocert_close/read/write/ftruncate/geteuid/fchmod — POSIX side. The
+ * win32 side is defined in ngx_autocert_win32.h on the MSVCRT int-fd API
+ * (_close, _read, _write, _chsize_s); see that file's W7 comment for why the
+ * fd stays a plain CRT int rather than a HANDLE. Defined here as thin macros
+ * to the POSIX call so every call site goes through one shim spelling
+ * regardless of platform, with POSIX object code unchanged.
+ *
+ * ngx_autocert_fchmod (W11) is the last of this family: win32 has no chmod
+ * analogue at all (permission bits are a DACL, not a mode word), so its
+ * win32 side in ngx_autocert_win32.h translates the POSIX bitmask into an
+ * owner-only DACL rather than calling anything named "chmod". See that
+ * file's W11 comment for the translation and why PROTECTED_DACL_SECURITY_
+ * INFORMATION is mandatory there.
  */
 #if !(NGX_WIN32)
 #define ngx_autocert_close(fd)          close(fd)
@@ -151,6 +158,7 @@ ngx_int_t ngx_autocert_get_conf(ngx_cycle_t *cycle, ngx_autocert_conf_t *out);
 #define ngx_autocert_write(fd, b, n)    write(fd, b, n)
 #define ngx_autocert_ftruncate(fd, len) ftruncate(fd, len)
 #define ngx_autocert_geteuid()          geteuid()
+#define ngx_autocert_fchmod(fd, m)      fchmod(fd, (mode_t) (m))
 #endif
 
 
@@ -971,6 +979,76 @@ ngx_autocert_open_file_path(const char *path, int flags)
     errno = err;
 
     return fd;
+}
+
+
+/*
+ * ngx_autocert_win32_dacl_mode (W11) — pure DACL-ACE-tuple -> POSIX
+ * group/other permission-bit decision core.
+ *
+ * The win32 side of ngx_autocert_fstat/fstatat (ngx_autocert_win32.h)
+ * fabricates st_mode for account.c's "reject a key with group/other bits"
+ * guard (ngx_autocert_account.c:276-283). Before W11 that guard was a
+ * tautology on win32: the fabricated mode was always S_IFREG|0600 regardless
+ * of the file's real DACL, so a world-readable account key passed. This
+ * function is the decision this repo actually needs walking the real DACL
+ * to get right, extracted out of the win32-only ACE-walk loop so it has a
+ * Linux test oracle (the win32 side cannot be exercised or fuzzed here at
+ * all; this function can).
+ *
+ * Contract: the caller has already walked every ACE in the file's DACL and
+ * reduced each one to a (is_owner, is_allow, is_tolerated) tuple:
+ *   - is_owner:     the ACE's SID equals the file owner's SID (EqualSid).
+ *   - is_allow:     the ACE type is ACCESS_ALLOWED_ACE_TYPE (a DENY ACE
+ *                    grants nothing and is not evidence of exposure).
+ *   - is_tolerated: the ACE's SID is SYSTEM or the local Administrators
+ *                    group (CreateWellKnownSid WinLocalSystemSid /
+ *                    WinBuiltinAdministratorsSid) — DECIDED, not discovered:
+ *                    an admin/SYSTEM principal can read any file on the box
+ *                    regardless of this DACL, so flagging them would make
+ *                    the guard permanently unusable (every Windows file has
+ *                    an implicit Administrators/SYSTEM grant somewhere)
+ *                    without adding any real security. Nothing else is
+ *                    tolerated: a non-owner, non-tolerated ALLOW ace is
+ *                    exactly the exposure account.c's guard exists to catch.
+ *
+ * Returns the POSIX group/other bits that should be OR'd into st_mode
+ * (S_IRWXG|S_IRWXO when any ACE is a non-owner, non-tolerated ALLOW; 0 when
+ * every ALLOW ace is owner-only or tolerated). Callers combine this with
+ * S_IFREG and the fixed owner bits (0600) the way the win32 fstat bodies
+ * already build st_mode; this function decides only the group/other half,
+ * which is the half account.c's guard actually reads.
+ *
+ * n == 0 (a DACL with no ACEs at all, i.e. NULL DACL / everyone denied by
+ * default, or the caller passing an empty walk) is NOT "no exposure found":
+ * treat it the same as the fail-closed caller contract in
+ * ngx_autocert_win32.h's W11 comment — the caller is expected to have
+ * already fail-closed on any API error before calling this, but an
+ * unexpectedly empty ACE list from a live DACL is itself worth flagging
+ * rather than silently returning "safe", so it also returns the flagged
+ * bits. A real owner-only DACL always has at least the owner's ACE.
+ */
+static ngx_inline ngx_autocert_mode_t
+ngx_autocert_win32_dacl_mode(const ngx_int_t *is_owner,
+    const ngx_int_t *is_allow, const ngx_int_t *is_tolerated, ngx_uint_t n)
+{
+    ngx_uint_t  i;
+
+    if (n == 0) {
+        return (ngx_autocert_mode_t) (S_IRWXG | S_IRWXO);
+    }
+
+    for (i = 0; i < n; i++) {
+        if (!is_allow[i]) {
+            continue;
+        }
+        if (is_owner[i] || is_tolerated[i]) {
+            continue;
+        }
+        return (ngx_autocert_mode_t) (S_IRWXG | S_IRWXO);
+    }
+
+    return 0;
 }
 
 

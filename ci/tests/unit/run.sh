@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # Unit test runner for nginx-autocert-module.
-# Extracts and compiles all 16 unit tests against a pre-built nginx tree.
+# Extracts and compiles all 17 unit tests against a pre-built nginx tree.
 #
 # Required environment: NGX_BUILD_DIR must point to a built nginx tree
 # (with objs/src/core/*.o and other object files intact).
@@ -214,6 +214,23 @@ gcc -D_GNU_SOURCE -Wall -Wextra -Werror $CORE_INC \
 	"$WORKSPACE/ci/tests/unit/test_win32_mutex_verdict.c" \
 	-o test_win32_mutex_verdict
 ./test_win32_mutex_verdict
+
+# win32 DACL-ACE-tuple -> POSIX group/other permission-bit decision core
+# (ngx_autocert_win32_dacl_mode, W11): the security decision behind the
+# account-key permission guard (ngx_autocert_account.c:276-283) becoming
+# real on win32 instead of a tautology -- before W11 the fabricated st_mode
+# was a constant S_IFREG|0600 regardless of the file's actual DACL, so a
+# world-readable account key always passed the guard on win32. Given the
+# caller's (is_owner, is_allow, is_tolerated) walk of a file's real DACL,
+# this decides whether the group/other bits that guard checks should be set.
+# No win32-header dependency (plain ngx_int_t arrays), same reasoning as
+# test_win32_mutex_verdict.c above: this runs the real production function
+# on Linux.
+# shellcheck disable=SC2086
+gcc -D_GNU_SOURCE -Wall -Wextra -Werror $CORE_INC \
+	"$WORKSPACE/ci/tests/unit/test_win32_dacl_mode.c" \
+	-o test_win32_dacl_mode
+./test_win32_dacl_mode
 
 # shellcheck disable=SC2086
 gcc -Wall -Werror $CORE_INC -c \
