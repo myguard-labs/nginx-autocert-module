@@ -3138,7 +3138,7 @@ ngx_autocert_order_write_tmp_at(ngx_autocert_order_t *order, int sfd,
 
     fd = ngx_autocert_openat_mode(sfd, leaf,
                 O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW | O_CLOEXEC,
-                (mode_t) mode);
+                (ngx_autocert_mode_t) mode);
     if (fd == -1) {
         ngx_log_error(NGX_LOG_ERR, order->log, ngx_errno,
                       "autocert: open(\"%s\") failed", leaf);
