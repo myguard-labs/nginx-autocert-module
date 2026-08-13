@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # Unit test runner for nginx-autocert-module.
-# Extracts and compiles all 12 unit tests against a pre-built nginx tree.
+# Extracts and compiles all 16 unit tests against a pre-built nginx tree.
 #
 # Required environment: NGX_BUILD_DIR must point to a built nginx tree
 # (with objs/src/core/*.o and other object files intact).
@@ -187,6 +187,33 @@ gcc -D_GNU_SOURCE -Wall -Wextra -Werror $CORE_INC \
 	"$WORKSPACE/ci/tests/unit/test_win32_quote_arg.c" \
 	"$NGX/objs/src/core/ngx_string.o" -o test_win32_quote_arg
 ./test_win32_quote_arg
+
+# win32 named-mutex singleton NAME construction
+# (ngx_autocert_win32_singleton_name, W9): "Global\ngx_autocert_singleton_<hash>"
+# from a (caller-canonicalized) store path -- same path -> same name, different
+# paths -> different names, oversized output rejected, empty path handled.
+# Compiled unconditionally in ngx_autocert_shared.h (no win32-header
+# dependency), same reasoning as test_win32_quote_arg.c above: this runs the
+# real production function on Linux.
+# shellcheck disable=SC2086
+gcc -D_GNU_SOURCE -Wall -Wextra -Werror $CORE_INC \
+	"$WORKSPACE/ci/tests/unit/test_win32_singleton_name.c" \
+	"$NGX/objs/src/core/ngx_string.o" -o test_win32_singleton_name
+./test_win32_singleton_name
+
+# win32 WaitForSingleObject() result -> singleton-acquisition VERDICT mapping
+# (ngx_autocert_win32_mutex_wait_verdict, W9): the decision core of the
+# named-mutex gate. Pins the rule a plausible port gets backwards --
+# WAIT_ABANDONED means ownership transferred to us and is a SUCCESS, not an
+# error -- plus WAIT_OBJECT_0 (acquired), WAIT_TIMEOUT (-> NGX_AGAIN, same
+# retry path as POSIX EAGAIN), WAIT_FAILED and an unrecognised code
+# (-> NGX_ERROR, fail closed). No win32-header dependency (takes a plain
+# uint32_t), so this runs the real production function on Linux.
+# shellcheck disable=SC2086
+gcc -D_GNU_SOURCE -Wall -Wextra -Werror $CORE_INC \
+	"$WORKSPACE/ci/tests/unit/test_win32_mutex_verdict.c" \
+	-o test_win32_mutex_verdict
+./test_win32_mutex_verdict
 
 # shellcheck disable=SC2086
 gcc -Wall -Werror $CORE_INC -c \

@@ -643,6 +643,126 @@ ngx_autocert_win32_quote_arg(const char *arg, char *out, size_t out_cap,
 }
 
 
+/*
+ * W9 — named-mutex singleton name construction (win32 interprocess ACME
+ * driver gate, DESIGN-win32-store-io.md § W2). Takes the CANONICALIZED
+ * absolute store path (the caller must have resolved it via
+ * GetFinalPathNameByHandleW first -- this function does no canonicalisation
+ * of its own, so case / trailing-slash / 8.3-form differences on the same
+ * directory must already be folded before it is called) and writes
+ * "Global\ngx_autocert_singleton_<hash>" into `out` (size `out_cap`), where
+ * <hash> is a stable hash of `path` rendered as lowercase hex.
+ *
+ * `Global\` (not `Local\`) is load-bearing: `Local\` is per-session, so a
+ * Windows service instance and a console instance of the same nginx build
+ * would each get their own namespace and both arm the ACME engine --
+ * exactly the bug this mutex exists to close.
+ *
+ * FNV-1a, not ngx_crc32_short/long: the crc32 tables need
+ * ngx_crc32_init(cf->pool) before first use (pool-allocated, cycle-scoped),
+ * which is unavailable at the point ngx_autocert_driver_trylock() calls
+ * this (worker init_process, no pool handy) and would make the Linux unit
+ * test drag in ngx_crc32_init's pool machinery for no benefit -- FNV-1a is
+ * self-contained, allocation-free, and only needs to be stable and
+ * well-distributed, not cryptographically strong.
+ *
+ * Pure string+hash logic with no win32-header dependency, compiled
+ * unconditionally like ngx_autocert_win32_classify_root() and
+ * ngx_autocert_win32_quote_arg() above: the Linux unit suite calls the real
+ * production function directly. Caller-supplied out buffer + capacity, no
+ * allocation, same signature shape as its precedents. Returns 0 on success,
+ * or -1 with errno set (ENAMETOOLONG) if `out` is too small; `out` is left
+ * unmodified on failure -- no partial/truncated name is ever produced.
+ */
+static ngx_inline int
+ngx_autocert_win32_singleton_name(const char *path, char *out, size_t out_cap)
+{
+    static const char  hexdigits[] = "0123456789abcdef";
+    uint32_t            hash;
+    size_t              i, len, need;
+    const char          prefix[] = "Global\\ngx_autocert_singleton_";
+
+    /* FNV-1a, 32-bit. Offset basis and prime are the published constants;
+     * nothing here needs to match any other hash in this codebase. */
+    hash = 2166136261u;
+    len = ngx_strlen(path);
+    for (i = 0; i < len; i++) {
+        hash ^= (unsigned char) path[i];
+        hash *= 16777619u;
+    }
+
+    /* prefix + 8 hex digits + NUL, computed rather than sizeof()'d so the
+     * bound stays correct if the prefix text above ever changes. */
+    need = (sizeof(prefix) - 1) + 8 + 1;
+    if (need > out_cap) {
+        errno = ENAMETOOLONG;
+        return -1;
+    }
+
+    ngx_memcpy(out, prefix, sizeof(prefix) - 1);
+
+    for (i = 0; i < 8; i++) {
+        out[sizeof(prefix) - 1 + i] =
+            hexdigits[(hash >> (28 - 4 * i)) & 0xF];
+    }
+    out[sizeof(prefix) - 1 + 8] = '\0';
+
+    return 0;
+}
+
+
+/*
+ * W9 — WaitForSingleObject() result -> singleton-acquisition verdict.
+ *
+ * This is the exact rule a plausible win32 port gets backwards: WAIT_ABANDONED
+ * means a previous holder exited (crashed, killed, whatever) WITHOUT releasing
+ * -- but the kernel has already transferred ownership to THIS caller. It is a
+ * SUCCESS, not an error. Treating it as failure means no worker ever acquires
+ * the singleton again after one crash, which silently and permanently stops
+ * certificate issuance/renewal on that store. NGX_LOG_NOTICE is the caller's
+ * job (this function is pure and does no logging), but the caller MUST log
+ * when this returns NGX_OK for WAIT_ABANDONED specifically, since it is
+ * diagnostically significant (something died holding the lock).
+ *
+ * WAIT_TIMEOUT (used with a zero timeout, per this gate's never-block rule)
+ * means another process currently holds it -> NGX_AGAIN, mirroring the POSIX
+ * flock() EAGAIN path exactly so both feed the same relock-timer retry in
+ * ngx_autocert_relock_handler().
+ *
+ * Anything else (WAIT_FAILED, or an unrecognised code) -> NGX_ERROR.
+ *
+ * Takes a plain uint32_t rather than DWORD so this stays win32-header-free
+ * and Linux-unit-testable; the four named constants below are numerically
+ * identical to the WinBase.h macros of the same name (0, 0x80, 0x102,
+ * 0xFFFFFFFF), so a win32 caller passes WaitForSingleObject()'s return value
+ * straight through with no translation.
+ */
+#define NGX_AUTOCERT_WAIT_OBJECT_0    0x00000000u
+#define NGX_AUTOCERT_WAIT_ABANDONED   0x00000080u
+#define NGX_AUTOCERT_WAIT_TIMEOUT     0x00000102u
+#define NGX_AUTOCERT_WAIT_FAILED      0xFFFFFFFFu
+
+static ngx_inline ngx_int_t
+ngx_autocert_win32_mutex_wait_verdict(uint32_t wait_rc)
+{
+    switch (wait_rc) {
+
+    case NGX_AUTOCERT_WAIT_OBJECT_0:
+        return NGX_OK;
+
+    case NGX_AUTOCERT_WAIT_ABANDONED:
+        /* Ownership transferred to us; treat exactly like WAIT_OBJECT_0. */
+        return NGX_OK;
+
+    case NGX_AUTOCERT_WAIT_TIMEOUT:
+        return NGX_AGAIN;
+
+    default:
+        return NGX_ERROR;
+    }
+}
+
+
 #if !(NGX_WIN32)
 
 static ngx_inline int
