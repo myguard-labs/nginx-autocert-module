@@ -487,8 +487,11 @@ ngx_autocert_fsync_dir(int fd)
  * DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION.
  *
  * Return convention matches fchmod(2) and the rest of this shim family: 0 on
- * success, -1 on failure with both errno and SetLastError() set (per the
- * W13/W5i pattern above — a caller may read either).
+ * success, -1 on failure with SetLastError() carrying the raw Win32 error
+ * code and errno carrying the mapped POSIX code. This deliberately does NOT
+ * follow ngx_autocert_flock_ex_nb()'s mapped-value inversion above: that
+ * shim exists to satisfy a caller with an EWOULDBLOCK-style contract, and
+ * fchmod has no such caller.
  */
 static ngx_inline int
 ngx_autocert_fchmod(int fd, ngx_autocert_mode_t mode)
@@ -499,7 +502,6 @@ ngx_autocert_fchmod(int fd, ngx_autocert_mode_t mode)
     PACL              new_dacl;
     EXPLICIT_ACCESS_W ea;
     DWORD             mask, err;
-    int               mapped;
 
     h = ngx_autocert_fd_handle(fd);
     if (h == INVALID_HANDLE_VALUE) {
@@ -514,9 +516,8 @@ ngx_autocert_fchmod(int fd, ngx_autocert_mode_t mode)
     err = GetSecurityInfo(h, SE_KERNEL_OBJECT, OWNER_SECURITY_INFORMATION,
                            &owner, NULL, NULL, NULL, &owner_sd);
     if (err != ERROR_SUCCESS) {
-        mapped = ngx_autocert_win32_errno(err);
-        SetLastError(mapped);
-        errno = mapped;
+        SetLastError(err);
+        errno = ngx_autocert_win32_errno(err);
         return -1;
     }
 
@@ -554,9 +555,8 @@ ngx_autocert_fchmod(int fd, ngx_autocert_mode_t mode)
     err = SetEntriesInAclW(1, &ea, NULL, &new_dacl);
     if (err != ERROR_SUCCESS) {
         LocalFree(owner_sd);
-        mapped = ngx_autocert_win32_errno(err);
-        SetLastError(mapped);
-        errno = mapped;
+        SetLastError(err);
+        errno = ngx_autocert_win32_errno(err);
         return -1;
     }
 
@@ -568,9 +568,8 @@ ngx_autocert_fchmod(int fd, ngx_autocert_mode_t mode)
     LocalFree(new_dacl);
 
     if (err != ERROR_SUCCESS) {
-        mapped = ngx_autocert_win32_errno(err);
-        SetLastError(mapped);
-        errno = mapped;
+        SetLastError(err);
+        errno = ngx_autocert_win32_errno(err);
         return -1;
     }
 
