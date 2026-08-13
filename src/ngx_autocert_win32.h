@@ -278,7 +278,21 @@ typedef int  ngx_autocert_dirfd_t;
  * a frequency division per call. GetTickCount64 is 64-bit, so it does not wrap
  * (the 32-bit GetTickCount wraps after 49.7 days, which would silently expire
  * a hook wait on a long-lived worker).
+ *
+ * GetTickCount64 is a Vista+ kernel32 export whose prototype the SDK headers
+ * gate behind the same _WIN32_WINNT floor that is a dead end here (see the
+ * GetFileInformationByHandleEx note below: <ngx_config.h> has already fully
+ * expanded <windows.h> at nginx's own 0x0501, so a later #define changes
+ * nothing). Declare it ourselves, same minimal-surface style — kernel32 is
+ * always already linked, so this resolves at link time without GetProcAddress.
+ * Without the declaration MinGW emits an implicit-declaration error under
+ * -Werror, and an implicit int return would truncate the 64-bit tick count.
  */
+#ifndef NGX_AUTOCERT_HAVE_GETTICKCOUNT64
+#define NGX_AUTOCERT_HAVE_GETTICKCOUNT64  1
+WINBASEAPI ULONGLONG WINAPI GetTickCount64(void);
+#endif
+
 #define ngx_autocert_monotonic_ms()     ((uint64_t) GetTickCount64())
 
 /*
