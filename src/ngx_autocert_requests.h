@@ -81,8 +81,16 @@
  * dependency, no unresolved symbol when the other module is absent, and an N/N+1
  * version skew degrades through the api_version check instead of silently parsing
  * a foreign layout. Falls back to plain extern where the attribute is unsupported.
+ *
+ * ELF visibility is a property of the TARGET/binary format, not the compiler, so
+ * the guard must also exclude PE/COFF targets: MinGW-GCC defines __GNUC__ but
+ * targets PE/COFF, which has no visibility concept, so the attribute is rejected
+ * under -Werror=attributes. This is safe to fall back on, not just quiet: the
+ * RTLD_GLOBAL interposition hazard above is a dlopen()/ELF concern that does not
+ * arise on Windows, where each DLL already has its own private symbol namespace.
  */
-#if defined(__GNUC__) || defined(__clang__)
+#if (defined(__GNUC__) || defined(__clang__)) \
+    && !defined(_WIN32) && !defined(__CYGWIN__)
 #define NGX_AUTOCERT_REQUESTS_API  __attribute__((visibility("hidden")))
 #else
 #define NGX_AUTOCERT_REQUESTS_API
