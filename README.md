@@ -669,9 +669,17 @@ then assert `ngx_http_autocert_module` appears in the generated `objs/ngx_module
 and that `nginx -t` accepts an `autocert_store_path` directive while rejecting a
 bogus one (the negative control that keeps the positive check meaningful).
 
-**Runtime coverage**: None on Windows. The Pebble e2e suite under `ci/tests/e2e/`
-runs Linux Docker containers; a `windows-latest` runner cannot host them. A `win32`
-build proves the module compiles and links, but not that it functions at runtime.
+**Runtime coverage**: Partial on Windows. The MSVC lane starts the built
+`nginx.exe` and exercises the HTTP-01 challenge-serve path end-to-end: it seeds
+a token through the test-only `autocert_test_challenge` directive (compiled in
+only under `AUTOCERT_TEST=1`, never in a production build) and asserts the exact
+key authorization is served, that an unknown token and a token with a trailing
+path segment both 404, that `Content-Length` matches, and that a GET carrying a
+body on a keepalive connection does not desync it for a pipelined follow-up.
+
+Still open: full ACME **issuance** against a CA. The Pebble e2e suite under
+`ci/tests/e2e/` drives Linux Docker containers, which a `windows-latest` runner
+cannot host, so the order/finalize/download flow is not yet covered on win32.
 
 ---
 
@@ -693,7 +701,7 @@ for one run rather than several independent ones.
 | `codeql.yml` | PR (via `ci.yml`), monthly | CodeQL over the module TU |
 | `asan.yml` | weekly (Sun 03:45 UTC), manual | 30s ASan+UBSan request-storm soak. Green since #160. Two nginx-inherent checks are off: ODR (nginx generates `ngx_module_names` into both the binary and the `.so`) and config-load leaks (the cycle pool is never freed) — see `ci/tools/lsan.supp`. Request-path leaks, UAF, overflow and all UBSan checks stay armed |
 | `ci-deep.yml` | monthly, manual | long fuzz, memcheck + helgrind soaks, security scanners, angie Pebble e2e |
-| `windows-build.yml` | PR touching `src/`, `config`, the pins or the workflow itself; push to master; manual | native win32 build gate: MSVC x64 static link against the pinned nginx, then assert the module reached `objs/ngx_modules.c` and that `nginx -t` accepts `autocert_store_path` while rejecting a bogus directive. **Build-only** — the Pebble e2e scripts drive Linux Docker containers, which a `windows-latest` runner cannot host, so win32 runtime coverage is still open |
+| `windows-build.yml` | PR touching `src/`, `config`, the pins or the workflow itself; push to master; manual | native win32 build gate: MSVC x64 static link against the pinned nginx, then assert the module reached `objs/ngx_modules.c` and that `nginx -t` accepts `autocert_store_path` while rejecting a bogus directive. Then **starts `nginx.exe`** and verifies the HTTP-01 challenge-serve path (exact key authorization, 404s for unknown/nested tokens, `Content-Length`, and keepalive framing after a GET-with-body). Full ACME issuance is still uncovered on win32 — the Pebble e2e scripts drive Linux Docker containers a `windows-latest` runner cannot host |
 | `bump.yml` | weekly (Mon 04:00 UTC), manual | regenerate the nginx/angie version + sha256 pins in [`.github/versions.env`](.github/versions.env) and open a PR. Not a gate — it produces a reviewable change instead of letting builds drift onto a new upstream on their own |
 
 **nginx and angie are pinned.** `.github/versions.env` is the single source of
