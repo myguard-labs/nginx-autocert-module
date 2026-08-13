@@ -1232,7 +1232,7 @@ ngx_autocert_dns_hook_spawn(ngx_autocert_order_t *order, ngx_str_t *hook,
 
         if (ngx_autocert_dns_elapsed_ms(start) >= (ngx_msec_int_t) timeout_ms)
         {
-            ngx_msec_int_t  grace_start;
+            uint64_t  grace_start;
 
             ngx_log_error(NGX_LOG_ERR, order->log, 0,
                           "autocert: dns-01 hook \"%V\" timed out after %T s, "
@@ -1245,15 +1245,13 @@ ngx_autocert_dns_hook_spawn(ngx_autocert_order_t *order, ngx_str_t *hook,
 
             /* bounded grace wait (~1s), same shape as the POSIX 50 x 20ms
              * grace reap loop, so a stuck process can't pin the worker. */
-            grace_start = (ngx_msec_int_t) ngx_autocert_dns_monotonic();
+            grace_start = ngx_autocert_dns_monotonic();
             for ( ;; ) {
                 wait_rc = WaitForSingleObject(proc, 20);
                 if (wait_rc == WAIT_OBJECT_0) {
                     break;
                 }
-                if ((ngx_msec_int_t) ngx_autocert_dns_monotonic() - grace_start
-                    >= 1000)
-                {
+                if (ngx_autocert_dns_elapsed_ms(grace_start) >= 1000) {
                     break;
                 }
             }
