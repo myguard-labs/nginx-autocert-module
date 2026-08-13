@@ -2498,11 +2498,26 @@ ngx_autocert_win32_driver_trylock(int dfd, ngx_log_t *log)
     /* verdict == NGX_OK: WAIT_OBJECT_0 (clean acquire) or WAIT_ABANDONED
      * (prior holder exited without releasing; ownership transferred to us —
      * treated as success, never as an error: getting this backwards means
-     * issuance stops forever after one worker crash). */
+     * issuance stops forever after one worker crash).
+     *
+     * WAIT_ABANDONED is the EXPECTED outcome on every graceful reload, not
+     * just a crash indicator: ngx_worker_thread() (nginx-1.31.3
+     * src/os/win32/ngx_process_cycle.c:763) is a separate thread from the
+     * one that runs ngx_worker_process_exit() (same file, line 754, called
+     * from the main worker-process thread's WaitForMultipleObjects loop).
+     * This module's init_process/relock timer -- and so the CreateMutexW
+     * acquire above -- runs on ngx_worker_thread; exit_process's ReleaseMutex
+     * below runs on the other thread. A win32 mutex is thread-affine, so
+     * that ReleaseMutex always fails with ERROR_NOT_OWNER and never actually
+     * releases; the mutex is only freed when the process exits and the
+     * kernel closes the handle, which marks it abandoned. The successor
+     * worker therefore takes this branch on every ordinary reload, not only
+     * after a crash. */
     if (wait_rc == NGX_AUTOCERT_WAIT_ABANDONED) {
         ngx_log_error(NGX_LOG_NOTICE, log, 0,
-                      "autocert: singleton mutex \"%s\" was abandoned by a "
-                      "prior holder; ownership transferred to this process",
+                      "autocert: singleton mutex \"%s\" ownership transferred "
+                      "from a prior holder that exited without an explicit "
+                      "release (crash or normal shutdown -- see comment above)",
                       name);
     }
 
@@ -2830,14 +2845,56 @@ ngx_autocert_driver_exit_process(ngx_cycle_t *cycle)
 #if (NGX_WIN32)
     /* W9: release + close the win32 singleton mutex here ONLY — process-
      * lifetime handle, never closed/reopened per relock tick (that would
-     * open a window where two workers could both hold it briefly). */
+     * open a window where two workers could both hold it briefly).
+     *
+     * ReleaseMutex is EXPECTED to fail here with ERROR_NOT_OWNER, not a
+     * fault: a win32 mutex is thread-affine (only the acquiring thread may
+     * release it), and the acquiring and releasing calls run on different
+     * threads. ngx_autocert_win32_driver_trylock() (this file, reached from
+     * ngx_autocert_driver_init_process()/the relock timer) runs on
+     * ngx_worker_thread() (nginx-1.31.3 src/os/win32/ngx_process_cycle.c:763),
+     * while this exit_process function runs from ngx_worker_process_exit()
+     * (same file, line 824), called from the main worker-process thread's
+     * WaitForMultipleObjects loop (line 754) — NOT from ngx_worker_thread.
+     * Correctness does not depend on ReleaseMutex succeeding: CloseHandle
+     * below still surrenders this process's reference regardless, and once
+     * the process exits the kernel marks the mutex abandoned, which the
+     * successor's WAIT_ABANDONED branch in
+     * ngx_autocert_win32_driver_trylock() already treats as a successful
+     * acquisition. So this is a log-accuracy fix, not a correctness one:
+     * report what actually happened instead of unconditionally claiming
+     * "released". */
     if (ngx_autocert_win32_mutex != NULL) {
-        ReleaseMutex(ngx_autocert_win32_mutex);
+        if (ReleaseMutex(ngx_autocert_win32_mutex)) {
+            ngx_log_error(NGX_LOG_NOTICE, cycle->log, 0,
+                          "autocert: released win32 singleton mutex, pid %P",
+                          ngx_pid);
+        } else {
+            DWORD  err = GetLastError();
+
+            if (err == ERROR_NOT_OWNER) {
+                /* Expected: see comment above. Not an ERR — this fires on
+                 * every clean win32 shutdown and would otherwise be
+                 * mistaken for a fault. */
+                ngx_log_error(NGX_LOG_NOTICE, cycle->log, 0,
+                              "autocert: ReleaseMutex on singleton mutex "
+                              "skipped (ERROR_NOT_OWNER — released on a "
+                              "different thread than it was acquired on, "
+                              "expected on win32; ownership surrenders via "
+                              "CloseHandle instead), pid %P", ngx_pid);
+            } else {
+                ngx_log_error(NGX_LOG_ERR, cycle->log, 0,
+                              "autocert: ReleaseMutex on singleton mutex "
+                              "failed unexpectedly, GetLastError=%d, pid %P",
+                              (int) err, ngx_pid);
+            }
+        }
+
+        /* Unconditional regardless of ReleaseMutex's outcome: closing the
+         * handle is what actually surrenders this process's ownership here,
+         * and it must not be skipped on the failure path. */
         CloseHandle(ngx_autocert_win32_mutex);
         ngx_autocert_win32_mutex = NULL;
-        ngx_log_error(NGX_LOG_NOTICE, cycle->log, 0,
-                      "autocert: released win32 singleton mutex, pid %P",
-                      ngx_pid);
     }
 #endif
 }
