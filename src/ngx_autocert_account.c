@@ -75,12 +75,17 @@ ngx_autocert_account_open_keydir(ngx_autocert_account_t *acct,
 
     path = acct->key_path.data;         /* NUL-terminated */
 
-    /* Start fd: "/" for an absolute path, "." otherwise. Both NOFOLLOW. */
+    /* Start fd: "/" for an absolute path, "." otherwise. Both NOFOLLOW.
+     * Routed through ngx_autocert_open_dir_path() (the shared root-open
+     * shim) rather than a bare open(): on POSIX it is a byte-identical
+     * open("/")/open(".") passthrough, and on win32 it goes through
+     * NtCreateFile instead of the MSVC-deprecated open() (C4996 -> C2220
+     * under -WX). */
     if (path[0] == '/') {
-        dfd = open("/", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+        dfd = ngx_autocert_open_dir_path("/", 0, 0);
         comp = path + 1;
     } else {
-        dfd = open(".", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+        dfd = ngx_autocert_open_dir_path(".", 0, 0);
         comp = path;
     }
     if (dfd == -1) {
@@ -774,7 +779,7 @@ ngx_autocert_account_post_account(ngx_autocert_account_t *acct)
      */
     if (acct->email.len != 0 || acct->eab_kid.len != 0) {
         ngx_str_t  contact = ngx_null_string;
-        size_t     size;
+        size_t     contact_size;
 
         if (acct->email.len != 0) {
             if (!ngx_autocert_account_json_safe(&acct->email)) {
@@ -802,10 +807,10 @@ ngx_autocert_account_post_account(ngx_autocert_account_t *acct)
             ngx_str_null(&eab);
         }
 
-        size = sizeof("{\"termsOfServiceAgreed\":true}") - 1 + contact.len
+        contact_size = sizeof("{\"termsOfServiceAgreed\":true}") - 1 + contact.len
                + (eab.len ? sizeof(",\"externalAccountBinding\":") - 1 + eab.len
                           : 0);
-        payload.data = ngx_pnalloc(acct->pool, size);
+        payload.data = ngx_pnalloc(acct->pool, contact_size);
         if (payload.data == NULL) {
             return NGX_ERROR;
         }
