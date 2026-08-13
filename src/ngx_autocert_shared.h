@@ -363,6 +363,198 @@ ngx_autocert_closedir(ngx_autocert_dir_t *dh)
 
 
 /*
+ * ngx_autocert_split_root() — classify and open the ROOT of `path`, and hand
+ * back the remaining component walk in `*rest`. This runs BEFORE the
+ * component walk in ngx_autocert_open_dir_path() below; the walk itself
+ * stays byte-identical on both platforms (`/`-separated, `..`/`.`/empty
+ * rejected, per-component O_NOFOLLOW pinning) once it has a root fd to
+ * start from. Replaces the raw open("/")/open(".") bootstrap that used to
+ * sit at the top of the walk (MSVC C4996 on `open`, and the C2220 that
+ * `-WX` promotes it to) — those calls are gone here, not suppressed.
+ *
+ * On POSIX this is a thin passthrough: `/` opens "/", anything else opens
+ * "." and is walked from `path` unchanged (the `norm`/`norm_cap` params are
+ * unused on this side — POSIX has no `\`-vs-`/` ambiguity to normalise).
+ * On win32, `path` may additionally use `\` as a separator; it is normalised
+ * to `/` into the caller-owned `norm` buffer (size `norm_cap`) BEFORE
+ * classification AND before `*rest` is handed to the walk, so the walk's
+ * own `..`/`.`/empty-component rejection runs on the normalised form (a
+ * `..\` that survived un-normalised would slip past the `../` check).
+ * `norm` must outlive the caller's walk — `*rest` points inside it, never
+ * into a buffer local to this function. Recognised win32 roots, all
+ * case-insensitive:
+ *
+ *   C:/... or C:\...          drive-absolute -> root "\??\C:\", rest "..."
+ *   //server/share/...        UNC (either sep) -> root "\??\UNC\server\share\",
+ *   \\server\share/...        rest "..."; server+share are consumed TOGETHER
+ *                              as the root, never walked component-wise
+ *   /... or \... (no drive)   drive-relative -> EINVAL (no current-drive guess)
+ *   C:foo (no sep after ':')  drive-relative -> EINVAL
+ *   anything else             relative -> root ".", rest = path unchanged
+ *
+ * Returns an owned root dir fd with `*rest` pointing at the remaining
+ * component string, or -1 with errno set.
+ */
+static ngx_inline int
+ngx_autocert_win32_is_alpha(char c)
+{
+    return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z');
+}
+
+
+/*
+ * Pure path-syntax half of ngx_autocert_split_root(): normalises separators
+ * and classifies the root, writing the NT object-name form ("\??\C:\...",
+ * "\??\UNC\server\share") into `root` (size `root_cap`) and pointing `*rest`
+ * at the remaining component string inside `norm` (size `norm_cap`, filled
+ * in by this function — caller owns the buffer so this half stays free of
+ * any OS/CRT call and is directly unit-testable on any host). Returns 0 with
+ * `root`/`*rest` set for a recognised root, or -1 with errno set (EINVAL for
+ * a drive-relative path, ENAMETOOLONG for an oversized input). `*rest` never
+ * points outside `norm`.
+ *
+ * Compiled unconditionally (not #if NGX_WIN32-guarded) even though only the
+ * win32 ngx_autocert_split_root() below calls it in production: it has no
+ * win32-header dependency (ngx_strlen/ngx_strlchr/ngx_snprintf are pure
+ * nginx-core), so keeping it outside the guard lets the unit suite compile
+ * and exercise the real function on Linux — the only host these tests can
+ * run on — rather than a hand-copied stand-in.
+ */
+static ngx_inline int
+ngx_autocert_win32_classify_root(const char *path, char *norm,
+    size_t norm_cap, char *root, size_t root_cap, const char **rest)
+{
+    const char  *p, *server, *share_end;
+    size_t       len, server_len, share_len;
+
+    len = ngx_strlen(path);
+    if (len >= norm_cap) {
+        errno = ENAMETOOLONG;
+        return -1;
+    }
+
+    /* Normalise \ to / BEFORE any classification or the walk sees it — the
+     * walk's "..", ".", empty-component rejection must run on this form. */
+    for (p = path; *p; p++) {
+        norm[p - path] = (*p == '\\') ? '/' : *p;
+    }
+    norm[len] = '\0';
+
+    if (len >= 2 && ngx_autocert_win32_is_alpha(norm[0]) && norm[1] == ':') {
+        if (len >= 3 && norm[2] == '/') {
+            /* C:/... (was C:\...) -> drive-absolute */
+            if (root_cap < sizeof("\\??\\C:\\")) {
+                errno = ENAMETOOLONG;
+                return -1;
+            }
+            (void) ngx_snprintf((u_char *) root, root_cap,
+                                 "\\??\\%c:\\%Z", norm[0]);
+            *rest = norm + 3;
+            return 0;
+        }
+
+        /* "C:foo" (drive-relative, no separator after the colon) -> reject;
+         * do not guess the current drive. */
+        errno = EINVAL;
+        return -1;
+    }
+
+    if (len >= 2 && norm[0] == '/' && norm[1] == '/') {
+        /* //server/share/... (was \\server\share\...) -> UNC. server+share
+         * form the root TOGETHER; never walk the UNC prefix component-wise. */
+        server = norm + 2;
+        p = (const char *) ngx_strlchr((u_char *) server,
+                                        (u_char *) norm + len, '/');
+        if (p == NULL || p == server) {
+            errno = EINVAL;
+            return -1;
+        }
+        server_len = p - server;
+
+        share_end = (const char *) ngx_strlchr((u_char *) (p + 1),
+                                                (u_char *) norm + len, '/');
+        if (share_end == NULL) {
+            share_end = norm + len;
+        }
+        share_len = share_end - (p + 1);
+        if (share_len == 0) {
+            errno = EINVAL;
+            return -1;
+        }
+
+        if (server_len + share_len + sizeof("\\??\\UNC\\\\") >= root_cap) {
+            errno = ENAMETOOLONG;
+            return -1;
+        }
+
+        (void) ngx_snprintf((u_char *) root, root_cap,
+                             "\\??\\UNC\\%*s\\%*s\\%Z",
+                             server_len, server, share_len, p + 1);
+        *rest = (share_end == norm + len) ? share_end : share_end + 1;
+        return 0;
+    }
+
+    if (norm[0] == '/') {
+        /* leading separator, no drive: drive-relative -> reject; do not
+         * guess the current drive. */
+        errno = EINVAL;
+        return -1;
+    }
+
+    /* No root marker: relative, root "." -- existing behaviour. */
+    if (root_cap < sizeof(".")) {
+        errno = ENAMETOOLONG;
+        return -1;
+    }
+    root[0] = '.';
+    root[1] = '\0';
+    *rest = norm;
+    return 0;
+}
+
+
+#if !(NGX_WIN32)
+
+static ngx_inline int
+ngx_autocert_split_root(const char *path, char *norm, size_t norm_cap,
+    const char **rest)
+{
+    (void) norm; (void) norm_cap;
+
+    if (path[0] == '/') {
+        *rest = path + 1;
+        return open("/", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    }
+
+    *rest = path;
+    return open(".", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+}
+
+#else /* NGX_WIN32 */
+
+static ngx_inline int
+ngx_autocert_split_root(const char *path, char *norm, size_t norm_cap,
+    const char **rest)
+{
+    char  root[NGX_MAX_PATH];
+
+    if (ngx_autocert_win32_classify_root(path, norm, norm_cap,
+                                          root, sizeof(root), rest) != 0)
+    {
+        return -1;
+    }
+
+    return ngx_autocert_win32_ntopen(NGX_AUTOCERT_INVALID_DIRFD, root,
+        FILE_LIST_DIRECTORY | FILE_TRAVERSE | SYNCHRONIZE,
+        NGX_AUTOCERT_FILE_OPEN,
+        NGX_AUTOCERT_FILE_DIRECTORY_FILE | NGX_AUTOCERT_FILE_OPEN_FOR_BACKUP_INTENT,
+        _O_RDONLY);
+}
+
+#endif /* NGX_WIN32 */
+
+
+/*
  * Open a directory without trusting any component of `path`. O_NOFOLLOW on a
  * single open(path) protects only the leaf; this walk pins every ancestor with
  * openat() before descending into the next component. If `create` is set,
@@ -374,6 +566,7 @@ ngx_autocert_open_dir_path(const char *path, ngx_uint_t create,
     ngx_autocert_mode_t mode)
 {
     char         name[NGX_MAX_PATH];
+    char         norm[NGX_MAX_PATH];
     const char  *p, *q;
     size_t       len;
     int          dfd, nfd, err;
@@ -383,13 +576,7 @@ ngx_autocert_open_dir_path(const char *path, ngx_uint_t create,
         return -1;
     }
 
-    if (path[0] == '/') {
-        dfd = open("/", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
-        p = path + 1;
-    } else {
-        dfd = open(".", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
-        p = path;
-    }
+    dfd = ngx_autocert_split_root(path, norm, sizeof(norm), &p);
     if (dfd == -1) {
         return -1;
     }

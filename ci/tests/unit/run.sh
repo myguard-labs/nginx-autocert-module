@@ -159,6 +159,19 @@ gcc -D_GNU_SOURCE -Wall -Wextra -Werror $CORE_INC \
 	-o test_store_open
 ./test_store_open
 
+# win32 root-splitting classifier (ngx_autocert_win32_classify_root, W5g):
+# drive-absolute / UNC / relative root recognition, both \ and / separators,
+# and the two drive-relative EINVAL rejects. Compiled unconditionally in
+# ngx_autocert_shared.h (no win32-header dependency) so this runs the real
+# production function on Linux -- the only platform this suite can run on.
+# Needs ngx_string.o for ngx_snprintf/ngx_strlchr; not $STORE_OBJS (its
+# ngx_palloc.o pulls in symbols this header-only test never defines stubs for).
+# shellcheck disable=SC2086
+gcc -D_GNU_SOURCE -Wall -Wextra -Werror $CORE_INC \
+	"$WORKSPACE/ci/tests/unit/test_win32_split_root.c" \
+	"$NGX/objs/src/core/ngx_string.o" -o test_win32_split_root
+./test_win32_split_root
+
 # shellcheck disable=SC2086
 gcc -Wall -Werror $CORE_INC -c \
 	"$WORKSPACE/src/ngx_autocert_alpn.c" -o alpn.o
