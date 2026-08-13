@@ -55,6 +55,13 @@ typedef struct {
      */
     ngx_str_t        origin_host;
     in_port_t        origin_port;
+    /*
+     * A 1-bit bitfield's signedness is implementation-defined: MSVC treats
+     * `unsigned x:1` as signed here and warns C4389 when it is compared
+     * against a plain int (fatal under -WX). Always normalise BOTH sides of
+     * such a comparison to 0/1 with `(x ? 1 : 0)` — the ternary on the
+     * bitfield side is not redundant, do not "simplify" it away.
+     */
     unsigned         origin_is_ipv6:1;
     unsigned         origin_pinned:1;
 } ngx_autocert_acme_client_t;
