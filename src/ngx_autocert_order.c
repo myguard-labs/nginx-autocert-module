@@ -6,6 +6,8 @@
  * _finish(NGX_ERROR).
  */
 
+#include <ngx_config.h>
+
 #include "ngx_autocert_order.h"
 #include "ngx_autocert_acme.h"
 #include "ngx_autocert_json.h"

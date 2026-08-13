@@ -6,6 +6,8 @@
  * all operating on the same slab addressed through the named zone.
  */
 
+#include <ngx_config.h>
+
 #include "ngx_autocert_requests.h"
 
 

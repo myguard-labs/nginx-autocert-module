@@ -3,6 +3,8 @@
  * See ngx_autocert_serve.h for the contract.
  */
 
+#include <ngx_config.h>
+
 #include "ngx_autocert_serve.h"
 #include "ngx_autocert_alpn.h"
 #include "ngx_http_autocert_crypto.h"

@@ -11,6 +11,8 @@
  * could run concurrently, though the ACME flow issues them one at a time.
  */
 
+#include <ngx_config.h>
+
 #include "ngx_autocert_acme.h"
 
 #include <openssl/x509v3.h>
