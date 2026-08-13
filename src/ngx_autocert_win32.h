@@ -1935,6 +1935,59 @@ ngx_autocert_win32_mutex_open_and_wait(const wchar_t *wname, DWORD *wait_rc)
     return h;
 }
 
+/*
+ * InitializeProcThreadAttributeList / UpdateProcThreadAttribute /
+ * DeleteProcThreadAttributeList, plus the STARTUPINFOEXW extended
+ * startup-info struct and the PROC_THREAD_ATTRIBUTE_HANDLE_LIST /
+ * EXTENDED_STARTUPINFO_PRESENT constants they need (W8b), are Vista+ surface
+ * gated behind the same _WIN32_WINNT floor that is a dead end here (see the
+ * GetTickCount64 / GetFileInformationByHandleEx notes above: <ngx_config.h>
+ * has already fully expanded <windows.h> at nginx's own 0x0501, so a later
+ * #define changes nothing — confirmed against this file's own MinGW headers,
+ * which gate the same three functions behind `#if _WIN32_WINNT >= 0x0600`).
+ * Declare the pieces ourselves, same minimal-NT-surface style used above.
+ *
+ * The real SDK type for the attribute list is an opaque
+ * `LPPROC_THREAD_ATTRIBUTE_LIST` (pointer to a forward-declared struct), and
+ * that typedef itself is not consistently #ifndef-guarded across MinGW/MSVC
+ * headers, so redeclaring it risks a collision. Sidestep the whole problem:
+ * treat the attribute list as an opaque LPVOID blob everywhere in this
+ * header and at the one call site (ngx_autocert_order.c) — the win32 ABI for
+ * these three calls only ever dereferences it opaquely, never through the
+ * named type, so LPVOID is a legal substitute for every parameter here.
+ */
+#ifndef NGX_AUTOCERT_HAVE_PROC_THREAD_ATTRIBUTE_LIST
+#define NGX_AUTOCERT_HAVE_PROC_THREAD_ATTRIBUTE_LIST  1
+
+#ifndef EXTENDED_STARTUPINFO_PRESENT
+#define EXTENDED_STARTUPINFO_PRESENT  0x00080000
+#endif
+
+#ifndef PROC_THREAD_ATTRIBUTE_HANDLE_LIST
+/* ABI-fixed value: ProcThreadAttributeHandleList (2) with the THREAD (0x10000)
+ * and INPUT (0x20000) flag bits OR'd in, matching every SDK's
+ * ProcThreadAttributeValue(2, FALSE, TRUE, FALSE) expansion. */
+#define PROC_THREAD_ATTRIBUTE_HANDLE_LIST  0x00020002
+#endif
+
+typedef struct {
+    STARTUPINFOW  StartupInfo;
+    LPVOID        lpAttributeList;
+} NGX_AUTOCERT_STARTUPINFOEXW;
+
+WINBASEAPI BOOL WINAPI InitializeProcThreadAttributeList(
+    LPVOID lpAttributeList, DWORD dwAttributeCount, DWORD dwFlags,
+    PSIZE_T lpSize);
+
+WINBASEAPI BOOL WINAPI UpdateProcThreadAttribute(LPVOID lpAttributeList,
+    DWORD dwFlags, DWORD_PTR Attribute, PVOID lpValue, SIZE_T cbSize,
+    PVOID lpPreviousValue, PSIZE_T lpReturnSize);
+
+WINBASEAPI VOID WINAPI DeleteProcThreadAttributeList(
+    LPVOID lpAttributeList);
+
+#endif /* NGX_AUTOCERT_HAVE_PROC_THREAD_ATTRIBUTE_LIST */
+
 #endif /* NGX_WIN32 */
 
 
