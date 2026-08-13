@@ -661,12 +661,13 @@ Two toolchains are built in CI:
 
 - **MSVC x64 static link**: uses vcpkg's prebuilt `openssl:x64-windows-static`,
   staged into an `openssl/{include,lib}` tree so `configure`'s hardcoded paths
-  resolve correctly. Configures and links with MSVC's `cl` and `nmake`. Under
-  active development.
+  resolve correctly. Configures and links with MSVC's `cl` and `nmake` under
+  `-W4 -WX`, then runs the produced `nginx.exe`. Build succeeds on each PR.
 
 Both lanes run `configure --crossbuild=win32` to sidestep MSYS2's `uname` output,
 then assert `ngx_http_autocert_module` appears in the generated `objs/ngx_modules.c`
-and that `nginx -t` accepts `autocert_store_path` directives.
+and that `nginx -t` accepts an `autocert_store_path` directive while rejecting a
+bogus one (the negative control that keeps the positive check meaningful).
 
 **Runtime coverage**: None on Windows. The Pebble e2e suite under `ci/tests/e2e/`
 runs Linux Docker containers; a `windows-latest` runner cannot host them. A `win32`
