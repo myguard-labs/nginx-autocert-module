@@ -1,4 +1,4 @@
-# sync-sha: 9ecd4a74ec85579dc1f68fa07c79dc0ed2bd7337c034835ddcfcf2c2a5d88a4c
+# sync-sha: c3e1b4d76c1ba383777e9aa813e0ad85531c5df93063c96093cd764a5aa13227
 name: Windows build
 
 # Native Windows port gate (W17). Proves the module compiles and links on
@@ -482,13 +482,22 @@ jobs:
                   "(is AUTOCERT_TEST=1 reaching the compiler?)"
           }
 
+          # nginx does NOT daemonize on win32: the whole ngx_daemon() branch in
+          # src/core/nginx.c:343 sits inside #if !(NGX_WIN32), and there is no
+          # ngx_daemon.c under src/os/win32 at all. The master runs in the
+          # FOREGROUND, so calling it directly -- as the POSIX script does,
+          # where nginx forks and the shell returns -- blocks this step until
+          # the job timeout. Start it detached and keep the handle.
           Write-Host "== start =="
-          $ErrorActionPreference = 'Continue'
-          & .\objs\nginx.exe -p . -c conf/nginx.conf
-          $startRc = $LASTEXITCODE
-          $ErrorActionPreference = $prev
-          if ($startRc -ne 0) {
-            throw "nginx.exe failed to start (exit $startRc)"
+          $proc = Start-Process -FilePath (Resolve-Path .\objs\nginx.exe) `
+                    -ArgumentList '-p', '.', '-c', 'conf/nginx.conf' `
+                    -PassThru -NoNewWindow
+          Start-Sleep -Seconds 2
+          if ($proc.HasExited) {
+            if (Test-Path logs/error.log) {
+              Get-Content logs/error.log | Write-Host
+            }
+            throw "nginx.exe exited immediately with $($proc.ExitCode)"
           }
 
           try {
@@ -606,6 +615,15 @@ jobs:
             $ErrorActionPreference = 'Continue'
             & .\objs\nginx.exe -p . -c conf/nginx.conf -s stop 2>&1 |
               Out-String | Write-Host
+            # -s stop only signals the master. If it did not take, the
+            # foreground process outlives the step and hangs the job, so kill
+            # unconditionally rather than trusting the signal.
+            if (-not $proc.WaitForExit(10000)) {
+              Write-Host "nginx did not exit on -s stop; killing"
+              Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+            }
+            Get-Process -Name nginx -ErrorAction SilentlyContinue |
+              Stop-Process -Force -ErrorAction SilentlyContinue
             $ErrorActionPreference = $prev
             if (Test-Path logs/error.log) {
               Write-Host "== error.log =="
