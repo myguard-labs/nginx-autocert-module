@@ -2366,7 +2366,7 @@ ngx_autocert_runtime_seed(ngx_cycle_t *cycle)
             continue;                    /* not a plain, right-sized marker */
         }
 
-        n = read(mfd, hostbuf, sizeof(hostbuf));
+        n = ngx_autocert_read(mfd, hostbuf, sizeof(hostbuf));
         (void) ngx_autocert_close(mfd);
         (void) ngx_autocert_close(dfd);
 
