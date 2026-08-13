@@ -1098,10 +1098,14 @@ ngx_autocert_dns_hook_spawn(ngx_autocert_order_t *order, ngx_str_t *hook,
     ngx_int_t                          rc;
     ngx_int_t                          off;
     char                                cmdline[NGX_AUTOCERT_DNS_HOOK_CMDLINE_MAX];
-    HANDLE                              job, proc, thr;
+    HANDLE                              job, proc, thr, nul;
     JOBOBJECT_EXTENDED_LIMIT_INFORMATION  jeli;
-    STARTUPINFOW                       si;
+    NGX_AUTOCERT_STARTUPINFOEXW        six;
     PROCESS_INFORMATION                pi;
+    SECURITY_ATTRIBUTES                sa;
+    LPVOID                             attrlist;
+    SIZE_T                             attrlist_size;
+    HANDLE                             handles[1];
     wchar_t                             hook_w[NGX_MAX_PATH];
     wchar_t                             cmdline_w[NGX_AUTOCERT_DNS_HOOK_CMDLINE_MAX];
     uint64_t                            start;
@@ -1111,6 +1115,8 @@ ngx_autocert_dns_hook_spawn(ngx_autocert_order_t *order, ngx_str_t *hook,
     job = NULL;
     proc = NULL;
     thr = NULL;
+    nul = NULL;
+    attrlist = NULL;
     rc = NGX_ERROR;
 
     /* Build one lpCommandLine string: hook, name, txt -- properly quoted,
@@ -1167,32 +1173,100 @@ ngx_autocert_dns_hook_spawn(ngx_autocert_order_t *order, ngx_str_t *hook,
         goto cleanup;
     }
 
-    ngx_memzero(&si, sizeof(si));
-    si.cb = sizeof(si);
+    ngx_memzero(&six, sizeof(six));
+    six.StartupInfo.cb = sizeof(six.StartupInfo);
     ngx_memzero(&pi, sizeof(pi));
+
+    /* Open NUL as the child's stdin/stdout/stderr: one inheritable handle,
+     * reused for all three std slots (the hook's output is not captured,
+     * only given somewhere valid to go -- see the comment below). */
+    ngx_memzero(&sa, sizeof(sa));
+    sa.nLength = sizeof(sa);
+    sa.bInheritHandle = TRUE;
+    sa.lpSecurityDescriptor = NULL;
+
+    nul = CreateFileW(L"NUL", GENERIC_READ | GENERIC_WRITE,
+                       FILE_SHARE_READ | FILE_SHARE_WRITE, &sa,
+                       OPEN_EXISTING, 0, NULL);
+    if (nul == INVALID_HANDLE_VALUE) {
+        nul = NULL;
+        errno = ngx_autocert_win32_errno(GetLastError());
+        ngx_log_error(NGX_LOG_ERR, order->log, ngx_errno,
+                      "autocert: dns-01 CreateFileW(NUL) failed");
+        goto cleanup;
+    }
+
+    six.StartupInfo.dwFlags |= STARTF_USESTDHANDLES;
+    six.StartupInfo.hStdInput = nul;
+    six.StartupInfo.hStdOutput = nul;
+    six.StartupInfo.hStdError = nul;
+
+    /* bInheritHandles = TRUE below is only safe paired with an explicit
+     * PROC_THREAD_ATTRIBUTE_HANDLE_LIST naming exactly the handles the child
+     * needs -- a bare bInheritHandles = TRUE would hand the hook every
+     * inheritable worker handle. Size the list first (NULL buffer, per the
+     * documented two-call protocol), allocate from the order pool, then
+     * build it for real. `handles` holds ONE unique handle (nul, reused for
+     * all three std slots): the attribute list count is the number of
+     * unique inheritable handles, not the number of std slots pointing at
+     * them, so this is sized for 1, not 3. */
+    attrlist_size = 0;
+    InitializeProcThreadAttributeList(NULL, 1, 0, &attrlist_size);
+
+    attrlist = ngx_pnalloc(order->pool, attrlist_size);
+    if (attrlist == NULL) {
+        ngx_log_error(NGX_LOG_ERR, order->log, 0,
+                      "autocert: dns-01 attribute list allocation failed "
+                      "for \"%V\"", hook);
+        goto cleanup;
+    }
+
+    if (!InitializeProcThreadAttributeList(attrlist, 1, 0, &attrlist_size)) {
+        errno = ngx_autocert_win32_errno(GetLastError());
+        ngx_log_error(NGX_LOG_ERR, order->log, ngx_errno,
+                      "autocert: dns-01 InitializeProcThreadAttributeList() "
+                      "failed");
+        attrlist = NULL;    /* not initialized -- do not Delete it */
+        goto cleanup;
+    }
+
+    handles[0] = nul;
+
+    if (!UpdateProcThreadAttribute(attrlist, 0,
+                                    PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
+                                    handles, sizeof(handles), NULL, NULL))
+    {
+        errno = ngx_autocert_win32_errno(GetLastError());
+        ngx_log_error(NGX_LOG_ERR, order->log, ngx_errno,
+                      "autocert: dns-01 UpdateProcThreadAttribute() failed");
+        goto cleanup;
+    }
+
+    six.lpAttributeList = attrlist;
 
     /* lpEnvironment = NULL: inherit, matching POSIX environ (DNS-provider
      * credentials are passed via env by operator convention). bInheritHandles
-     * = FALSE: no inherited handle at all -- the win32 analogue of, and
-     * stronger than, the POSIX close-every-fd-above-stderr loop. CREATE_
-     * SUSPENDED: hold the process before it can run (or spawn a child that
-     * escapes the job) until AssignProcessToJobObject() below completes --
-     * the win32 analogue of the double-setpgid race guard.
+     * = TRUE, paired with the PROC_THREAD_ATTRIBUTE_HANDLE_LIST above, so the
+     * child inherits exactly the NUL handle used for its three std slots and
+     * nothing else -- the win32 analogue of, and as tight as, the POSIX
+     * close-every-fd-above-stderr loop. CREATE_SUSPENDED: hold the process
+     * before it can run (or spawn a child that escapes the job) until
+     * AssignProcessToJobObject() below completes -- the win32 analogue of
+     * the double-setpgid race guard. EXTENDED_STARTUPINFO_PRESENT: required
+     * whenever lpStartupInfo carries an attribute list via STARTUPINFOEXW
+     * rather than a plain STARTUPINFOW.
      *
-     * KNOWN DIVERGENCE from the POSIX arm, deliberate and scoped to W8: with
-     * bInheritHandles = FALSE and a zeroed STARTUPINFOW the child starts with
-     * NO standard handles, so hook stdout/stderr is discarded. The POSIX arm
-     * closes only descriptors above stderr, so hook output still reaches the
-     * nginx error log. The contract holds either way -- the exit code drives
-     * success/failure -- but an operator debugging a failing hook on win32
-     * sees only that code. Closing this needs the child to inherit exactly
-     * three handles and nothing else: open NUL (or a drained pipe) with
-     * bInheritHandle = TRUE, set STARTF_USESTDHANDLES, and pass
-     * bInheritHandles = TRUE with a PROC_THREAD_ATTRIBUTE_HANDLE_LIST naming
-     * only those three -- never a bare bInheritHandles = TRUE, which would
-     * hand the hook every inheritable worker handle. Ledgered as W8b. */
-    if (!CreateProcessW(hook_w, cmdline_w, NULL, NULL, FALSE,
-                         CREATE_SUSPENDED, NULL, NULL, &si, &pi))
+     * The child gets valid stdin/stdout/stderr handles (NUL), so a hook
+     * relying on them not being invalid no longer misbehaves; the hook's
+     * actual output is still not captured into the nginx error log (NUL
+     * discards it), matching the exit-code-only contract this function
+     * already documents below. Closing that gap fully would need a pipe
+     * pumped into ngx_log_error, which is a larger change than this item's
+     * scope -- the point of W8b was only that the child gets valid handles,
+     * never that we hand it the whole worker's handle table. */
+    if (!CreateProcessW(hook_w, cmdline_w, NULL, NULL, TRUE,
+                         CREATE_SUSPENDED | EXTENDED_STARTUPINFO_PRESENT,
+                         NULL, NULL, &six.StartupInfo, &pi))
     {
         errno = ngx_autocert_win32_errno(GetLastError());
         ngx_log_error(NGX_LOG_ERR, order->log, ngx_errno,
@@ -1303,9 +1377,20 @@ ngx_autocert_dns_hook_spawn(ngx_autocert_order_t *order, ngx_str_t *hook,
 
 cleanup:
 
-    /* Close every handle on every path -- process, thread, job -- so a
-     * leaked job handle never keeps KILL_ON_JOB_CLOSE from firing on a
-     * future call. */
+    /* Close every handle on every path -- process, thread, job, NUL, and the
+     * attribute list -- so a leaked job handle never keeps
+     * KILL_ON_JOB_CLOSE from firing on a future call, and a leaked NUL
+     * handle or attribute list never accumulates across hook invocations.
+     * attrlist is set to NULL above whenever InitializeProcThreadAttribute
+     * List() did not successfully initialize it, so Delete is only called
+     * on a list that was actually initialized -- the pool allocation itself
+     * is freed with order->pool, not here. */
+    if (attrlist != NULL) {
+        DeleteProcThreadAttributeList(attrlist);
+    }
+    if (nul != NULL) {
+        CloseHandle(nul);
+    }
     if (thr != NULL) {
         CloseHandle(thr);
     }
