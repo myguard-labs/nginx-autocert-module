@@ -1,4 +1,4 @@
-# sync-sha: 74d5875e02bcca1e8637f0d20cf945bbaffc02dce46caa138deff366f4638b74
+# sync-sha: ea0aee99951bdc4f501c0745e05e0bb365965f24297128f97e7be01b121a29da
 name: Windows build
 
 # Build-only gate for the native Windows port (W17). This proves the module
@@ -369,21 +369,44 @@ jobs:
             Set-Content -Encoding ascii -Path conf/nginx.conf -Value $lines
           }
 
+          # nginx -t writes its verdict to stderr and exits non-zero on a bad
+          # config - both are EXPECTED here, and both fight the step's error
+          # handling. Under $ErrorActionPreference='Stop', merging native
+          # stderr into the pipeline ('2>&1') makes every [emerg] line a
+          # TERMINATING error; and pwsh fails a step whose final $LASTEXITCODE
+          # is non-zero, which the negative control deliberately leaves. So run
+          # nginx with error handling relaxed and hand the exit code back
+          # explicitly, then assert on the returned value.
+          function Invoke-NginxTest {
+            $prev = $ErrorActionPreference
+            $ErrorActionPreference = 'Continue'
+            try {
+              & .\objs\nginx.exe -p . -c conf/nginx.conf -t 2>&1 |
+                Out-String |
+                Write-Host
+              return $LASTEXITCODE
+            } finally {
+              $ErrorActionPreference = $prev
+            }
+          }
+
           # Positive: a real directive must be accepted.
           Write-Conf 'autocert_store_path temp/store;'
-          $out = & .\objs\nginx.exe -p . -c conf/nginx.conf -t 2>&1 | Out-String
-          Write-Host $out
-          if ($LASTEXITCODE -ne 0) { throw "nginx -t rejected a valid autocert directive" }
+          if ((Invoke-NginxTest) -ne 0) {
+            throw "nginx -t rejected a valid autocert directive"
+          }
 
           # Negative control: a bogus directive must be REJECTED. If this passes,
           # the check above proved nothing.
           Write-Conf 'autocert_NOT_A_DIRECTIVE on;'
-          $out = & .\objs\nginx.exe -p . -c conf/nginx.conf -t 2>&1 | Out-String
-          Write-Host $out
-          if ($LASTEXITCODE -eq 0) {
+          if ((Invoke-NginxTest) -eq 0) {
             throw "negative control passed: nginx -t accepted a bogus directive"
           }
           Write-Host "directive table verified (valid accepted, bogus rejected)"
+
+          # Both assertions held. Clear the negative control's deliberate
+          # non-zero $LASTEXITCODE so the step's own verdict is what exits.
+          exit 0
 
       - name: Upload nginx.exe
         if: success()
