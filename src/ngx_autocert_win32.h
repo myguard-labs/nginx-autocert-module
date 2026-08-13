@@ -53,6 +53,7 @@
 
 #include <windows.h>
 #include <winioctl.h>          /* IO_REPARSE_TAG_*; needs windows.h first */
+#include <aclapi.h>            /* GetSecurityInfo/SetSecurityInfo/SetEntriesInAclW — W11 */
 #include <io.h>                /* _open_osfhandle, _get_osfhandle, _close */
 #include <fcntl.h>             /* _O_RDONLY and friends for _open_osfhandle */
 #include <errno.h>
@@ -311,6 +312,19 @@ WINBASEAPI ULONGLONG WINAPI GetTickCount64(void);
  */
 static ngx_inline int ngx_autocert_win32_errno(DWORD err);
 
+/*
+ * ngx_autocert_win32_dacl_mode (W11) — the pure ACE-tuple -> POSIX
+ * group/other bits decision core. Defined in ngx_autocert_shared.h (which
+ * includes THIS header before its own body, so a forward declaration here is
+ * required for the same MinGW use-before-declaration reason as
+ * ngx_autocert_win32_errno above) so it has a Linux unit-test oracle; see
+ * that definition's comment for the full contract. Only
+ * ngx_autocert_win32_mode_from_dacl() below calls it.
+ */
+static ngx_inline ngx_autocert_mode_t
+ngx_autocert_win32_dacl_mode(const ngx_int_t *is_owner,
+    const ngx_int_t *is_allow, const ngx_int_t *is_tolerated, ngx_uint_t n);
+
 
 /*
  * W13 — flock(fd, LOCK_EX | LOCK_NB) -> LockFileEx.
@@ -436,6 +450,130 @@ static ngx_inline int
 ngx_autocert_fsync_dir(int fd)
 {
     (void) fd;
+    return 0;
+}
+
+
+/*
+ * W11 — fchmod(fd, mode) -> owner-only DACL.
+ *
+ * win32 has no permission-bit file mode at all; the ACL IS the permission
+ * model. This does not attempt to emulate a mode word — it grants access to
+ * the file's OWNER ONLY, driven by which of the POSIX owner-bits in `mode`
+ * are set, and strips every other principal's access outright. Group/other
+ * bits in `mode` are deliberately ignored: on win32 there is no "group" or
+ * "other" class to grant into, and granting one would defeat the entire
+ * point of this shim (the sole caller, ngx_autocert_order_write_tmp_at(),
+ * calls it with 0600 — owner read/write, nothing else — specifically to keep
+ * the ACME account/cert private keys off disk in a world-readable form; see
+ * ngx_autocert_account.c's DACL-derived mode check, which is what actually
+ * verifies this on read-back).
+ *
+ * PROTECTED_DACL_SECURITY_INFORMATION is the load-bearing flag here, not an
+ * optional hardening extra: SetSecurityInfo() without it MERGES the new DACL
+ * with inherited ACEs from the parent directory rather than replacing them,
+ * and a staging directory commonly has an inherited grant to Users or
+ * Authenticated Users. Omitting this flag would leave the key readable by
+ * exactly the principals this shim exists to lock out, while every other
+ * part of the call appears to succeed. Setting it strips inheritance and
+ * makes the DACL this function builds the ENTIRE effective DACL.
+ *
+ * Steps: resolve the fd to a HANDLE (existing shim); read the file's owner
+ * SID via GetSecurityInfo (OWNER_SECURITY_INFORMATION); build a single
+ * EXPLICIT_ACCESS_W ACE granting that owner SID the access mask derived from
+ * `mode`'s owner bits; turn that into an ACL with SetEntriesInAclW (starting
+ * from an empty existing ACL, i.e. NULL — there is nothing to merge, this
+ * DACL replaces whatever was there); apply it with SetSecurityInfo using
+ * DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION.
+ *
+ * Return convention matches fchmod(2) and the rest of this shim family: 0 on
+ * success, -1 on failure with both errno and SetLastError() set (per the
+ * W13/W5i pattern above — a caller may read either).
+ */
+static ngx_inline int
+ngx_autocert_fchmod(int fd, ngx_autocert_mode_t mode)
+{
+    HANDLE            h;
+    PSID              owner;
+    PSECURITY_DESCRIPTOR  owner_sd;
+    PACL              new_dacl;
+    EXPLICIT_ACCESS_W ea;
+    DWORD             mask, err;
+    int               mapped;
+
+    h = ngx_autocert_fd_handle(fd);
+    if (h == INVALID_HANDLE_VALUE) {
+        SetLastError(ERROR_INVALID_HANDLE);
+        errno = EBADF;
+        return -1;
+    }
+
+    owner = NULL;
+    owner_sd = NULL;
+
+    err = GetSecurityInfo(h, SE_KERNEL_OBJECT, OWNER_SECURITY_INFORMATION,
+                           &owner, NULL, NULL, NULL, &owner_sd);
+    if (err != ERROR_SUCCESS) {
+        mapped = ngx_autocert_win32_errno(err);
+        SetLastError(mapped);
+        errno = mapped;
+        return -1;
+    }
+
+    /* Access mask from the owner bits only — group/other bits in `mode` are
+     * intentionally never consulted; see the function comment above. DELETE
+     * is granted unconditionally so the owner can always remove the file it
+     * owns (matching the POSIX shim's callers, which unlink on their own
+     * failure paths through ngx_autocert_unlinkat(), a directory-fd-scoped
+     * operation that does not itself need this, but a bare owner-only ACL
+     * with no DELETE would otherwise surprise a future caller that opens the
+     * file directly and tries to remove it). No FILE_DELETE_CHILD: that bit
+     * only has meaning on a directory, and this shim is file-only (the sole
+     * caller passes a file fd; ngx_autocert_order_write_tmp_at() never calls
+     * this on a directory handle). */
+    mask = DELETE;
+    if (mode & 0400) {
+        mask |= FILE_GENERIC_READ;
+    }
+    if (mode & 0200) {
+        mask |= FILE_GENERIC_WRITE;
+    }
+    if (mode & 0100) {
+        mask |= FILE_GENERIC_EXECUTE;
+    }
+
+    ngx_memzero(&ea, sizeof(EXPLICIT_ACCESS_W));
+    ea.grfAccessPermissions = mask;
+    ea.grfAccessMode = SET_ACCESS;
+    ea.grfInheritance = NO_INHERITANCE;
+    ea.Trustee.TrusteeForm = TRUSTEE_IS_SID;
+    ea.Trustee.TrusteeType = TRUSTEE_IS_UNKNOWN;
+    ea.Trustee.ptstrName = (LPWSTR) owner;
+
+    new_dacl = NULL;
+    err = SetEntriesInAclW(1, &ea, NULL, &new_dacl);
+    if (err != ERROR_SUCCESS) {
+        LocalFree(owner_sd);
+        mapped = ngx_autocert_win32_errno(err);
+        SetLastError(mapped);
+        errno = mapped;
+        return -1;
+    }
+
+    err = SetSecurityInfo(h, SE_KERNEL_OBJECT,
+                DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+                NULL, NULL, new_dacl, NULL);
+
+    LocalFree(owner_sd);
+    LocalFree(new_dacl);
+
+    if (err != ERROR_SUCCESS) {
+        mapped = ngx_autocert_win32_errno(err);
+        SetLastError(mapped);
+        errno = mapped;
+        return -1;
+    }
+
     return 0;
 }
 
@@ -1198,13 +1336,196 @@ ngx_autocert_unlinkat(int dfd, const char *name, int flags)
 
 
 /*
+ * W11 — ngx_autocert_win32_mode_from_dacl(HANDLE) — real DACL -> POSIX
+ * group/other permission bits.
+ *
+ * ngx_autocert_fstat/fstatat below used to fabricate st_mode as a constant
+ * S_IFREG|0600 regardless of the file's actual ACL, which made account.c's
+ * "reject a key with group/other bits" guard (ngx_autocert_account.c:276-283)
+ * a tautology on win32 — a world-readable account key always passed. This
+ * reads the real DACL and reduces it to the (is_owner, is_allow, is_tolerated)
+ * tuples ngx_autocert_win32_dacl_mode() (ngx_autocert_shared.h, unit-tested
+ * on Linux) decides from.
+ *
+ * Bounded to NGX_AUTOCERT_DACL_WALK_MAX ACEs on the stack — a private key's
+ * DACL is never attacker-sized (this module writes it itself via
+ * ngx_autocert_fchmod() above, one ACE), and a fixed bound keeps this
+ * allocation-free and keeps the fail-closed contract below simple: an ACE
+ * count that would overflow the bound is treated the same as any other
+ * enumeration failure, not silently truncated into a false "safe" reading.
+ *
+ * FAIL-CLOSED CONTRACT: every error return sets *mode_bits to
+ * (S_IRWXG | S_IRWXO) — the guard must reject rather than silently pass when
+ * this cannot determine the truth. This is the opposite default of a normal
+ * "return -1 on error" API and is deliberate; callers must not reinterpret a
+ * -1 return here as "leave st_mode alone".
+ */
+#define NGX_AUTOCERT_DACL_WALK_MAX  32
+
+static ngx_inline int
+ngx_autocert_win32_mode_from_dacl(HANDLE h, ngx_autocert_mode_t *mode_bits)
+{
+    PSID                   owner, system_sid, admins_sid;
+    PACL                   dacl;
+    PSECURITY_DESCRIPTOR   sd;
+    ACL_SIZE_INFORMATION   size_info;
+    ngx_int_t              is_owner[NGX_AUTOCERT_DACL_WALK_MAX];
+    ngx_int_t              is_allow[NGX_AUTOCERT_DACL_WALK_MAX];
+    ngx_int_t              is_tolerated[NGX_AUTOCERT_DACL_WALK_MAX];
+    BYTE                   system_buf[SECURITY_MAX_SID_SIZE];
+    BYTE                   admins_buf[SECURITY_MAX_SID_SIZE];
+    DWORD                  system_len, admins_len, i, err;
+    ngx_uint_t             n;
+
+    /* Fail closed on the earliest possible error: every path below that
+     * returns before the walk completes must have already set the flagged
+     * bits, so a `goto fail`-free straight-line set of early returns below
+     * is safe by construction rather than by remembering to set it at each
+     * site — set it once, up front, and only clear it on the one path that
+     * proves the DACL is owner-only. */
+    *mode_bits = (ngx_autocert_mode_t) (S_IRWXG | S_IRWXO);
+
+    owner = NULL;
+    dacl = NULL;
+    sd = NULL;
+
+    /* Zeroed up front: an empty-but-non-NULL DACL (AceCount == 0, distinct
+     * from the NULL-DACL early return below) leaves the walk loop not
+     * executing at all, so n stays 0 and these are passed to
+     * ngx_autocert_win32_dacl_mode() unwritten on that path. n == 0 makes
+     * that function return its flagged value without reading them either
+     * way, but passing uninitialized arrays into a call, even one that
+     * provably does not read them here, is exactly what a later edit to
+     * either function could turn into a real bug silently — zero them so
+     * there is nothing to get wrong. */
+    ngx_memzero(is_owner, sizeof(is_owner));
+    ngx_memzero(is_allow, sizeof(is_allow));
+    ngx_memzero(is_tolerated, sizeof(is_tolerated));
+
+    err = GetSecurityInfo(h, SE_KERNEL_OBJECT,
+                OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+                &owner, NULL, &dacl, NULL, &sd);
+    if (err != ERROR_SUCCESS) {
+        SetLastError(err);
+        errno = ngx_autocert_win32_errno(err);
+        return -1;
+    }
+
+    if (dacl == NULL) {
+        /* NULL DACL means "everyone has full access" (no DACL at all, not
+         * an empty one) — the most exposed state a Windows object can be
+         * in. Fail closed; *mode_bits is already set above. */
+        LocalFree(sd);
+        return 0;
+    }
+
+    system_len = sizeof(system_buf);
+    if (!CreateWellKnownSid(WinLocalSystemSid, NULL, system_buf, &system_len)) {
+        err = GetLastError();
+        LocalFree(sd);
+        SetLastError(err);
+        errno = ngx_autocert_win32_errno(err);
+        return -1;
+    }
+    system_sid = (PSID) system_buf;
+
+    admins_len = sizeof(admins_buf);
+    if (!CreateWellKnownSid(WinBuiltinAdministratorsSid, NULL, admins_buf,
+                             &admins_len))
+    {
+        err = GetLastError();
+        LocalFree(sd);
+        SetLastError(err);
+        errno = ngx_autocert_win32_errno(err);
+        return -1;
+    }
+    admins_sid = (PSID) admins_buf;
+
+    ngx_memzero(&size_info, sizeof(size_info));
+    if (!GetAclInformation(dacl, &size_info, sizeof(size_info),
+                            AclSizeInformation))
+    {
+        err = GetLastError();
+        LocalFree(sd);
+        SetLastError(err);
+        errno = ngx_autocert_win32_errno(err);
+        return -1;
+    }
+
+    if (size_info.AceCount > NGX_AUTOCERT_DACL_WALK_MAX) {
+        /* Bound exceeded — fail closed rather than read a truncated view of
+         * the DACL and risk missing an exposing ACE past the cutoff. */
+        LocalFree(sd);
+        SetLastError(ERROR_INSUFFICIENT_BUFFER);
+        errno = ngx_autocert_win32_errno(ERROR_INSUFFICIENT_BUFFER);
+        return -1;
+    }
+
+    n = 0;
+
+    for (i = 0; i < size_info.AceCount; i++) {
+        ACE_HEADER  *hdr;
+        PSID         ace_sid;
+        int          allow;
+
+        if (!GetAce(dacl, i, (LPVOID *) &hdr)) {
+            err = GetLastError();
+            LocalFree(sd);
+            SetLastError(err);
+            errno = ngx_autocert_win32_errno(err);
+            return -1;
+        }
+
+        /* Only the two ACE types this DACL can actually contain matter:
+         * ALLOW grants access (the exposure this guard looks for), DENY
+         * grants nothing so it is never evidence of exposure. Anything else
+         * (object-specific / callback ACE types) is conservatively treated
+         * as neither owner nor tolerated, so a non-owner one still flags —
+         * fail closed rather than assume a type this shim does not
+         * recognise is benign. */
+        if (hdr->AceType == ACCESS_ALLOWED_ACE_TYPE) {
+            ace_sid = (PSID) &((ACCESS_ALLOWED_ACE *) hdr)->SidStart;
+            allow = 1;
+        } else if (hdr->AceType == ACCESS_DENIED_ACE_TYPE) {
+            ace_sid = (PSID) &((ACCESS_DENIED_ACE *) hdr)->SidStart;
+            allow = 0;
+        } else {
+            is_owner[n] = 0;
+            is_allow[n] = 1;
+            is_tolerated[n] = 0;
+            n++;
+            continue;
+        }
+
+        is_allow[n] = allow;
+        is_owner[n] = (owner != NULL && EqualSid(ace_sid, owner)) ? 1 : 0;
+        is_tolerated[n] = (EqualSid(ace_sid, system_sid)
+                            || EqualSid(ace_sid, admins_sid)) ? 1 : 0;
+        n++;
+    }
+
+    LocalFree(sd);
+
+    *mode_bits = ngx_autocert_win32_dacl_mode(is_owner, is_allow,
+                                               is_tolerated, n);
+    return 0;
+}
+
+
+/*
  * fstatat -> open no-follow (mirroring AT_SYMLINK_NOFOLLOW when given; POSIX
  * fstatat() without that flag follows a symlink, so its absence opens without
  * FILE_OPEN_REPARSE_POINT here too) then GetFileInformationByHandleEx.
  * st_mode/st_nlink/st_size are the only fields any call site in this repo
  * reads (verified against S_ISDIR/S_ISREG/st_nlink/st_size uses in
- * driver.c/order.c) — st_mode is approximated from the directory attribute
- * bit and a fixed permission mask, per DESIGN's documented approximation.
+ * driver.c/order.c). st_mode's directory bit and owner bits (0700/0600) are
+ * still the documented DESIGN approximation; its group/other bits, as of
+ * W11, are no longer a fixed constant — they come from
+ * ngx_autocert_win32_mode_from_dacl() below, the real DACL on the file. See
+ * that function's comment for the fail-closed contract and for why st_uid
+ * (unlike st_mode) stays the placeholder ngx_autocert_geteuid() always
+ * returned: the ownership half of account.c's guard is still not
+ * meaningful on win32, only the permission half is now real.
  *
  * The target's file-vs-directory type is not known up front, so the first
  * open is directory-agnostic: plain ngx_autocert_openat() sets
@@ -1222,7 +1543,9 @@ ngx_autocert_fstatat(int dfd, const char *name, ngx_autocert_stat_t *st, int fla
 {
     BY_HANDLE_FILE_INFORMATION  info;
     HANDLE                      h;
+    ngx_autocert_mode_t         dacl_bits;
     int                         fd, ntflags;
+    ngx_uint_t                  is_dir;
 
     ntflags = O_RDONLY;
     if (flags & AT_SYMLINK_NOFOLLOW) {
@@ -1247,11 +1570,30 @@ ngx_autocert_fstatat(int dfd, const char *name, ngx_autocert_stat_t *st, int fla
         return -1;
     }
 
+    is_dir = (info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) ? 1 : 0;
+
+    if (!is_dir) {
+        /* Directories keep the fixed S_IFDIR|0700 approximation — the
+         * account-key guard this feeds only ever stats regular files
+         * (ngx_autocert_account.c's S_ISREG check rejects a directory before
+         * the permission check runs), so only the file case needs the real
+         * DACL walk. Read it while the handle is still open. */
+        if (ngx_autocert_win32_mode_from_dacl(h, &dacl_bits) == -1) {
+            DWORD  err = GetLastError();
+            _close(fd);
+            SetLastError(err);
+            errno = ngx_autocert_win32_errno(err);
+            return -1;
+        }
+    } else {
+        dacl_bits = 0;
+    }
+
     _close(fd);
 
     ngx_memzero(st, sizeof(*st));
-    st->st_mode = (info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
-                  ? (S_IFDIR | 0700) : (S_IFREG | 0600);
+    st->st_mode = is_dir ? (ngx_autocert_mode_t) (S_IFDIR | 0700)
+                          : (ngx_autocert_mode_t) (S_IFREG | 0600 | dacl_bits);
     st->st_nlink = (short) (info.nNumberOfLinks > 0
                              ? info.nNumberOfLinks : 1);
     st->st_size = ngx_file_size(&info);
@@ -1266,13 +1608,16 @@ ngx_autocert_fstatat(int dfd, const char *name, ngx_autocert_stat_t *st, int fla
  * fstat(2) on an already-open shim fd. Distinct from ngx_autocert_fstatat
  * above for the same reason the POSIX side keeps them distinct: this stats
  * the fd itself, no name/dfd/no-follow involved (the file is already open,
- * so there is nothing left to resolve).
+ * so there is nothing left to resolve). Same W11 DACL-derived group/other
+ * bits as ngx_autocert_fstatat above; see that function's comment.
  */
 static ngx_inline int
 ngx_autocert_fstat(int fd, ngx_autocert_stat_t *st)
 {
     BY_HANDLE_FILE_INFORMATION  info;
     HANDLE                      h;
+    ngx_autocert_mode_t         dacl_bits;
+    ngx_uint_t                  is_dir;
 
     h = ngx_autocert_fd_handle(fd);
     if (h == INVALID_HANDLE_VALUE) {
@@ -1286,9 +1631,20 @@ ngx_autocert_fstat(int fd, ngx_autocert_stat_t *st)
         return -1;
     }
 
+    is_dir = (info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) ? 1 : 0;
+
+    if (!is_dir) {
+        if (ngx_autocert_win32_mode_from_dacl(h, &dacl_bits) == -1) {
+            errno = ngx_autocert_win32_errno(GetLastError());
+            return -1;
+        }
+    } else {
+        dacl_bits = 0;
+    }
+
     ngx_memzero(st, sizeof(*st));
-    st->st_mode = (info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
-                  ? (S_IFDIR | 0700) : (S_IFREG | 0600);
+    st->st_mode = is_dir ? (ngx_autocert_mode_t) (S_IFDIR | 0700)
+                          : (ngx_autocert_mode_t) (S_IFREG | 0600 | dacl_bits);
     st->st_nlink = (short) (info.nNumberOfLinks > 0
                              ? info.nNumberOfLinks : 1);
     st->st_size = ngx_file_size(&info);

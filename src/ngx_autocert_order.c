@@ -3058,8 +3058,12 @@ ngx_autocert_order_write_tmp_at(ngx_autocert_order_t *order, int sfd,
         return NGX_ERROR;
     }
 
-    /* O_CREAT honours umask; force the intended perms regardless. */
-    if (fchmod(fd, (mode_t) mode) == -1) {
+    /* O_CREAT honours umask; force the intended perms regardless. On win32
+     * this replaces the file's DACL outright (ngx_autocert_win32.h's W11
+     * comment); there is no umask there to correct for, but the call still
+     * matters — it strips whatever the parent directory's inherited ACEs
+     * would otherwise grant. */
+    if (ngx_autocert_fchmod(fd, mode) == -1) {
         ngx_log_error(NGX_LOG_ERR, order->log, ngx_errno,
                       "autocert: fchmod(\"%s\") failed", leaf);
         (void) ngx_autocert_close(fd);
