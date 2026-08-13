@@ -176,6 +176,18 @@ gcc -D_GNU_SOURCE -Wall -Wextra -Werror $CORE_INC \
 	"$NGX/objs/src/core/ngx_string.o" -o test_win32_split_root
 ./test_win32_split_root
 
+# win32 command-line quoting (ngx_autocert_win32_quote_arg, W8): the
+# CreateProcessW lpCommandLine builder the dns-01 operator hook spawn uses on
+# win32 -- plain args, spaces, embedded quotes, trailing/interior backslashes,
+# concatenation and overflow. Compiled unconditionally in ngx_autocert_shared.h
+# (no win32-header dependency), same reasoning as test_win32_split_root.c
+# above: this runs the real production function on Linux.
+# shellcheck disable=SC2086
+gcc -D_GNU_SOURCE -Wall -Wextra -Werror $CORE_INC \
+	"$WORKSPACE/ci/tests/unit/test_win32_quote_arg.c" \
+	"$NGX/objs/src/core/ngx_string.o" -o test_win32_quote_arg
+./test_win32_quote_arg
+
 # shellcheck disable=SC2086
 gcc -Wall -Werror $CORE_INC -c \
 	"$WORKSPACE/src/ngx_autocert_alpn.c" -o alpn.o
