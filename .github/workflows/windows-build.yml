@@ -1,4 +1,4 @@
-# sync-sha: c3e1b4d76c1ba383777e9aa813e0ad85531c5df93063c96093cd764a5aa13227
+# sync-sha: 92f6e1e40bfd33d1c29c1b29fe53c959f69adcc334eaf8ea0d073fac80a55ef1
 name: Windows build
 
 # Native Windows port gate (W17). Proves the module compiles and links on
@@ -45,6 +45,13 @@ concurrency:
 
 permissions:
   contents: read
+
+# Cache-key salt for the pinned build dependencies. Bump this when any of the
+# PCRE2 / zlib / OpenSSL versions or their sha256s change below, so the caches
+# invalidate with them. Kept as one constant rather than spelling the versions
+# into each key: the keys stay short, and there is a single place to change.
+env:
+  DEPS_KEY: pcre2-10.44-zlib-1.3.1-ossl-3.5.4
 
 jobs:
   msvc:
@@ -114,6 +121,17 @@ jobs:
           & "$env:VCPKG_INSTALLATION_ROOT\vcpkg.exe" install openssl:x64-windows-static
           if ($LASTEXITCODE -ne 0) { throw "vcpkg install failed with $LASTEXITCODE" }
 
+      # Immutable, sha256-pinned tarballs, so cache the transfer. The hash check
+      # in the fetch step still runs against whatever is restored, so a bad
+      # cache entry fails the build rather than being compiled.
+      - name: Cache source tarballs
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            pcre2-10.44.tar.gz
+            zlib-1.3.1.tar.gz
+          key: srctars-msvc-${{ env.DEPS_KEY }}
+
       # nginx's win32 build has no system package manager to find PCRE and zlib
       # in, so both are built from source alongside it via --with-pcre=/--with-zlib=
       # (the http_rewrite module hard-requires PCRE). Versions match what the W0c
@@ -133,7 +151,10 @@ jobs:
           )
           foreach ($d in $deps) {
             $tar = "$($d.name).tar.gz"
-            Invoke-WebRequest -Uri $d.url -OutFile $tar
+            # Skip the transfer on a cache hit; the hash check below still runs.
+            if (-not (Test-Path $tar)) {
+              Invoke-WebRequest -Uri $d.url -OutFile $tar
+            }
             $actual = (Get-FileHash $tar -Algorithm SHA256).Hash.ToLower()
             if ($actual -ne $d.sha) {
               throw "sha256 mismatch for ${tar}: got $actual, want $($d.sha)"
@@ -691,6 +712,9 @@ jobs:
       # API. The MSYS toolchain in the same installation targets the msys2
       # POSIX emulation layer instead, which would build something that is not
       # a native win32 binary and would defeat the point of this job.
+      # setup-msys2 caches the pacman downloads on its own (its `cache` input
+      # defaults to true at this pin), so there is nothing to add here. update
+      # is false, so the installed set stays pinned to this list.
       - name: Set up MSYS2
         uses: msys2/setup-msys2@66cd2cce69caa17b53920067426061ca1de3a884 # v2.32.0
         with:
@@ -719,12 +743,41 @@ jobs:
       # Versions and digests match the MSVC job's Fetch step; OpenSSL is pinned
       # to the series vcpkg resolves there. Every archive is checked before it
       # is unpacked, same rule as the Linux fetches.
+      # The compiled-OpenSSL cache key below must change when the toolchain
+      # does: those are static archives, and linking them with a different gcc
+      # is an ABI gamble. update:false pins the package set but the runner
+      # IMAGE can still ship a newer gcc, so read the real version rather than
+      # assuming it is stable.
+      - name: Record the MinGW gcc version
+        shell: msys2 {0}
+        run: |
+          set -euo pipefail
+          v=$(gcc -dumpversion)
+          echo "MINGW_GCC_VERSION=$v" >> "$GITHUB_ENV"
+          echo "gcc $v"
+
+      # The three source tarballs are immutable (pinned URL + sha256), so they
+      # are cached rather than re-downloaded each run. The sha256sum -c below
+      # still runs on the restored copy, so a truncated or tampered cache entry
+      # fails the build instead of being compiled -- caching does not weaken
+      # the verification, it only skips the transfer.
+      - name: Cache source tarballs
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            pcre2-10.44.tar.gz
+            zlib-1.3.1.tar.gz
+            openssl-3.5.4.tar.gz
+          key: srctars-mingw-${{ env.DEPS_KEY }}
+
       - name: Fetch and verify PCRE2, zlib and OpenSSL
         shell: msys2 {0}
         run: |
           set -euo pipefail
+          # -f only when absent: a cache hit means the file is already here and
+          # already pinned by sha256, so re-fetching it buys nothing.
           fetch() {
-            curl -fsSL -o "$2" "$1"
+            [ -f "$2" ] || curl -fsSL -o "$2" "$1"
             echo "$3  $2" | sha256sum -c -
             tar -xzf "$2"
           }
@@ -774,6 +827,48 @@ jobs:
             --with-openssl="$(pwd)/../openssl-3.5.4" \
             --with-http_ssl_module \
             --add-module="$(pwd)/.."
+
+      # This is the expensive part of the MinGW lane: --with-openssl=<srcdir>
+      # makes nginx COMPILE OpenSSL from source, which is most of this job's
+      # ~40 minutes (the MSVC lane links vcpkg binaries instead and finishes in
+      # roughly half the time).
+      #
+      # nginx's generated rule has the installed header as its target
+      # (auto/lib/openssl/make: "$OPENSSL/.openssl/include/openssl/ssl.h:"), so
+      # if the install tree is restored and newer than the makefile, make skips
+      # the whole configure+build+install recipe. Cache exactly that prefix.
+      #
+      # The key carries the gcc version AND this file's hash, because the
+      # cached artifacts are gcc-built static archives: a runner image that
+      # moves to a new gcc must not link yesterday's objects, and an OpenSSL
+      # version bump lands in this file. Restore is exact-match only (no
+      # restore-keys) for the same reason -- a near-miss here would be an ABI
+      # mismatch, not a warm start.
+      - name: Cache the compiled OpenSSL
+        id: ossl-cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: openssl-3.5.4/.openssl
+          key: openssl-mingw-${{ env.MINGW_GCC_VERSION }}-${{ env.DEPS_KEY }}
+
+      # The rule is a FILE target whose prerequisite is objs/Makefile, and
+      # Configure regenerates that makefile every run. actions/cache restores
+      # original mtimes, so a restored ssl.h is older than the just-written
+      # makefile and make would rebuild OpenSSL anyway -- the cache would look
+      # like a hit and buy nothing. Touch the tree so the installed header
+      # wins the timestamp comparison.
+      #
+      # Only on a hit: on a miss the files do not exist and the real build has
+      # to run.
+      - name: Mark the cached OpenSSL as up to date
+        if: steps.ossl-cache.outputs.cache-hit == 'true'
+        shell: msys2 {0}
+        run: |
+          set -euo pipefail
+          test -f openssl-3.5.4/.openssl/include/openssl/ssl.h || {
+            echo "cache hit but the install tree is incomplete"; exit 1; }
+          find openssl-3.5.4/.openssl -exec touch {} +
+          echo "restored OpenSSL install tree marked newer than the makefile"
 
       # Serial on purpose. nginx's generated makefile drives the OpenSSL and
       # PCRE2 sub-builds as recipe chains rather than as real dependency edges,
