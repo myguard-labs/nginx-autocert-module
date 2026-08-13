@@ -58,6 +58,7 @@
 #include <errno.h>
 #include <stdlib.h>            /* malloc/free — ngx_autocert_dir_t (W12) */
 #include <stddef.h>            /* offsetof — ngx_autocert_readdir (W12) */
+#include <limits.h>            /* INT_MAX — W9 canon-path WideCharToMultiByte clamp */
 
 
 /*
@@ -1815,6 +1816,123 @@ ngx_autocert_linkat(int oldfd, const char *oldpath, int newfd,
     }
 
     return 0;
+}
+
+
+/*
+ * W9 — named-mutex interprocess singleton gate. DESIGN-win32-store-io.md § W2:
+ * B2 is that ngx_worker is declared but never assigned on win32, so the
+ * existing worker-0 gate in ngx_http_autocert_module.c fails OPEN on every
+ * win32 worker, and the driver's own serializer (flock()) is POSIX-only. This
+ * adds a named CreateMutexW gate IN FRONT of ngx_autocert_flock_ex_nb() inside
+ * ngx_autocert_driver_trylock(), win32 only; the POSIX path is untouched.
+ *
+ * GetFinalPathNameByHandleW is Vista+, gated behind the same _WIN32_WINNT
+ * floor that is a dead end here (see the GetTickCount64 / GetFileInformation-
+ * ByHandleEx notes above: <ngx_config.h> already expanded <windows.h> at
+ * nginx's own 0x0501, so a later #define is inert — proven twice). Declare it
+ * ourselves; kernel32 is always linked so it resolves without GetProcAddress.
+ * CreateMutexW / WaitForSingleObject / ReleaseMutex are pre-Vista exports the
+ * SDK headers already declare unconditionally, so only this one needs the
+ * hand-written prototype.
+ */
+#ifndef NGX_AUTOCERT_HAVE_GETFINALPATHNAMEBYHANDLEW
+#define NGX_AUTOCERT_HAVE_GETFINALPATHNAMEBYHANDLEW  1
+WINBASEAPI DWORD WINAPI GetFinalPathNameByHandleW(HANDLE hFile,
+    LPWSTR lpszFilePath, DWORD cchFilePath, DWORD dwFlags);
+#endif
+
+#ifndef FILE_NAME_NORMALIZED
+#define FILE_NAME_NORMALIZED  0x0
+#endif
+
+/*
+ * Canonicalize the already-open store dir handle's path via
+ * GetFinalPathNameByHandleW, UTF-8-encode it into `out` (size `out_cap`).
+ * NOT the configured string: it differs in case / trailing slash / 8.3 form
+ * for the same directory, which would make two nginx instances pointed at
+ * "the same" store by different spellings each build a DIFFERENT mutex name
+ * and both arm.
+ *
+ * Returns 0 on success, or -1 with errno set (ENAMETOOLONG for an oversized
+ * result, or a mapped GetLastError() otherwise).
+ */
+static ngx_inline int
+ngx_autocert_win32_canon_store_path(int dfd, char *out, size_t out_cap)
+{
+    HANDLE   h;
+    wchar_t  wpath[NGX_MAX_PATH];
+    DWORD    wlen, mapped;
+    int      n;
+
+    h = ngx_autocert_fd_handle(dfd);
+    if (h == INVALID_HANDLE_VALUE) {
+        SetLastError(ERROR_INVALID_HANDLE);
+        errno = EBADF;
+        return -1;
+    }
+
+    wlen = GetFinalPathNameByHandleW(h, wpath,
+                                      (DWORD) (sizeof(wpath) / sizeof(wpath[0])),
+                                      FILE_NAME_NORMALIZED);
+    if (wlen == 0 || wlen >= sizeof(wpath) / sizeof(wpath[0])) {
+        mapped = (wlen == 0) ? GetLastError() : ERROR_BUFFER_OVERFLOW;
+        SetLastError(mapped);
+        errno = ngx_autocert_win32_errno(mapped);
+        return -1;
+    }
+
+    n = WideCharToMultiByte(CP_UTF8, 0, wpath, (int) wlen, out,
+                             (out_cap > INT_MAX) ? INT_MAX : (int) out_cap,
+                             NULL, NULL);
+    if (n <= 0) {
+        mapped = GetLastError();
+        SetLastError(mapped);
+        errno = (mapped == ERROR_INSUFFICIENT_BUFFER)
+                ? ENAMETOOLONG : ngx_autocert_win32_errno(mapped);
+        return -1;
+    }
+    if ((size_t) n >= out_cap) {
+        errno = ENAMETOOLONG;
+        return -1;
+    }
+    out[n] = '\0';
+
+    return 0;
+}
+
+/*
+ * Thin CreateMutexW wrapper: create/open the named mutex `wname` and take a
+ * ZERO-TIMEOUT non-blocking wait on it — NEVER block; a blocking wait here
+ * pins the calling worker's event loop. `*wait_rc` receives the raw
+ * WaitForSingleObject() result (WAIT_OBJECT_0 / WAIT_ABANDONED /
+ * WAIT_TIMEOUT / WAIT_FAILED) for the caller to feed to
+ * ngx_autocert_win32_mutex_wait_verdict() in ngx_autocert_shared.h — the
+ * WAIT_OBJECT_0-vs-WAIT_ABANDONED-vs-WAIT_TIMEOUT decision is deliberately
+ * NOT made in this header (win32.h is included by shared.h before that
+ * function's definition, so it cannot be called from here).
+ *
+ * Returns the mutex HANDLE on success (caller owns it: on any outcome other
+ * than "acquired", the caller must CloseHandle it), or NULL with errno set
+ * if CreateMutexW itself fails (a hard failure distinct from any wait
+ * outcome).
+ */
+static ngx_inline HANDLE
+ngx_autocert_win32_mutex_open_and_wait(const wchar_t *wname, DWORD *wait_rc)
+{
+    HANDLE  h;
+    DWORD   err;
+
+    h = CreateMutexW(NULL, FALSE, wname);
+    if (h == NULL) {
+        err = GetLastError();
+        SetLastError(err);
+        errno = ngx_autocert_win32_errno(err);
+        return NULL;
+    }
+
+    *wait_rc = WaitForSingleObject(h, 0);
+    return h;
 }
 
 #endif /* NGX_WIN32 */

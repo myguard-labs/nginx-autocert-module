@@ -179,6 +179,16 @@ static ngx_event_t                  ngx_autocert_kick_timer;
 static int                          ngx_autocert_lock_fd = -1;
 static ngx_event_t                  ngx_autocert_relock_timer;
 
+#if (NGX_WIN32)
+/*
+ * W9 — win32 named-mutex singleton handle. Process-lifetime: opened at most
+ * once by ngx_autocert_win32_driver_trylock() below, closed only in
+ * ngx_autocert_driver_exit_process(). NEVER closed/reopened per relock tick —
+ * that would open a window where two workers could both hold it briefly.
+ */
+static HANDLE                       ngx_autocert_win32_mutex = NULL;
+#endif
+
 
 
 /* ngx_autocert_renameat2() is shared via ngx_autocert_shared.h — used by both
@@ -2406,6 +2416,102 @@ ngx_autocert_runtime_seed(ngx_cycle_t *cycle)
 }
 
 
+#if (NGX_WIN32)
+/*
+ * W9/B2 — win32 named-mutex singleton gate, DESIGN-win32-store-io.md § W2.
+ * `dfd` is the already-open store dir fd (still owned by the caller — this
+ * function neither closes nor duplicates it). Returns NGX_OK if this process
+ * now holds (or already held) the singleton, NGX_AGAIN if another process
+ * holds it (caller falls back to the existing relock-timer retry, same as
+ * the POSIX EAGAIN path), NGX_ERROR on a hard failure.
+ *
+ * The wait-result -> verdict mapping (including the WAIT_ABANDONED ==
+ * success rule) lives in ngx_autocert_shared.h's
+ * ngx_autocert_win32_mutex_wait_verdict() so it has a Linux unit test; this
+ * function is the thin orchestration around it that only compiles on win32
+ * (CreateMutexW / WaitForSingleObject / GetFinalPathNameByHandleW are not
+ * available to unit-test directly on Linux).
+ */
+static ngx_int_t
+ngx_autocert_win32_driver_trylock(int dfd, ngx_log_t *log)
+{
+    char        canon[NGX_MAX_PATH];
+    char        name[64];
+    wchar_t     wname[64];
+    ngx_int_t   verdict;
+    DWORD       wait_rc;
+    HANDLE      h;
+    int         n;
+
+    if (ngx_autocert_win32_mutex != NULL) {
+        return NGX_OK;                      /* already held by this process */
+    }
+
+    if (ngx_autocert_win32_canon_store_path(dfd, canon, sizeof(canon)) != 0) {
+        ngx_log_error(NGX_LOG_ERR, log, ngx_errno,
+                      "autocert: could not canonicalize store dir path "
+                      "for singleton mutex name");
+        return NGX_ERROR;
+    }
+
+    if (ngx_autocert_win32_singleton_name(canon, name, sizeof(name)) != 0) {
+        ngx_log_error(NGX_LOG_ERR, log, ngx_errno,
+                      "autocert: could not build singleton mutex name");
+        return NGX_ERROR;
+    }
+
+    n = MultiByteToWideChar(CP_UTF8, 0, name, -1, wname,
+                             (int) (sizeof(wname) / sizeof(wname[0])));
+    if (n <= 0) {
+        ngx_log_error(NGX_LOG_ERR, log, 0,
+                      "autocert: could not convert singleton mutex name "
+                      "\"%s\" to UTF-16, GetLastError=%d",
+                      name, (int) GetLastError());
+        return NGX_ERROR;
+    }
+
+    h = ngx_autocert_win32_mutex_open_and_wait(wname, &wait_rc);
+    if (h == NULL) {
+        ngx_log_error(NGX_LOG_ERR, log, ngx_errno,
+                      "autocert: CreateMutexW(\"%s\") failed", name);
+        return NGX_ERROR;
+    }
+
+    verdict = ngx_autocert_win32_mutex_wait_verdict((uint32_t) wait_rc);
+
+    if (verdict == NGX_AGAIN) {
+        /* Not acquired: close now — the static must reflect actual
+         * ownership, and a not-owned handle must not linger. */
+        CloseHandle(h);
+        return NGX_AGAIN;
+    }
+
+    if (verdict == NGX_ERROR) {
+        CloseHandle(h);
+        ngx_log_error(NGX_LOG_ERR, log, 0,
+                      "autocert: WaitForSingleObject on singleton mutex "
+                      "\"%s\" failed, GetLastError=%d",
+                      name, (int) GetLastError());
+        return NGX_ERROR;
+    }
+
+    /* verdict == NGX_OK: WAIT_OBJECT_0 (clean acquire) or WAIT_ABANDONED
+     * (prior holder exited without releasing; ownership transferred to us —
+     * treated as success, never as an error: getting this backwards means
+     * issuance stops forever after one worker crash). */
+    if (wait_rc == NGX_AUTOCERT_WAIT_ABANDONED) {
+        ngx_log_error(NGX_LOG_NOTICE, log, 0,
+                      "autocert: singleton mutex \"%s\" was abandoned by a "
+                      "prior holder; ownership transferred to this process",
+                      name);
+    }
+
+    ngx_autocert_win32_mutex = h;
+    return NGX_OK;
+}
+#endif /* NGX_WIN32 */
+
+
 /*
  * Try to acquire the interprocess singleton lock: open (creating) the lock file
  * in the store dir and take a non-blocking exclusive flock. Returns NGX_OK if
@@ -2415,6 +2521,8 @@ ngx_autocert_runtime_seed(ngx_cycle_t *cycle)
  *
  * The fd is kept open for the driver's lifetime (the lock lives as long as an
  * open fd holding it); exit_process / a crash closes it and the kernel releases.
+ * win32: the named-mutex gate above (ngx_autocert_win32_driver_trylock) is
+ * acquired FIRST, in front of this flock-based serializer — see its comment.
  */
 static ngx_int_t
 ngx_autocert_driver_trylock(ngx_cycle_t *cycle)
@@ -2449,6 +2557,29 @@ ngx_autocert_driver_trylock(ngx_cycle_t *cycle)
                       "autocert: cannot open/create store dir \"%s\"", path);
         return NGX_ERROR;
     }
+
+#if (NGX_WIN32)
+    /* W9/B2: gate IN FRONT OF the flock-based serializer below, which is
+     * POSIX-only (LockFileEx contention maps to EAGAIN, but the worker-0
+     * gate in ngx_http_autocert_module.c fails open on win32 because
+     * ngx_worker is declared but never assigned there — every win32 worker
+     * reaches this function). Canonicalize via the already-open store dir
+     * handle, not the configured string (case/trailing-slash/8.3 form would
+     * otherwise let two spellings of the same store both arm). */
+    switch (ngx_autocert_win32_driver_trylock(bfd, cycle->log)) {
+
+    case NGX_OK:
+        break;                               /* fall through to flock below */
+
+    case NGX_AGAIN:
+        (void) ngx_autocert_close(bfd);
+        return NGX_AGAIN;
+
+    default:
+        (void) ngx_autocert_close(bfd);
+        return NGX_ERROR;
+    }
+#endif
 
     ngx_autocert_lock_fd = ngx_autocert_openat_mode(bfd, ".driver.lock",
                                   O_RDWR | O_CREAT | O_NOFOLLOW | O_CLOEXEC,
@@ -2695,6 +2826,20 @@ ngx_autocert_driver_exit_process(ngx_cycle_t *cycle)
         ngx_log_error(NGX_LOG_NOTICE, cycle->log, 0,
                       "autocert: released driver lock, pid %P", ngx_pid);
     }
+
+#if (NGX_WIN32)
+    /* W9: release + close the win32 singleton mutex here ONLY — process-
+     * lifetime handle, never closed/reopened per relock tick (that would
+     * open a window where two workers could both hold it briefly). */
+    if (ngx_autocert_win32_mutex != NULL) {
+        ReleaseMutex(ngx_autocert_win32_mutex);
+        CloseHandle(ngx_autocert_win32_mutex);
+        ngx_autocert_win32_mutex = NULL;
+        ngx_log_error(NGX_LOG_NOTICE, cycle->log, 0,
+                      "autocert: released win32 singleton mutex, pid %P",
+                      ngx_pid);
+    }
+#endif
 }
 
 
