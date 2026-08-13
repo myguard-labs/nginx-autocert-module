@@ -151,12 +151,16 @@ gcc -Wall -Wextra -Werror \
 # is the fd-pinned open the serve path uses to read a leaf out of the
 # store at handshake. Plants real symlinks / traversal in a temp store
 # and asserts the happy read plus that a symlinked leaf OR ancestor is
-# refused (per-component O_NOFOLLOW). Header-only: needs the nginx
-# include path but no nginx objects.
+# refused (per-component O_NOFOLLOW), plus (W5g-gap) that win32-spelled
+# paths ('\'-separated, mixed, and a '..\' leaf) resolve identically to
+# their '/'-spelled form. Needs ngx_string.o for ngx_snprintf/ngx_strlchr,
+# now that open_file_path routes through ngx_autocert_win32_classify_root
+# (same as test_win32_split_root.c below); not $STORE_OBJS -- its
+# ngx_palloc.o would clash with this file's own trivial stubs.
 # shellcheck disable=SC2086
 gcc -D_GNU_SOURCE -Wall -Wextra -Werror $CORE_INC \
 	"$WORKSPACE/ci/tests/unit/test_store_open.c" \
-	-o test_store_open
+	"$NGX/objs/src/core/ngx_string.o" -o test_store_open
 ./test_store_open
 
 # win32 root-splitting classifier (ngx_autocert_win32_classify_root, W5g):

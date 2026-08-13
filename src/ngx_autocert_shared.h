@@ -403,6 +403,41 @@ ngx_autocert_win32_is_alpha(char c)
 
 
 /*
+ * Fold '\' to '/' into `norm` (size `norm_cap`), the same '\'-vs-'/'
+ * normalisation ngx_autocert_win32_classify_root() does as the FIRST step
+ * before it looks at root syntax at all. Split out on its own because a
+ * caller that only wants "give me a '/'-only string to walk" -- like
+ * ngx_autocert_open_file_path()'s parent/leaf split below -- must NOT go
+ * through the root classifier itself: that half also REJECTS a bare
+ * '/'-rooted path as win32 drive-relative (EINVAL, "do not guess the
+ * current drive"), which is exactly the ordinary absolute-path spelling
+ * every POSIX caller in this module uses. Compiled unconditionally, like
+ * ngx_autocert_win32_classify_root() above: no OS/CRT call, so the Linux
+ * unit suite exercises the real function directly rather than a stand-in.
+ * Returns 0 on success, or -1 with errno set (ENAMETOOLONG).
+ */
+static ngx_inline int
+ngx_autocert_normalize_seps(const char *path, char *norm, size_t norm_cap)
+{
+    const char  *p;
+    size_t       len;
+
+    len = ngx_strlen(path);
+    if (len >= norm_cap) {
+        errno = ENAMETOOLONG;
+        return -1;
+    }
+
+    for (p = path; *p; p++) {
+        norm[p - path] = (*p == '\\') ? '/' : *p;
+    }
+    norm[len] = '\0';
+
+    return 0;
+}
+
+
+/*
  * Pure path-syntax half of ngx_autocert_split_root(): normalises separators
  * and classifies the root, writing the NT object-name form ("\??\C:\...",
  * "\??\UNC\server\share") into `root` (size `root_cap`) and pointing `*rest`
@@ -427,18 +462,12 @@ ngx_autocert_win32_classify_root(const char *path, char *norm,
     const char  *p, *server, *share_end;
     size_t       len, server_len, share_len;
 
-    len = ngx_strlen(path);
-    if (len >= norm_cap) {
-        errno = ENAMETOOLONG;
-        return -1;
-    }
-
     /* Normalise \ to / BEFORE any classification or the walk sees it — the
      * walk's "..", ".", empty-component rejection must run on this form. */
-    for (p = path; *p; p++) {
-        norm[p - path] = (*p == '\\') ? '/' : *p;
+    if (ngx_autocert_normalize_seps(path, norm, norm_cap) != 0) {
+        return -1;
     }
-    norm[len] = '\0';
+    len = ngx_strlen(norm);
 
     if (len >= 2 && ngx_autocert_win32_is_alpha(norm[0]) && norm[1] == ':') {
         if (len >= 3 && norm[2] == '/') {
@@ -634,10 +663,29 @@ ngx_autocert_open_dir_path(const char *path, ngx_uint_t create,
 /*
  * Open a regular leaf relative to a parent directory whose every component was
  * pinned by ngx_autocert_open_dir_path(). The final leaf is also O_NOFOLLOW.
+ *
+ * The parent/leaf split below scans for '/' only, exactly like
+ * ngx_autocert_open_dir_path()'s component walk once it has a normalised
+ * string to walk. On win32 a caller-supplied path may use '\' instead: a
+ * bare "C:\store\key.pem" then contains no '/' at all (splits as
+ * parent=".", leaf=the whole string -- a relative open of a literally-named
+ * file, not the intended absolute one), and a mixed "C:/store\key.pem"
+ * splits at the '/' and hands the un-normalised "store\key.pem" on as a
+ * leaf. Fold '\' to '/' first with ngx_autocert_normalize_seps() -- the
+ * same separator fold ngx_autocert_win32_classify_root() applies as its
+ * own first step on the directory side, split out on its own here because
+ * this function must NOT also run root classification: that half rejects
+ * a bare '/'-rooted path as win32 drive-relative (EINVAL), which is the
+ * ordinary absolute-path spelling every POSIX caller uses. The substring
+ * handed to ngx_autocert_open_dir_path() as the parent is always '/'-only;
+ * open_dir_path() (via ngx_autocert_split_root()) classifies that root
+ * itself, exactly as it would for any other caller -- this function never
+ * invents its own root spelling.
  */
 static ngx_inline int
 ngx_autocert_open_file_path(const char *path, int flags)
 {
+    char         norm[NGX_MAX_PATH];
     char         parent[NGX_MAX_PATH];
     const char  *p, *slash, *leaf;
     size_t       len;
@@ -648,8 +696,18 @@ ngx_autocert_open_file_path(const char *path, int flags)
         return -1;
     }
 
+    if (ngx_autocert_normalize_seps(path, norm, sizeof(norm)) != 0) {
+        return -1;
+    }
+
+    /* norm is the whole original path with separators folded to '/'; split
+     * it the same way ngx_autocert_open_dir_path()'s walk would -- on the
+     * LAST '/', everything before it is the parent to open. This mirrors
+     * the pre-existing POSIX cases (no separator / leading separator /
+     * interior separator) exactly, now operating on the normalised string
+     * instead of the raw caller input. */
     slash = NULL;
-    for (p = path; *p; p++) {
+    for (p = norm; *p; p++) {
         if (*p == '/') {
             slash = p;
         }
@@ -657,17 +715,17 @@ ngx_autocert_open_file_path(const char *path, int flags)
 
     if (slash == NULL) {
         dfd = ngx_autocert_open_dir_path(".", 0, 0);
-        leaf = path;
-    } else if (slash == path) {
+        leaf = norm;
+    } else if (slash == norm) {
         dfd = ngx_autocert_open_dir_path("/", 0, 0);
         leaf = slash + 1;
     } else {
-        len = slash - path;
+        len = slash - norm;
         if (len >= sizeof(parent)) {
             errno = ENAMETOOLONG;
             return -1;
         }
-        ngx_memcpy(parent, path, len);
+        ngx_memcpy(parent, norm, len);
         parent[len] = '\0';
         dfd = ngx_autocert_open_dir_path(parent, 0, 0);
         leaf = slash + 1;
