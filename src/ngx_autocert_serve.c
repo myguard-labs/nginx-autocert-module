@@ -945,7 +945,7 @@ ngx_http_autocert_cert_cb(SSL *ssl_conn, void *arg)
         if (now != cert->checked) {
             cert->checked = now;
             for (s = 0; s < NGX_AUTOCERT_NSLOTS; s++) {
-                if (!(sctx->slot_mask & (1u << s))) {
+                if (!(sctx->slot_mask & ((ngx_uint_t) 1 << s))) {
                     /* Slot not config-enabled (e.g. dropped in a dual->single
                      * rollback): never load it, and drop anything we cached for
                      * it earlier so it can't keep being served. */
