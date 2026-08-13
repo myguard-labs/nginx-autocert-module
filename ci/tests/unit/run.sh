@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # Unit test runner for nginx-autocert-module.
-# Extracts and compiles all 14 unit tests against a pre-built nginx tree.
+# Extracts and compiles all 16 unit tests against a pre-built nginx tree.
 #
 # Required environment: NGX_BUILD_DIR must point to a built nginx tree
 # (with objs/src/core/*.o and other object files intact).
