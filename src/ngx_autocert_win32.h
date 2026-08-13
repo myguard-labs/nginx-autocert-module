@@ -1212,10 +1212,26 @@ ngx_autocert_openat_mode(int dfd, const char *name, int flags,
     int      fd, crt_flags;
     HANDLE   h;
 
-    (void) mode; /* W11 (ACL translation) owns applying this; not yet wired */
-
+    /*
+     * `mode` is not applied at creation time: NtCreateFile takes a security
+     * descriptor, not a POSIX bitmask, and the file is created with the
+     * parent's inherited DACL. ngx_autocert_fchmod() is what translates the
+     * bitmask into an owner-only DACL, and every caller here that passes a
+     * mode calls it immediately after (the POSIX side does the same, because
+     * O_CREAT honours umask and so cannot be trusted either).
+     *
+     * WRITE_DAC is therefore requested on any writable open: SetSecurityInfo()
+     * inside ngx_autocert_fchmod() needs it on THIS handle, and without it
+     * that call fails ERROR_ACCESS_DENIED at runtime with no compile-time
+     * symptom — the key would be left with the parent's inherited DACL while
+     * the write path unlinks the file and reports failure. GENERIC_READ
+     * already implies READ_CONTROL, which is all GetSecurityInfo() needs, so
+     * only the write side has to be widened. Read-only opens do not ask for
+     * WRITE_DAC: they never chmod, and requesting DAC-write privilege they
+     * cannot use would fail on a key the worker is only allowed to read.
+     */
     desired_access = FILE_READ_ATTRIBUTES | SYNCHRONIZE | GENERIC_READ
-           | (flags & (O_WRONLY | O_RDWR) ? GENERIC_WRITE : 0);
+           | (flags & (O_WRONLY | O_RDWR) ? GENERIC_WRITE | WRITE_DAC : 0);
     options = NGX_AUTOCERT_FILE_NON_DIRECTORY_FILE;
     crt_flags = (flags & (O_WRONLY | O_RDWR)) ? _O_RDWR : _O_RDONLY;
 

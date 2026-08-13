@@ -395,6 +395,26 @@ ngx_autocert_account_save_key(ngx_autocert_account_t *acct, int dfd,
         return NGX_ERROR;
     }
 
+    /*
+     * Force the perms rather than trusting the create mode. On POSIX O_CREAT
+     * honours umask, so a permissive umask would widen the key; on win32 the
+     * mode argument is not applied at creation at all (NtCreateFile takes a
+     * security descriptor, and the file lands with the parent directory's
+     * inherited DACL) and ngx_autocert_fchmod() is the ONLY thing that
+     * narrows it to the owner. Without this the account key would be readable
+     * by whatever the store directory grants, and the load path's own
+     * group/other guard would then reject the key this function just wrote.
+     * Same reasoning and same placement as ngx_autocert_order_write_tmp_at().
+     */
+    if (ngx_autocert_fchmod(fd, 0600) == -1) {
+        ngx_log_error(NGX_LOG_ERR, acct->log, ngx_errno,
+                      "autocert: fchmod account key \"%V\" failed",
+                      &acct->key_path);
+        ngx_autocert_close(fd);
+        (void) ngx_autocert_unlinkat(dfd, leaf, 0);       /* no exposed key */
+        return NGX_ERROR;
+    }
+
     for (off = 0; off < pem.len; /* void */) {
         ssize_t  n = ngx_autocert_write(fd, pem.data + off, pem.len - off);
 
