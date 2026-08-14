@@ -1,4 +1,4 @@
-# sync-sha: 03aeefa57a946e02803bff1c1e99593a9c67ba5e31dc2327f47697fe817e0b2f
+# sync-sha: bbfc13b6baa065c0d9b6f9a3504dc7de3a173a720242f8328350f970923f27e5
 name: Windows build
 
 # Native Windows port gate (W17). Proves the module compiles and links on
@@ -882,9 +882,16 @@ jobs:
           $pebblePort = 14000
 
           Remove-Item -Recurse -Force $root -ErrorAction SilentlyContinue
+          # "temp" is not optional: the build configures
+          # --http-client-body-temp-path=temp/client_body_temp (and the proxy,
+          # fastcgi, uwsgi, scgi siblings) RELATIVE to the prefix, and nginx
+          # creates them at startup. Without it `nginx -t` reports "syntax is
+          # ok" and then fails with
+          #   [emerg] CreateDirectory() "temp/client_body_temp" failed (3)
+          # which reads like a config error but is a missing directory.
           New-Item -ItemType Directory -Force `
-            -Path $root, "$root/conf", "$root/logs", "$root/store", `
-                  "$root/pebble" | Out-Null
+            -Path $root, "$root/conf", "$root/logs", "$root/temp", `
+                  "$root/store", "$root/pebble" | Out-Null
 
           # --- fetch Pebble (native windows/amd64, no Docker, no build) ---
           Write-Host "== fetch Pebble v2.10.1 =="
