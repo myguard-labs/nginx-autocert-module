@@ -1,4 +1,4 @@
-# sync-sha: b44f84e82220a215fe8707c8f4f82665b10403d10af530f2898b806a95677a53
+# sync-sha: 4e946e3549f7329af15d894d14f5289d06c40ef737b7f1f8eac7378ec23dc006
 name: Windows build
 
 # Native Windows port gate (W17). Proves the module compiles and links on
@@ -694,6 +694,161 @@ jobs:
           # -s stop's exit status is irrelevant to the verdict; the assertions
           # above already threw on failure. Clear it so the step exits on its
           # own result (W28).
+          exit 0
+
+      # W19: the ACME engine must run in exactly ONE process. On POSIX that is
+      # enforced by the ngx_worker == 0 gate in
+      # ngx_http_autocert_module.c:378. On win32 that gate FAILS OPEN --
+      # src/os/win32/ngx_process_cycle.c declares ngx_uint_t ngx_worker at :32
+      # and never assigns it (the POSIX cycle assigns it at :704), so it is 0
+      # in every worker and all of them reach the driver. The named mutex
+      # (Global\ngx_autocert_singleton_<hash>, taken in
+      # ngx_autocert_win32_driver_trylock) is the ONLY thing stopping N
+      # concurrent ACME engines from sharing one store.
+      #
+      # The existing Linux unit oracles (test_win32_singleton_name.c,
+      # test_win32_mutex_verdict.c) cover the name derivation and the
+      # wait-result mapping as pure logic. Neither boots two processes, so
+      # neither can catch a regression that breaks the actual mutual
+      # exclusion. This step is that missing assertion.
+      - name: Multi-worker singleton test (exactly one driver arms)
+        shell: pwsh
+        working-directory: nginx-${{ env.NGINX_VERSION }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $prev = $ErrorActionPreference
+
+          # Separate prefix from the HTTP-01 step so the two runs cannot see
+          # each other's store or log.
+          $root = 'w19'
+          Remove-Item -Recurse -Force $root -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Force `
+            -Path $root, "$root/conf", "$root/logs", "$root/temp", `
+                  "$root/store" | Out-Null
+
+          # Absolute, forward-slashed, for the same reason as the HTTP-01 step:
+          # a relative store path resolves against the config file's directory,
+          # not -p, and the driver then fails to open it.
+          $store = ((Resolve-Path "$root/store").Path -replace '\\', '/')
+
+          # worker_processes 2 is the whole point: win32 spawns that many real
+          # processes (ngx_start_worker_processes loops ngx_spawn_process at
+          # ngx_process_cycle.c:377), each entering init_process with
+          # ngx_worker == 0.
+          $lines = @(
+            'worker_processes 2;',
+            'error_log logs/error.log notice;',
+            'events { worker_connections 64; }',
+            'http {',
+            "    autocert_store_path $store;",
+            # Dead loopback CA, same as the HTTP-01 step: this test is about
+            # which worker ARMS the driver, not about reaching a CA, and the
+            # default is Let's Encrypt production.
+            '    autocert_ca https://127.0.0.1:1/directory;',
+            '    server {',
+            '        listen 8100;',
+            '        server_name a.example.com;',
+            '        autocert on;',
+            '    }',
+            '}'
+          )
+          Set-Content -Encoding ascii -Value $lines `
+            -Path "$root/conf/nginx.conf"
+
+          $ErrorActionPreference = 'Continue'
+          & .\objs\nginx.exe -p $root -c conf/nginx.conf -t 2>&1 |
+            Out-String | Write-Host
+          $tRc = $LASTEXITCODE
+          $ErrorActionPreference = $prev
+          if ($tRc -ne 0) { throw "nginx -t rejected the multi-worker config" }
+
+          # Foreground on win32 -- see the HTTP-01 step: nginx's daemonize path
+          # is #if !(NGX_WIN32), so a direct call never returns.
+          $proc = Start-Process -FilePath (Resolve-Path .\objs\nginx.exe) `
+                    -ArgumentList '-p', $root, '-c', 'conf/nginx.conf' `
+                    -PassThru -NoNewWindow
+          Start-Sleep -Seconds 2
+          if ($proc.HasExited) {
+            if (Test-Path "$root/logs/error.log") {
+              Get-Content "$root/logs/error.log" | Write-Host
+            }
+            throw "nginx.exe exited immediately with $($proc.ExitCode)"
+          }
+
+          $log = "$root/logs/error.log"
+          try {
+            # Wait for BOTH workers to get through init_process before
+            # counting. Sampling too early reads "one armed" simply because
+            # the second worker has not started yet -- which is exactly the
+            # false pass this test exists to avoid. "start worker processes"
+            # is logged by the master once; the per-worker evidence is the
+            # arm line plus the mutex-contention path, so wait on the process
+            # count instead.
+            $deadline = (Get-Date).AddSeconds(30)
+            $workers = 0
+            while ((Get-Date) -lt $deadline) {
+              $workers = @(Get-Process -Name nginx `
+                             -ErrorAction SilentlyContinue).Count
+              # master + 2 workers
+              if ($workers -ge 3) { break }
+              Start-Sleep -Milliseconds 250
+            }
+            if ($workers -lt 3) {
+              throw "expected master + 2 workers, saw $workers nginx processes"
+            }
+
+            # Both workers are up; give the loser's trylock time to land in
+            # the log before counting.
+            Start-Sleep -Seconds 3
+
+            if (-not (Test-Path $log)) { throw "no error.log produced" }
+            $text = Get-Content $log -Raw
+
+            $armed = ([regex]::Matches(
+              $text, 'ACME driver armed on worker 0, pid \d+')).Count
+
+            Write-Host "== error.log =="
+            Write-Host $text
+
+            # THE assertion. Two workers reached the driver; exactly one may
+            # own the singleton. 0 means nobody arms and issuance is dead; >1
+            # means two ACME engines share a store, which is the bug the mutex
+            # exists to prevent.
+            if ($armed -ne 1) {
+              throw "expected exactly 1 armed driver across 2 workers, " +
+                    "got $armed"
+            }
+            Write-Host "OK exactly one worker armed the ACME driver"
+
+            # Negative control for the counter itself: if the regex could not
+            # match a second arm line, the check above would pass no matter
+            # how badly the mutex failed. Prove it counts 2 when 2 are present.
+            $probe = $text + "`n" +
+                     '2026/01/01 00:00:00 [notice] 999#0: autocert: ' +
+                     'ACME driver armed on worker 0, pid 999'
+            $probeCount = ([regex]::Matches(
+              $probe, 'ACME driver armed on worker 0, pid \d+')).Count
+            if ($probeCount -ne 2) {
+              throw "counter is broken: injected a 2nd arm line, " +
+                    "counted $probeCount"
+            }
+            Write-Host "OK counter distinguishes 1 from 2"
+          }
+          finally {
+            $ErrorActionPreference = 'Continue'
+            & .\objs\nginx.exe -p $root -c conf/nginx.conf -s stop 2>&1 |
+              Out-String | Write-Host
+            # -s stop signals the master only; kill any survivor so a stuck
+            # foreground process cannot outlive the step and hang the job.
+            if (-not $proc.WaitForExit(10000)) {
+              Write-Host "nginx did not exit on -s stop; killing"
+              Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+            }
+            Get-Process -Name nginx -ErrorAction SilentlyContinue |
+              Stop-Process -Force -ErrorAction SilentlyContinue
+            $ErrorActionPreference = $prev
+          }
+
           exit 0
 
       - name: Upload nginx.exe
