@@ -1,11 +1,16 @@
-# sync-sha: ea0aee99951bdc4f501c0745e05e0bb365965f24297128f97e7be01b121a29da
+# sync-sha: b44f84e82220a215fe8707c8f4f82665b10403d10af530f2898b806a95677a53
 name: Windows build
 
-# Build-only gate for the native Windows port (W17). This proves the module
-# COMPILES AND LINKS on win32; it does not prove it works. The Pebble e2e suite
-# runs Linux Docker containers (ci/tests/e2e/*.sh call `docker cp` against the
-# pebble image), and a windows-latest runner only supports Windows containers,
-# so runtime coverage on win32 is a separate problem tracked as W18.
+# Native Windows port gate (W17). Proves the module compiles and links on
+# win32, and -- since W18a -- that its HTTP-01 challenge-serve path actually
+# works at runtime: the MSVC lane starts the built nginx.exe and asserts
+# against it (see "Runtime HTTP-01 challenge-serve test" below).
+#
+# Still NOT covered here: full ACME issuance against a CA. The Pebble e2e
+# suite runs Linux Docker containers (ci/tests/e2e/*.sh call `docker cp`
+# against the pebble image) and a windows-latest runner only supports Windows
+# containers. Pebble does ship a native windows-amd64 binary, so that gap is
+# closable without Docker -- tracked as W18b.
 #
 # Kept out of build-test.yml deliberately: that workflow's jobs are Linux
 # (self-hosted builder02 for resolve, ubuntu for the matrices) and share the
@@ -41,6 +46,13 @@ concurrency:
 permissions:
   contents: read
 
+# Cache-key salt for the pinned build dependencies. Bump this when any of the
+# PCRE2 / zlib / OpenSSL versions or their sha256s change below, so the caches
+# invalidate with them. Kept as one constant rather than spelling the versions
+# into each key: the keys stay short, and there is a single place to change.
+env:
+  DEPS_KEY: pcre2-10.44-zlib-1.3.1-ossl-3.5.4
+
 jobs:
   msvc:
     name: MSVC x64 static-link build
@@ -69,7 +81,13 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           $tarball = "nginx-$env:NGINX_VERSION.tar.gz"
-          Invoke-WebRequest -Uri "https://nginx.org/download/$tarball" -OutFile $tarball
+          # Bounded: pwsh 7.4+ has no -TimeoutSec and both replacements default
+          # to indefinite. OperationTimeoutSeconds is a per-read stall limit,
+          # not a total-transfer cap, so a slow-but-progressing download is
+          # unaffected -- only a wedged one dies.
+          Invoke-WebRequest -Uri "https://nginx.org/download/$tarball" `
+            -OutFile $tarball `
+            -ConnectionTimeoutSeconds 30 -OperationTimeoutSeconds 60
 
           # Same rule as the Linux fetches: a changed upstream archive fails the
           # build rather than getting compiled. -ne on the string compare is
@@ -109,6 +127,17 @@ jobs:
           & "$env:VCPKG_INSTALLATION_ROOT\vcpkg.exe" install openssl:x64-windows-static
           if ($LASTEXITCODE -ne 0) { throw "vcpkg install failed with $LASTEXITCODE" }
 
+      # Immutable, sha256-pinned tarballs, so cache the transfer. The hash check
+      # in the fetch step still runs against whatever is restored, so a bad
+      # cache entry fails the build rather than being compiled.
+      - name: Cache source tarballs
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            pcre2-10.44.tar.gz
+            zlib-1.3.1.tar.gz
+          key: srctars-msvc-${{ env.DEPS_KEY }}
+
       # nginx's win32 build has no system package manager to find PCRE and zlib
       # in, so both are built from source alongside it via --with-pcre=/--with-zlib=
       # (the http_rewrite module hard-requires PCRE). Versions match what the W0c
@@ -128,7 +157,11 @@ jobs:
           )
           foreach ($d in $deps) {
             $tar = "$($d.name).tar.gz"
-            Invoke-WebRequest -Uri $d.url -OutFile $tar
+            # Skip the transfer on a cache hit; the hash check below still runs.
+            if (-not (Test-Path $tar)) {
+              Invoke-WebRequest -Uri $d.url -OutFile $tar `
+                -ConnectionTimeoutSeconds 30 -OperationTimeoutSeconds 60
+            }
             $actual = (Get-FileHash $tar -Algorithm SHA256).Hash.ToLower()
             if ($actual -ne $d.sha) {
               throw "sha256 mismatch for ${tar}: got $actual, want $($d.sha)"
@@ -197,9 +230,18 @@ jobs:
       # because the two CRTs keep separate heaps and allocator state.
       # crypt32/user32 are OpenSSL's own win32 dependencies, which a static
       # libcrypto does not pull in on its own.
+      # AUTOCERT_TEST=1 compiles in the test-only seed directives
+      # (autocert_test_challenge / autocert_test_alpn; see config:28). They are
+      # what lets the runtime step below seed a token->keyauth without an ACME
+      # server, and they are deliberately absent from production builds so a
+      # stray directive cannot inject a forged key authorization the :80
+      # handler would serve. Scoped to this CI job only -- the uploaded
+      # artifact is a TEST binary, not a release one.
       - name: Configure
         shell: bash
         working-directory: nginx-${{ env.NGINX_VERSION }}
+        env:
+          AUTOCERT_TEST: "1"
         run: |
           set -euo pipefail
           # Both must be Windows paths with forward slashes: configure needs the
@@ -408,6 +450,252 @@ jobs:
           # non-zero $LASTEXITCODE so the step's own verdict is what exits.
           exit 0
 
+      # W18a: the first RUNTIME test on win32 -- everything before this point
+      # proves the binary builds and parses a config, not that it serves.
+      #
+      # Mirrors ci/tests/e2e/http01-challenge.sh, which is deliberately
+      # "no network / no docker": it seeds a token->keyauth through the
+      # test-only autocert_test_challenge directive and asserts the :80
+      # challenge handler serves it. No ACME server is involved, so this is
+      # independent of the Pebble work (W18b) and of any container support.
+      #
+      # Pwsh rules earned in W28 apply to every nginx.exe invocation here:
+      # $ErrorActionPreference='Stop' plus '2>&1' turns nginx's own stderr
+      # into a TERMINATING error, and a non-zero $LASTEXITCODE at step end
+      # fails the step regardless of the assertions' verdict.
+      - name: Runtime HTTP-01 challenge-serve test
+        shell: pwsh
+        working-directory: nginx-${{ env.NGINX_VERSION }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          $port    = 8088
+          $token   = 'evaGxfADs6pSRb2LMJ7rzMrXXX0123456789abcdefg'
+          $keyauth = "$token.9jg46WB3rR_AHD-EBXdN7cBkH1WOu0tA3M9fm21mqTI"
+
+          New-Item -ItemType Directory -Force `
+            -Path conf, logs, temp, temp/store | Out-Null
+
+          # ABSOLUTE store path, with forward slashes. A relative one is
+          # resolved against the CONFIG FILE's directory, not the -p prefix, so
+          # "temp/store" became "./conf/temp/store" and the driver failed with
+          # "cannot open/create store dir ... (31: A device attached to the
+          # system is not functioning)" -- ERROR_GEN_FAILURE, which is what
+          # win32 reports here for a path that is not there, not a hardware
+          # fault. The token was then never seeded and the readiness wait
+          # timed out.
+          #
+          # The directive-table step above gets away with "temp/store" because
+          # nginx -t never opens the store; this is the first step that runs
+          # the server for real.
+          $store = ((Resolve-Path temp/store).Path -replace '\\', '/')
+
+          # worker_processes 1: this test is about the challenge-serve path.
+          # The N>1 singleton assertion is W19 and needs its own config.
+          # No 'user' directive -- nginx ignores it on win32 (and warns).
+          $lines = @(
+            'error_log logs/error.log notice;',
+            'events { worker_connections 64; }',
+            'http {',
+            "    autocert_store_path $store;",
+            # Point the CA at a dead loopback port. This test is about serving
+            # a seeded challenge, not about issuance, and the default CA is
+            # Let's Encrypt PRODUCTION -- without this the driver tries to
+            # register a real ACME account on every CI run. It fails harmlessly
+            # either way, but CI has no business dialling a live CA.
+            '    autocert_ca https://127.0.0.1:1/directory;',
+            "    autocert_test_challenge $token `"$keyauth`";",
+            '    server {',
+            "        listen $port;",
+            '        server_name a.example.com;',
+            '        autocert on;',
+            '    }',
+            '}'
+          )
+          Set-Content -Encoding ascii -Path conf/nginx.conf -Value $lines
+
+          # Guard against a vacuous pass: if AUTOCERT_TEST=1 did not reach the
+          # compiler, autocert_test_challenge is not in the binary and nginx -t
+          # rejects it as unknown. Without this, a build that silently dropped
+          # the define would fail below in a way that looks like a serve bug.
+          $prev = $ErrorActionPreference
+          $ErrorActionPreference = 'Continue'
+          $tOut = (& .\objs\nginx.exe -p . -c conf/nginx.conf -t 2>&1 |
+                     Out-String)
+          $tRc  = $LASTEXITCODE
+          $ErrorActionPreference = $prev
+          Write-Host $tOut
+          if ($tRc -ne 0) {
+            throw "nginx -t rejected the test config " +
+                  "(is AUTOCERT_TEST=1 reaching the compiler?)"
+          }
+
+          # nginx does NOT daemonize on win32: the whole ngx_daemon() branch in
+          # src/core/nginx.c:343 sits inside #if !(NGX_WIN32), and there is no
+          # ngx_daemon.c under src/os/win32 at all. The master runs in the
+          # FOREGROUND, so calling it directly -- as the POSIX script does,
+          # where nginx forks and the shell returns -- blocks this step until
+          # the job timeout. Start it detached and keep the handle.
+          Write-Host "== start =="
+          $proc = Start-Process -FilePath (Resolve-Path .\objs\nginx.exe) `
+                    -ArgumentList '-p', '.', '-c', 'conf/nginx.conf' `
+                    -PassThru -NoNewWindow
+          Start-Sleep -Seconds 2
+          if ($proc.HasExited) {
+            if (Test-Path logs/error.log) {
+              Get-Content logs/error.log | Write-Host
+            }
+            throw "nginx.exe exited immediately with $($proc.ExitCode)"
+          }
+
+          try {
+            # Wait for the seed to land rather than sleeping a fixed interval:
+            # the log line is the real readiness signal, and a fixed sleep is
+            # a flake waiting to happen on a loaded runner.
+            $seeded = $false
+            foreach ($i in 1..60) {
+              if ((Test-Path logs/error.log) -and
+                  (Select-String -Path logs/error.log -SimpleMatch `
+                     -Pattern 'seeded test challenge token' -Quiet)) {
+                $seeded = $true; break
+              }
+              Start-Sleep -Milliseconds 500
+            }
+            if (-not $seeded) {
+              if (Test-Path logs/error.log) {
+                Get-Content logs/error.log | Write-Host
+              }
+              throw "worker never logged 'seeded test challenge token'"
+            }
+
+            $base = "http://127.0.0.1:$port/.well-known/acme-challenge"
+
+            Write-Host "== fetch valid token =="
+            # Bounded: pwsh 7.4+ dropped -TimeoutSec, and both replacement
+            # timeouts default to INDEFINITE. An unbounded request against a
+            # wedged worker would eat the whole job timeout instead of failing
+            # here with a usable message.
+            $r = Invoke-WebRequest -Uri "$base/$token" -UseBasicParsing `
+                   -ConnectionTimeoutSeconds 10 -OperationTimeoutSeconds 10
+            if ($r.Content -ne $keyauth) {
+              throw "wrong keyauth: got '$($r.Content)' want '$keyauth'"
+            }
+            Write-Host "OK served exact key authorization"
+
+            # Content-Length must match the keyauth exactly -- a truncated or
+            # padded body with a 200 would otherwise pass the check above.
+            #
+            # The Headers indexer yields a String[] (HTTP headers are
+            # multi-valued), so casting it straight to [int] throws
+            # "Cannot convert ... System.String[] ... to type System.Int32".
+            # Take the first value explicitly.
+            $clen = [int](@($r.Headers['Content-Length'])[0])
+            if ($clen -ne $keyauth.Length) {
+              throw "Content-Length $clen != $($keyauth.Length)"
+            }
+            Write-Host "OK Content-Length correct"
+
+            # Invoke-WebRequest throws on 4xx by default. -SkipHttpErrorCheck
+            # (pwsh 6+) returns the response instead, which is what we want:
+            # a 404 IS the expected result here. Do NOT "fix" this into a
+            # try/catch on [System.Net.WebException] -- pwsh 7 raises
+            # HttpRequestException, so that catch never fires and the step
+            # dies instead of asserting.
+            function Get-Status([string]$uri) {
+              (Invoke-WebRequest -Uri $uri -UseBasicParsing `
+                 -SkipHttpErrorCheck `
+                 -ConnectionTimeoutSeconds 10 `
+                 -OperationTimeoutSeconds 10).StatusCode
+            }
+
+            Write-Host "== unknown token -> 404 =="
+            $code = Get-Status "$base/doesnotexist"
+            if ($code -ne 404) { throw "unknown token gave $code, want 404" }
+            Write-Host "OK unknown token 404"
+
+            Write-Host "== token with extra path segment -> 404 =="
+            $code = Get-Status "$base/$token/extra"
+            if ($code -ne 404) { throw "nested path gave $code, want 404" }
+            Write-Host "OK nested path declined"
+
+            # Regression: a GET carrying a request body on a keepalive
+            # connection must not desync it. The content-phase handler emits
+            # its own response and so must discard the unread body, or the
+            # leftover bytes are parsed as the next pipelined request's start
+            # line (request-smuggling / keepalive-framing bug). Both requests
+            # go out in ONE send, which is the point of the test.
+            Write-Host "== GET-with-body on keepalive must not desync =="
+            $path = "/.well-known/acme-challenge/$token"
+            $body = 'BODYBYTES'
+            $req1 = "GET $path HTTP/1.1`r`nHost: a.example.com`r`n" +
+                    "Content-Length: $($body.Length)`r`n" +
+                    "Connection: keep-alive`r`n`r`n" + $body
+            $req2 = "GET $path HTTP/1.1`r`nHost: a.example.com`r`n" +
+                    "Connection: close`r`n`r`n"
+
+            $client = New-Object System.Net.Sockets.TcpClient
+            $client.Connect('127.0.0.1', $port)
+            $stream = $client.GetStream()
+            $stream.ReadTimeout = 5000
+            $bytes = [System.Text.Encoding]::ASCII.GetBytes($req1 + $req2)
+            $stream.Write($bytes, 0, $bytes.Length)
+            $stream.Flush()
+
+            $sb = New-Object System.Text.StringBuilder
+            $buf = New-Object byte[] 4096
+            try {
+              while ($true) {
+                $n = $stream.Read($buf, 0, $buf.Length)
+                if ($n -le 0) { break }
+                [void]$sb.Append(
+                  [System.Text.Encoding]::ASCII.GetString($buf, 0, $n))
+              }
+            } catch [System.IO.IOException] {
+              # read timeout: server sent all it intends to
+            } finally {
+              $stream.Close(); $client.Close()
+            }
+            $resp = $sb.ToString()
+
+            # The keyauth body carries no trailing newline, so response #2's
+            # status line is glued to the end of body #1 -- count OCCURRENCES,
+            # never lines.
+            $n200 = ([regex]::Matches($resp, 'HTTP/1\.1 200')).Count
+            $nkey = ([regex]::Matches($resp, [regex]::Escape($keyauth))).Count
+            if ($n200 -ne 2 -or $nkey -ne 2 -or $resp -match 'HTTP/1\.1 400') {
+              Write-Host $resp
+              throw "keepalive desync after GET-with-body " +
+                    "(200s=$n200 keyauth=$nkey)"
+            }
+            Write-Host "OK GET-with-body discarded; keepalive framing intact"
+
+            Write-Host "HTTP-01 challenge serve path verified on win32"
+          }
+          finally {
+            $ErrorActionPreference = 'Continue'
+            & .\objs\nginx.exe -p . -c conf/nginx.conf -s stop 2>&1 |
+              Out-String | Write-Host
+            # -s stop only signals the master. If it did not take, the
+            # foreground process outlives the step and hangs the job, so kill
+            # unconditionally rather than trusting the signal.
+            if (-not $proc.WaitForExit(10000)) {
+              Write-Host "nginx did not exit on -s stop; killing"
+              Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+            }
+            Get-Process -Name nginx -ErrorAction SilentlyContinue |
+              Stop-Process -Force -ErrorAction SilentlyContinue
+            $ErrorActionPreference = $prev
+            if (Test-Path logs/error.log) {
+              Write-Host "== error.log =="
+              Get-Content logs/error.log | Select-Object -Last 40 | Write-Host
+            }
+          }
+
+          # -s stop's exit status is irrelevant to the verdict; the assertions
+          # above already threw on failure. Clear it so the step exits on its
+          # own result (W28).
+          exit 0
+
       - name: Upload nginx.exe
         if: success()
         uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
@@ -463,6 +751,9 @@ jobs:
       # API. The MSYS toolchain in the same installation targets the msys2
       # POSIX emulation layer instead, which would build something that is not
       # a native win32 binary and would defeat the point of this job.
+      # setup-msys2 caches the pacman downloads on its own (its `cache` input
+      # defaults to true at this pin), so there is nothing to add here. update
+      # is false, so the installed set stays pinned to this list.
       - name: Set up MSYS2
         uses: msys2/setup-msys2@66cd2cce69caa17b53920067426061ca1de3a884 # v2.32.0
         with:
@@ -491,12 +782,41 @@ jobs:
       # Versions and digests match the MSVC job's Fetch step; OpenSSL is pinned
       # to the series vcpkg resolves there. Every archive is checked before it
       # is unpacked, same rule as the Linux fetches.
+      # The compiled-OpenSSL cache key below must change when the toolchain
+      # does: those are static archives, and linking them with a different gcc
+      # is an ABI gamble. update:false pins the package set but the runner
+      # IMAGE can still ship a newer gcc, so read the real version rather than
+      # assuming it is stable.
+      - name: Record the MinGW gcc version
+        shell: msys2 {0}
+        run: |
+          set -euo pipefail
+          v=$(gcc -dumpversion)
+          echo "MINGW_GCC_VERSION=$v" >> "$GITHUB_ENV"
+          echo "gcc $v"
+
+      # The three source tarballs are immutable (pinned URL + sha256), so they
+      # are cached rather than re-downloaded each run. The sha256sum -c below
+      # still runs on the restored copy, so a truncated or tampered cache entry
+      # fails the build instead of being compiled -- caching does not weaken
+      # the verification, it only skips the transfer.
+      - name: Cache source tarballs
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            pcre2-10.44.tar.gz
+            zlib-1.3.1.tar.gz
+            openssl-3.5.4.tar.gz
+          key: srctars-mingw-${{ env.DEPS_KEY }}
+
       - name: Fetch and verify PCRE2, zlib and OpenSSL
         shell: msys2 {0}
         run: |
           set -euo pipefail
+          # -f only when absent: a cache hit means the file is already here and
+          # already pinned by sha256, so re-fetching it buys nothing.
           fetch() {
-            curl -fsSL -o "$2" "$1"
+            [ -f "$2" ] || curl -fsSL -o "$2" "$1"
             echo "$3  $2" | sha256sum -c -
             tar -xzf "$2"
           }
@@ -546,6 +866,48 @@ jobs:
             --with-openssl="$(pwd)/../openssl-3.5.4" \
             --with-http_ssl_module \
             --add-module="$(pwd)/.."
+
+      # This is the expensive part of the MinGW lane: --with-openssl=<srcdir>
+      # makes nginx COMPILE OpenSSL from source, which is most of this job's
+      # ~40 minutes (the MSVC lane links vcpkg binaries instead and finishes in
+      # roughly half the time).
+      #
+      # nginx's generated rule has the installed header as its target
+      # (auto/lib/openssl/make: "$OPENSSL/.openssl/include/openssl/ssl.h:"), so
+      # if the install tree is restored and newer than the makefile, make skips
+      # the whole configure+build+install recipe. Cache exactly that prefix.
+      #
+      # The key carries the gcc version AND this file's hash, because the
+      # cached artifacts are gcc-built static archives: a runner image that
+      # moves to a new gcc must not link yesterday's objects, and an OpenSSL
+      # version bump lands in this file. Restore is exact-match only (no
+      # restore-keys) for the same reason -- a near-miss here would be an ABI
+      # mismatch, not a warm start.
+      - name: Cache the compiled OpenSSL
+        id: ossl-cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: openssl-3.5.4/.openssl
+          key: openssl-mingw-${{ env.MINGW_GCC_VERSION }}-${{ env.DEPS_KEY }}
+
+      # The rule is a FILE target whose prerequisite is objs/Makefile, and
+      # Configure regenerates that makefile every run. actions/cache restores
+      # original mtimes, so a restored ssl.h is older than the just-written
+      # makefile and make would rebuild OpenSSL anyway -- the cache would look
+      # like a hit and buy nothing. Touch the tree so the installed header
+      # wins the timestamp comparison.
+      #
+      # Only on a hit: on a miss the files do not exist and the real build has
+      # to run.
+      - name: Mark the cached OpenSSL as up to date
+        if: steps.ossl-cache.outputs.cache-hit == 'true'
+        shell: msys2 {0}
+        run: |
+          set -euo pipefail
+          test -f openssl-3.5.4/.openssl/include/openssl/ssl.h || {
+            echo "cache hit but the install tree is incomplete"; exit 1; }
+          find openssl-3.5.4/.openssl -exec touch {} +
+          echo "restored OpenSSL install tree marked newer than the makefile"
 
       # Serial on purpose. nginx's generated makefile drives the OpenSSL and
       # PCRE2 sub-builds as recipe chains rather than as real dependency edges,
