@@ -26,9 +26,11 @@
 #   GITHUB_WORKSPACE   module checkout root; falls back to repo root locally
 #                      (same as ci-build.sh).
 #
-# OUTPUT: a per-file line-coverage table for src/*.c to stdout, exit 0 on
-# success. This script REPORTS coverage, it does not gate on a threshold --
-# repo policy is "coverage high as practical", not a %% gate.
+# OUTPUT: a per-file line-coverage table for every tracked production src/*.c
+# translation unit.  The script fails if an expected TU has no instrumentation
+# data, and preserves a unit-suite failure after writing the report.  It does
+# not gate on a percentage -- repo policy is "coverage high as practical", not
+# a %% gate.
 #
 # TOOLING: prefers gcovr, falls back to lcov+genhtml, falls back to raw gcov
 # (terse per-file %% only, no HTML). Install whichever is missing via the
@@ -59,7 +61,8 @@ echo "build dir: $build_dir"
 # ---- 2. gcc wrapper: shadow PATH so run.sh's literal `gcc` calls pick up
 #         --coverage without editing run.sh (PR #165 is live on those files) --
 cov_bin_dir="$(mktemp -d)"
-trap 'rm -rf "$cov_bin_dir"' EXIT
+server_prefix=""
+trap 'rm -rf "$cov_bin_dir" "$server_prefix"' EXIT
 
 real_gcc="$(command -v gcc)"
 cat >"$cov_bin_dir/gcc" <<EOF
@@ -72,7 +75,66 @@ chmod +x "$cov_bin_dir/gcc"
 # -- a stale non-instrumented .o/.gcno from a prior plain run.sh invocation
 # would otherwise link fine and silently produce zero coverage data.
 unit_build="$workspace/.build/unit"
+module_build="$build_dir/objs/addon/src"
 rm -rf "$unit_build"
+
+# The module is linked into nginx as a dynamic module, so the unit binaries
+# cannot exercise the main config, worker lifecycle, driver or serve TUs.
+# Start and immediately quit one local worker after the unit suite.  This
+# bounded workload makes the worker-0 driver init/arm/exit state machine emit
+# gcda data without fetching an ACME directory or sending an HTTP request.
+run_server_workload() {
+  local prefix module binary
+
+  prefix="$(mktemp -d "$workspace/.build/coverage-server.XXXXXX")"
+  server_prefix="$prefix"
+  module="$build_dir/objs/ngx_http_autocert_module.so"
+  binary="$build_dir/objs/nginx"
+
+  if [ ! -f "$module" ] || [ ! -x "$binary" ]; then
+    echo "::error::coverage server workload needs $module and $binary" >&2
+    return 1
+  fi
+
+  mkdir -p "$prefix/conf" "$prefix/logs"
+  cat >"$prefix/conf/nginx.conf" <<EOF
+load_module $module;
+worker_processes 1;
+error_log $prefix/logs/error.log notice;
+pid $prefix/logs/nginx.pid;
+events {}
+http {
+    autocert on;
+    autocert_contact coverage@example.test;
+    autocert_store_path $prefix/store;
+    server {
+        # A Unix socket keeps this workload entirely local and avoids a shared
+        # TCP test-port collision with other CI jobs.
+        listen unix:$prefix/coverage.sock;
+        server_name coverage.example.test;
+        autocert on;
+    }
+}
+EOF
+
+  echo "== running bounded no-network server workload =="
+  "$binary" -p "$prefix" -c "$prefix/conf/nginx.conf"
+  # The initial ACME kick is delayed 500ms.  Four 100ms observations give the
+  # synchronous worker-init log time to flush, then quit before that timer can
+  # enter any ACME client code.
+  for _ in $(seq 1 4); do
+    grep -q 'autocert: ACME driver armed on worker 0' "$prefix/logs/error.log" \
+      && break
+    sleep 0.1
+  done
+  "$binary" -p "$prefix" -c "$prefix/conf/nginx.conf" -s quit
+  if ! grep -q 'autocert: ACME driver armed on worker 0' "$prefix/logs/error.log"; then
+    echo "::error::coverage server workload did not reach ngx_autocert_driver_init_process" >&2
+    cat "$prefix/logs/error.log" >&2
+    return 1
+  fi
+  echo "server evidence: ngx_autocert_driver_init_process armed worker 0"
+}
 
 # ---- 3. run the unit suite with gcc shadowed -------------------------------
 # Not `set -e`-fatal here: a test binary that crashes mid-suite still leaves
@@ -91,11 +153,32 @@ if [ "$suite_rc" -ne 0 ]; then
   echo "::warning::unit suite exited $suite_rc -- coverage below reflects only the tests that ran before the failure" >&2
 fi
 
-gcno_count="$(find "$unit_build" -name '*.gcno' 2>/dev/null | wc -l)"
-gcda_count="$(find "$unit_build" -name '*.gcda' 2>/dev/null | wc -l)"
+run_server_workload
+
+gcno_count="$(find "$unit_build" "$module_build" -name '*.gcno' 2>/dev/null | wc -l)"
+gcda_count="$(find "$unit_build" "$module_build" -name '*.gcda' 2>/dev/null | wc -l)"
 echo "instrumented objects: $gcno_count .gcno, $gcda_count .gcda"
 if [ "$gcda_count" -eq 0 ]; then
   echo "::error::no .gcda files produced -- unit suite did not exercise any instrumented binary" >&2
+  exit 1
+fi
+
+# A report over whichever objects happened to run is not a module report.
+# Every production TU must have both build-time notes and runtime data.  The
+# unit suite owns a small subset; the server workload above owns the dynamic
+# module's lifecycle/state-machine objects.  List every missing source rather
+# than letting a coverage frontend silently omit it from its aggregate.
+missing_inventory=0
+for src in "$workspace"/src/*.c; do
+  base="$(basename "$src" .c)"
+  gcno="$(find "$unit_build" "$module_build" -name "${base}.gcno" -print -quit 2>/dev/null || true)"
+  gcda="$(find "$unit_build" "$module_build" -name "${base}.gcda" -print -quit 2>/dev/null || true)"
+  if [ -z "$gcno" ] || [ -z "$gcda" ]; then
+    echo "::error::coverage inventory missing ${base}.c (gcno=${gcno:-absent}, gcda=${gcda:-absent})" >&2
+    missing_inventory=1
+  fi
+done
+if [ "$missing_inventory" -ne 0 ]; then
   exit 1
 fi
 
@@ -107,16 +190,20 @@ if command -v gcovr >/dev/null 2>&1; then
   echo "-- using gcovr --"
   gcovr --root "$workspace" \
     --filter "$workspace/src/" \
-    --object-directory "$unit_build" \
     --print-summary \
-    "$unit_build" \
+    "$unit_build" "$module_build" \
     && report_ok=1
 elif command -v lcov >/dev/null 2>&1; then
   echo "-- using lcov --"
   info="$unit_build/coverage.info"
   lcov --capture --directory "$unit_build" --base-directory "$workspace" \
-    --output-file "$info" --rc branch_coverage=0 \
+    --output-file "$info.unit" --rc branch_coverage=0 \
     --ignore-errors gcov,source,empty,unused,negative,mismatch
+  lcov --capture --directory "$module_build" --base-directory "$workspace" \
+    --output-file "$info.server" --rc branch_coverage=0 \
+    --ignore-errors gcov,source,empty,unused,negative,mismatch
+  lcov --add-tracefile "$info.unit" --add-tracefile "$info.server" \
+    --output-file "$info"
   lcov --extract "$info" "$workspace/src/*" --output-file "$info.src" \
     --ignore-errors unused
   lcov --list "$info.src" && report_ok=1
@@ -128,7 +215,7 @@ else
   echo "-- using raw gcov (no gcovr/lcov found) --"
   for src in "$workspace"/src/*.c; do
     base="$(basename "$src" .c)"
-    gcno="$(find "$unit_build" -name "${base}.gcno" | head -1)"
+    gcno="$(find "$unit_build" "$module_build" -name "${base}.gcno" | head -1)"
     [ -z "$gcno" ] && continue
     (cd "$(dirname "$gcno")" && gcov -r "$base" 2>/dev/null | grep -A1 "File.*${base}\.c") || true
     report_ok=1
@@ -141,3 +228,7 @@ if [ "$report_ok" -ne 1 ]; then
 fi
 
 echo "== coverage.sh done =="
+
+# Do this last: partial data is useful for diagnosis, but a coverage report
+# must never turn a late unit failure into a passing command.
+exit "$suite_rc"
