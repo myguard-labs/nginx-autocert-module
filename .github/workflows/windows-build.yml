@@ -1,4 +1,4 @@
-# sync-sha: 92f6e1e40bfd33d1c29c1b29fe53c959f69adcc334eaf8ea0d073fac80a55ef1
+# sync-sha: 7fa9f646aa79aab1de55c7f66698df94dba1bc34cc4e32ccdd11c9397dee39ef
 name: Windows build
 
 # Native Windows port gate (W17). Proves the module compiles and links on
@@ -469,6 +469,20 @@ jobs:
           New-Item -ItemType Directory -Force `
             -Path conf, logs, temp, temp/store | Out-Null
 
+          # ABSOLUTE store path, with forward slashes. A relative one is
+          # resolved against the CONFIG FILE's directory, not the -p prefix, so
+          # "temp/store" became "./conf/temp/store" and the driver failed with
+          # "cannot open/create store dir ... (31: A device attached to the
+          # system is not functioning)" -- ERROR_GEN_FAILURE, which is what
+          # win32 reports here for a path that is not there, not a hardware
+          # fault. The token was then never seeded and the readiness wait
+          # timed out.
+          #
+          # The directive-table step above gets away with "temp/store" because
+          # nginx -t never opens the store; this is the first step that runs
+          # the server for real.
+          $store = ((Resolve-Path temp/store).Path -replace '\\', '/')
+
           # worker_processes 1: this test is about the challenge-serve path.
           # The N>1 singleton assertion is W19 and needs its own config.
           # No 'user' directive -- nginx ignores it on win32 (and warns).
@@ -476,7 +490,7 @@ jobs:
             'error_log logs/error.log notice;',
             'events { worker_connections 64; }',
             'http {',
-            '    autocert_store_path temp/store;',
+            "    autocert_store_path $store;",
             "    autocert_test_challenge $token `"$keyauth`";",
             '    server {',
             "        listen $port;",
