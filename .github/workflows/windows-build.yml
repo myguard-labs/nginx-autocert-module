@@ -1,4 +1,4 @@
-# sync-sha: b093434b34ecf695b8a88e57aca4814dfd368f2039a03355a144b51301be1ff1
+# sync-sha: b44f84e82220a215fe8707c8f4f82665b10403d10af530f2898b806a95677a53
 name: Windows build
 
 # Native Windows port gate (W17). Proves the module compiles and links on
@@ -81,7 +81,13 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           $tarball = "nginx-$env:NGINX_VERSION.tar.gz"
-          Invoke-WebRequest -Uri "https://nginx.org/download/$tarball" -OutFile $tarball
+          # Bounded: pwsh 7.4+ has no -TimeoutSec and both replacements default
+          # to indefinite. OperationTimeoutSeconds is a per-read stall limit,
+          # not a total-transfer cap, so a slow-but-progressing download is
+          # unaffected -- only a wedged one dies.
+          Invoke-WebRequest -Uri "https://nginx.org/download/$tarball" `
+            -OutFile $tarball `
+            -ConnectionTimeoutSeconds 30 -OperationTimeoutSeconds 60
 
           # Same rule as the Linux fetches: a changed upstream archive fails the
           # build rather than getting compiled. -ne on the string compare is
@@ -153,7 +159,8 @@ jobs:
             $tar = "$($d.name).tar.gz"
             # Skip the transfer on a cache hit; the hash check below still runs.
             if (-not (Test-Path $tar)) {
-              Invoke-WebRequest -Uri $d.url -OutFile $tar
+              Invoke-WebRequest -Uri $d.url -OutFile $tar `
+                -ConnectionTimeoutSeconds 30 -OperationTimeoutSeconds 60
             }
             $actual = (Get-FileHash $tar -Algorithm SHA256).Hash.ToLower()
             if ($actual -ne $d.sha) {
@@ -564,7 +571,12 @@ jobs:
             $base = "http://127.0.0.1:$port/.well-known/acme-challenge"
 
             Write-Host "== fetch valid token =="
-            $r = Invoke-WebRequest -Uri "$base/$token" -UseBasicParsing
+            # Bounded: pwsh 7.4+ dropped -TimeoutSec, and both replacement
+            # timeouts default to INDEFINITE. An unbounded request against a
+            # wedged worker would eat the whole job timeout instead of failing
+            # here with a usable message.
+            $r = Invoke-WebRequest -Uri "$base/$token" -UseBasicParsing `
+                   -ConnectionTimeoutSeconds 10 -OperationTimeoutSeconds 10
             if ($r.Content -ne $keyauth) {
               throw "wrong keyauth: got '$($r.Content)' want '$keyauth'"
             }
@@ -591,7 +603,9 @@ jobs:
             # dies instead of asserting.
             function Get-Status([string]$uri) {
               (Invoke-WebRequest -Uri $uri -UseBasicParsing `
-                 -SkipHttpErrorCheck).StatusCode
+                 -SkipHttpErrorCheck `
+                 -ConnectionTimeoutSeconds 10 `
+                 -OperationTimeoutSeconds 10).StatusCode
             }
 
             Write-Host "== unknown token -> 404 =="
