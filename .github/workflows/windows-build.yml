@@ -1,4 +1,4 @@
-# sync-sha: 7fa9f646aa79aab1de55c7f66698df94dba1bc34cc4e32ccdd11c9397dee39ef
+# sync-sha: b093434b34ecf695b8a88e57aca4814dfd368f2039a03355a144b51301be1ff1
 name: Windows build
 
 # Native Windows port gate (W17). Proves the module compiles and links on
@@ -491,6 +491,12 @@ jobs:
             'events { worker_connections 64; }',
             'http {',
             "    autocert_store_path $store;",
+            # Point the CA at a dead loopback port. This test is about serving
+            # a seeded challenge, not about issuance, and the default CA is
+            # Let's Encrypt PRODUCTION -- without this the driver tries to
+            # register a real ACME account on every CI run. It fails harmlessly
+            # either way, but CI has no business dialling a live CA.
+            '    autocert_ca https://127.0.0.1:1/directory;',
             "    autocert_test_challenge $token `"$keyauth`";",
             '    server {',
             "        listen $port;",
@@ -566,7 +572,12 @@ jobs:
 
             # Content-Length must match the keyauth exactly -- a truncated or
             # padded body with a 200 would otherwise pass the check above.
-            $clen = [int]$r.Headers['Content-Length']
+            #
+            # The Headers indexer yields a String[] (HTTP headers are
+            # multi-valued), so casting it straight to [int] throws
+            # "Cannot convert ... System.String[] ... to type System.Int32".
+            # Take the first value explicitly.
+            $clen = [int](@($r.Headers['Content-Length'])[0])
             if ($clen -ne $keyauth.Length) {
               throw "Content-Length $clen != $($keyauth.Length)"
             }
