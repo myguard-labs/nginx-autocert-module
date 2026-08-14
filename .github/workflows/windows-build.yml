@@ -1,4 +1,4 @@
-# sync-sha: 74a76faed454bf5095c75f75ae232b336b792e4a2e582b0b054a7483e47322e5
+# sync-sha: 03aeefa57a946e02803bff1c1e99593a9c67ba5e31dc2327f47697fe817e0b2f
 name: Windows build
 
 # Native Windows port gate (W17). Proves the module compiles and links on
@@ -898,25 +898,31 @@ jobs:
             -Recurse | Select-Object -First 1
           if (-not $pebbleExe) { throw "pebble-windows-amd64.zip did not contain an exe" }
 
-          # Pebble's CA cert is a static file in the repo, not something
-          # `docker cp` extracts from a running container on this host. Pull
-          # it directly from the same tag as the binary.
-          Write-Host "== fetch Pebble CA cert =="
-          Invoke-WebRequest `
-            -Uri 'https://raw.githubusercontent.com/letsencrypt/pebble/v2.10.1/test/certs/pebble.minica.pem' `
-            -OutFile "$root/ca.pem" `
-            -ConnectionTimeoutSeconds 30 -OperationTimeoutSeconds 60
-
-          # Pebble's own TLS cert/key ship inside the same release archive
-          # under test/certs/localhost -- reused as-is, same as the bash
-          # version does from inside the container image.
-          $pebbleCert = Get-ChildItem -Path "$root/pebble" -Recurse -Filter 'cert.pem' |
-            Where-Object { $_.FullName -match 'localhost' } | Select-Object -First 1
-          $pebbleKey  = Get-ChildItem -Path "$root/pebble" -Recurse -Filter 'key.pem' |
-            Where-Object { $_.FullName -match 'localhost' } | Select-Object -First 1
-          if (-not $pebbleCert -or -not $pebbleKey) {
-            throw "pebble-windows-amd64.zip did not contain test/certs/localhost/{cert,key}.pem"
+          # The release zip ships ONLY the binary -- test/certs/ is repo
+          # content, not release content. The bash version gets all three PEMs
+          # from inside the container image; here every one is fetched from the
+          # SAME tag as the binary, which keeps the leaf and its issuer paired.
+          # (Verified against v2.10.1: `openssl verify -CAfile pebble.minica.pem
+          # cert.pem` is OK, and the leaf's SANs are DNS:localhost, DNS:pebble,
+          # IP Address:127.0.0.1 -- the IP SAN is what lets the module validate
+          # https://127.0.0.1:14000/dir without challtestsrv resolving `pebble.`)
+          Write-Host "== fetch Pebble CA cert and TLS keypair (tag v2.10.1) =="
+          $pebbleCertPath = "$root/pebble-cert.pem"
+          $pebbleKeyPath  = "$root/pebble-key.pem"
+          $pebbleRaw = 'https://raw.githubusercontent.com/letsencrypt/pebble/v2.10.1/test/certs'
+          foreach ($f in @(
+            @{ Uri = "$pebbleRaw/pebble.minica.pem";     Out = "$root/ca.pem" },
+            @{ Uri = "$pebbleRaw/localhost/cert.pem";    Out = $pebbleCertPath },
+            @{ Uri = "$pebbleRaw/localhost/key.pem";     Out = $pebbleKeyPath }
+          )) {
+            Invoke-WebRequest -Uri $f.Uri -OutFile $f.Out `
+              -ConnectionTimeoutSeconds 30 -OperationTimeoutSeconds 60
+            if (-not (Test-Path $f.Out) -or (Get-Item $f.Out).Length -eq 0) {
+              throw "failed to fetch $($f.Uri)"
+            }
           }
+          $pebbleCert = Get-Item $pebbleCertPath
+          $pebbleKey  = Get-Item $pebbleKeyPath
 
           # tlsPort points at a closed port so tls-alpn-01 cannot be reached:
           # the VA only hits httpPort for this challenge (same intent as the
