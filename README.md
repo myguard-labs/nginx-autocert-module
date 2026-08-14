@@ -697,7 +697,7 @@ for one run rather than several independent ones.
 
 | Workflow | Trigger | Gates |
 |---|---|---|
-| `build-test.yml` | PR (via `ci.yml`) | shellcheck/cppcheck/actionlint + stamp check, build on **nginx and angie**, `.so` dlopens, bad config rejected, `-Werror` strict compile, ABI check, unit tests (12 binaries), Guard suite, **Pebble e2e suite**; `Validation` alone also runs daily at 03:17 UTC |
+| `build-test.yml` | PR (via `ci.yml`) | shellcheck/cppcheck/actionlint + stamp check, build on **nginx and angie**, `.so` dlopens, bad config rejected, `-Werror` strict compile, ABI check, unit tests, Guard suite, **Pebble e2e suite**; `Validation` alone also runs daily at 03:17 UTC |
 | `security-scanners.yml` | PR (via `ci.yml`) | flawfinder ≥4 blocks, clang-tidy, semgrep ≥WARNING |
 | `lint.yml` | PR (via `ci.yml`) | the same `ci/linter/` checkers the pre-commit hook runs — shell, Python, YAML, nginx conventions, spelling, docs drift, sync-stamp and the workflow-policy checks (ports, runners, cadence, secrets). Blocking set is a deliberate subset (`LINT_ONLY`); the `c` checker is excluded permanently, since `security-scanners.yml` already covers `src/`. Full table: [`ci/linter/README.md`](ci/linter/README.md) |
 | `fuzzing.yml` | PR (via `ci.yml`), manual | replay every past crash, then 30s fresh fuzz per target (JSON + HTTP + base64url). Runs beside the e2e critical path, so it adds nothing to the merge budget; the 14400s/target deep fuzz stays in `ci-deep.yml` |
