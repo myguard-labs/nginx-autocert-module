@@ -1974,6 +1974,7 @@ ngx_autocert_renameat2(int oldfd, const char *oldp, int newfd,
     wchar_t                       wnewp[NGX_MAX_PATH];
     int                           n;
     size_t                        struct_len;
+    size_t                        name_off;
     unsigned char
         buf[sizeof(NGX_AUTOCERT_FILE_ATTRIBUTE_TAG_INFO)
             + sizeof(wchar_t) * NGX_MAX_PATH + 32];
@@ -2023,13 +2024,33 @@ ngx_autocert_renameat2(int oldfd, const char *oldp, int newfd,
          * does for opens, keeping the rename inside the pinned dir tree
          * rather than trusting a path string.
          */
-        struct {
+        struct ngx_autocert_rename_hdr_s {
             BOOLEAN  ReplaceIfExists;
             HANDLE   RootDirectory;
             ULONG    FileNameLength;
         } *hdr;
 
-        struct_len = sizeof(*hdr) + (size_t) (n - 1) * sizeof(wchar_t);
+        /*
+         * The FileName array starts at offsetof(FileNameLength) +
+         * sizeof(ULONG) ON THE WIRE — the real kernel layout has no padding
+         * between FileNameLength and FileName. sizeof(*hdr) is NOT that
+         * offset: the compiler pads the struct's overall size up to
+         * HANDLE's 8-byte alignment (24 on LLP64/64-bit vs. the true
+         * 20-byte header), so copying/sizing off sizeof(*hdr) writes the
+         * name 4 bytes past where NtSetInformationFile expects it, on top
+         * of the ULONG FileNameLength that precedes it. The kernel then
+         * reads padding as text and rejects the call. Do NOT "simplify"
+         * this back to sizeof(*hdr) — that is the exact bug this comment is
+         * warning about (diagnosed against MSVC/x64,
+         * offsetof(RootDirectory)=8, offsetof(FileNameLength)=16,
+         * sizeof(*hdr)=24, true FileName offset=20). offsetof() keeps this
+         * correct on 32-bit too (FileName offset=12 there) without a magic
+         * number.
+         */
+        name_off = offsetof(struct ngx_autocert_rename_hdr_s, FileNameLength)
+                   + sizeof(ULONG);
+
+        struct_len = name_off + (size_t) (n - 1) * sizeof(wchar_t);
         if (struct_len > sizeof(buf)) {
             _close(fd);
             SetLastError(ERROR_BUFFER_OVERFLOW);
@@ -2041,7 +2062,7 @@ ngx_autocert_renameat2(int oldfd, const char *oldp, int newfd,
         hdr->ReplaceIfExists = (flags & RENAME_NOREPLACE) ? FALSE : TRUE;
         hdr->RootDirectory = newdirh;
         hdr->FileNameLength = (ULONG) ((n - 1) * sizeof(wchar_t));
-        ngx_memcpy(buf + sizeof(*hdr), wnewp, hdr->FileNameLength);
+        ngx_memcpy(buf + name_off, wnewp, hdr->FileNameLength);
 
         ngx_memzero(&iosb, sizeof(iosb));
         status = ngx_autocert_pfn_NtSetInformationFile(oldh, &iosb, buf,
@@ -2097,6 +2118,7 @@ ngx_autocert_linkat(int oldfd, const char *oldpath, int newfd,
     wchar_t                       wnewp[NGX_MAX_PATH];
     int                           n;
     size_t                        struct_len;
+    size_t                        name_off;
     unsigned char
         buf[sizeof(NGX_AUTOCERT_FILE_ATTRIBUTE_TAG_INFO)
             + sizeof(wchar_t) * NGX_MAX_PATH + 32];
@@ -2146,13 +2168,22 @@ ngx_autocert_linkat(int oldfd, const char *oldpath, int newfd,
          * hardcoded FALSE (see the function doc comment) — this is the one
          * field that must NOT mirror the rename body's flag-derived value.
          */
-        struct {
+        struct ngx_autocert_link_hdr_s {
             BOOLEAN  ReplaceIfExists;
             HANDLE   RootDirectory;
             ULONG    FileNameLength;
         } *hdr;
 
-        struct_len = sizeof(*hdr) + (size_t) (n - 1) * sizeof(wchar_t);
+        /*
+         * Same tail-padding trap as ngx_autocert_renameat2 above (see that
+         * comment): sizeof(*hdr) over-counts the struct's padded size, not
+         * the true on-the-wire FileName offset. Derive it from the real
+         * field offset instead of trusting sizeof().
+         */
+        name_off = offsetof(struct ngx_autocert_link_hdr_s, FileNameLength)
+                   + sizeof(ULONG);
+
+        struct_len = name_off + (size_t) (n - 1) * sizeof(wchar_t);
         if (struct_len > sizeof(buf)) {
             _close(fd);
             SetLastError(ERROR_BUFFER_OVERFLOW);
@@ -2164,7 +2195,7 @@ ngx_autocert_linkat(int oldfd, const char *oldpath, int newfd,
         hdr->ReplaceIfExists = FALSE;
         hdr->RootDirectory = newdirh;
         hdr->FileNameLength = (ULONG) ((n - 1) * sizeof(wchar_t));
-        ngx_memcpy(buf + sizeof(*hdr), wnewp, hdr->FileNameLength);
+        ngx_memcpy(buf + name_off, wnewp, hdr->FileNameLength);
 
         ngx_memzero(&iosb, sizeof(iosb));
         status = ngx_autocert_pfn_NtSetInformationFile(oldh, &iosb, buf,
