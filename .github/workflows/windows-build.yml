@@ -1,4 +1,4 @@
-# sync-sha: 4e946e3549f7329af15d894d14f5289d06c40ef737b7f1f8eac7378ec23dc006
+# sync-sha: 74a76faed454bf5095c75f75ae232b336b792e4a2e582b0b054a7483e47322e5
 name: Windows build
 
 # Native Windows port gate (W17). Proves the module compiles and links on
@@ -847,6 +847,307 @@ jobs:
             Get-Process -Name nginx -ErrorAction SilentlyContinue |
               Stop-Process -Force -ErrorAction SilentlyContinue
             $ErrorActionPreference = $prev
+          }
+
+          exit 0
+
+      # W18b: full ACME issuance (RFC 8738 IP-literal), ported from the POSIX
+      # e2e script ci/tests/e2e/ipv4-issue.sh. That script runs Pebble and
+      # pebble-challtestsrv as Linux Docker containers on a docker network,
+      # using the network's gateway IP as both the ordered identifier and the
+      # address the VA dials. None of that exists here:
+      #
+      #  - windows-latest hosts no Linux containers. Pebble ships a native
+      #    windows-amd64 binary (CGO_ENABLED=0 build), fetched below instead
+      #    of built or dockerized.
+      #  - challtestsrv exists ONLY to resolve the CA's own "pebble" hostname
+      #    for the module's ACME client; every challenge listener is disabled
+      #    in the bash version (-http01 "" -https01 "" -tlsalpn01 ""). Pointed
+      #    directly at https://127.0.0.1:14000/dir there is nothing left for
+      #    it to do, so it is dropped rather than ported.
+      #  - HOST_IP there is the docker network gateway. On this runner the
+      #    ordered identifier is 127.0.0.1: both nginx and Pebble's VA are on
+      #    the same host, so the VA's http-01 GET reaches nginx over loopback
+      #    without any network setup. Confirmed working in this job (see the
+      #    "authorization ... is valid" assertion below) rather than assumed.
+      - name: Runtime ACME issuance test (IPv4 literal, RFC 8738)
+        shell: pwsh
+        working-directory: nginx-${{ env.NGINX_VERSION }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          $root   = 'w18b'
+          $hostIp = '127.0.0.1'
+          $httpPort  = 5002
+          $pebblePort = 14000
+
+          Remove-Item -Recurse -Force $root -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Force `
+            -Path $root, "$root/conf", "$root/logs", "$root/store", `
+                  "$root/pebble" | Out-Null
+
+          # --- fetch Pebble (native windows/amd64, no Docker, no build) ---
+          Write-Host "== fetch Pebble v2.10.1 =="
+          $pebbleZip = "$root/pebble/pebble.zip"
+          Invoke-WebRequest `
+            -Uri 'https://github.com/letsencrypt/pebble/releases/download/v2.10.1/pebble-windows-amd64.zip' `
+            -OutFile $pebbleZip `
+            -ConnectionTimeoutSeconds 30 -OperationTimeoutSeconds 60
+          Expand-Archive -Path $pebbleZip -DestinationPath "$root/pebble" -Force
+          $pebbleExe = Get-ChildItem -Path "$root/pebble" -Filter 'pebble*.exe' `
+            -Recurse | Select-Object -First 1
+          if (-not $pebbleExe) { throw "pebble-windows-amd64.zip did not contain an exe" }
+
+          # Pebble's CA cert is a static file in the repo, not something
+          # `docker cp` extracts from a running container on this host. Pull
+          # it directly from the same tag as the binary.
+          Write-Host "== fetch Pebble CA cert =="
+          Invoke-WebRequest `
+            -Uri 'https://raw.githubusercontent.com/letsencrypt/pebble/v2.10.1/test/certs/pebble.minica.pem' `
+            -OutFile "$root/ca.pem" `
+            -ConnectionTimeoutSeconds 30 -OperationTimeoutSeconds 60
+
+          # Pebble's own TLS cert/key ship inside the same release archive
+          # under test/certs/localhost -- reused as-is, same as the bash
+          # version does from inside the container image.
+          $pebbleCert = Get-ChildItem -Path "$root/pebble" -Recurse -Filter 'cert.pem' |
+            Where-Object { $_.FullName -match 'localhost' } | Select-Object -First 1
+          $pebbleKey  = Get-ChildItem -Path "$root/pebble" -Recurse -Filter 'key.pem' |
+            Where-Object { $_.FullName -match 'localhost' } | Select-Object -First 1
+          if (-not $pebbleCert -or -not $pebbleKey) {
+            throw "pebble-windows-amd64.zip did not contain test/certs/localhost/{cert,key}.pem"
+          }
+
+          # tlsPort points at a closed port so tls-alpn-01 cannot be reached:
+          # the VA only hits httpPort for this challenge (same intent as the
+          # bash version's AC_PORT_5998).
+          $pebbleConfig = @{
+            pebble = @{
+              listenAddress               = "0.0.0.0:$pebblePort"
+              managementListenAddress     = '0.0.0.0:15000'
+              certificate                 = $pebbleCert.FullName -replace '\\', '/'
+              privateKey                  = $pebbleKey.FullName -replace '\\', '/'
+              httpPort                    = $httpPort
+              tlsPort                     = 5998
+              ocspResponderURL            = ''
+              externalAccountBindingRequired = $false
+            }
+          } | ConvertTo-Json -Depth 5
+          Set-Content -Encoding ascii -Path "$root/pebble-config.json" -Value $pebbleConfig
+
+          Write-Host "== start Pebble (VA -> http-01 at ${hostIp}:${httpPort}) =="
+          $pebbleOut = "$root/pebble-stdout.log"
+          $pebbleErr = "$root/pebble-stderr.log"
+          # Start-Process has no -Environment parameter; set the two Pebble
+          # env vars in THIS process so the child inherits them, then restore
+          # afterwards so later steps see an unmodified environment.
+          $prevNoSleep    = $env:PEBBLE_VA_NOSLEEP
+          $prevNonceReject = $env:PEBBLE_WFE_NONCEREJECT
+          $env:PEBBLE_VA_NOSLEEP = '1'
+          $env:PEBBLE_WFE_NONCEREJECT = '0'
+          # Foreground process on Windows too -- same trap as nginx.exe below:
+          # launch detached, keep the handle, kill it in finally.
+          $pebbleProc = Start-Process -FilePath $pebbleExe.FullName `
+            -ArgumentList '-config', (Resolve-Path "$root/pebble-config.json").Path, `
+                           '-strict' `
+            -RedirectStandardOutput $pebbleOut -RedirectStandardError $pebbleErr `
+            -PassThru -NoNewWindow
+          $env:PEBBLE_VA_NOSLEEP = $prevNoSleep
+          $env:PEBBLE_WFE_NONCEREJECT = $prevNonceReject
+          Start-Sleep -Seconds 2
+          if ($pebbleProc.HasExited) {
+            Get-Content $pebbleOut, $pebbleErr -ErrorAction SilentlyContinue | Write-Host
+            throw "pebble.exe exited immediately with $($pebbleProc.ExitCode)"
+          }
+
+          try {
+            Write-Host "== wait for Pebble directory =="
+            $up = $false
+            foreach ($i in 1..30) {
+              try {
+                Invoke-WebRequest -Uri "https://${hostIp}:${pebblePort}/dir" `
+                  -SkipCertificateCheck -UseBasicParsing `
+                  -ConnectionTimeoutSeconds 5 -OperationTimeoutSeconds 5 |
+                  Out-Null
+                $up = $true; break
+              } catch { Start-Sleep -Seconds 1 }
+            }
+            if (-not $up) {
+              Get-Content $pebbleOut, $pebbleErr -ErrorAction SilentlyContinue | Write-Host
+              throw "Pebble did not come up"
+            }
+
+            # --- config: the IP literal is the server_name; the listener
+            # binds it on the VA's httpPort so the http-01 GET lands. ---
+            $store = ((Resolve-Path "$root/store").Path -replace '\\', '/')
+            $ca    = ((Resolve-Path "$root/ca.pem").Path -replace '\\', '/')
+            $lines = @(
+              'error_log logs/error.log info;',
+              'events {}',
+              'http {',
+              '    autocert on;',
+              '    autocert_contact admin@example.com;',
+              "    autocert_ca https://${hostIp}:${pebblePort}/dir;",
+              "    autocert_ca_trusted_certificate $ca;",
+              "    autocert_store_path $store;",
+              '    autocert_challenge http-01;',
+              '    server {',
+              "        listen $httpPort;",
+              "        server_name ${hostIp};",
+              '        autocert on;',
+              '    }',
+              '}'
+            )
+            Set-Content -Encoding ascii -Path "$root/conf/nginx.conf" -Value $lines
+
+            Write-Host "== config test =="
+            $prev = $ErrorActionPreference
+            $ErrorActionPreference = 'Continue'
+            $tOut = (& .\objs\nginx.exe -p $root -c conf/nginx.conf -t 2>&1 | Out-String)
+            $tRc  = $LASTEXITCODE
+            $ErrorActionPreference = $prev
+            Write-Host $tOut
+            if ($tRc -ne 0) { throw "nginx -t rejected the IPv4-issuance config" }
+
+            Write-Host "== start: register account, run http-01 order for $hostIp =="
+            # nginx does NOT daemonize on win32 -- see the HTTP-01 step above.
+            $proc = Start-Process -FilePath (Resolve-Path .\objs\nginx.exe) `
+                      -ArgumentList '-p', $root, '-c', 'conf/nginx.conf' `
+                      -PassThru -NoNewWindow
+            Start-Sleep -Seconds 2
+            if ($proc.HasExited) {
+              if (Test-Path "$root/logs/error.log") {
+                Get-Content "$root/logs/error.log" | Write-Host
+              }
+              throw "nginx.exe exited immediately with $($proc.ExitCode)"
+            }
+
+            try {
+              $log = "$root/logs/error.log"
+
+              $ok = $false
+              foreach ($i in 1..60) {
+                if ((Test-Path $log) -and
+                    (Select-String -Path $log -Pattern 'autocert: authorization for .* is valid' -Quiet)) {
+                  $ok = $true; break
+                }
+                if ((Test-Path $log) -and
+                    (Select-String -Path $log `
+                       -Pattern 'autocert: ACME order failed|authorization poll timed out|authorization did not become valid' `
+                       -Quiet)) {
+                  break
+                }
+                Start-Sleep -Milliseconds 500
+              }
+              if (Test-Path $log) {
+                Write-Host "== helper log =="
+                Select-String -Path $log -Pattern 'autocert' |
+                  ForEach-Object { Write-Host $_.Line }
+              }
+              if (-not $ok) {
+                Get-Content $pebbleOut, $pebbleErr -ErrorAction SilentlyContinue |
+                  Select-Object -Last 40 | Write-Host
+                throw "authorization did not reach valid for the IP identifier"
+              }
+              Write-Host "OK authorization reached valid (http-01 served at the IP literal)"
+
+              $issued = $false
+              foreach ($i in 1..60) {
+                if ((Test-Path $log) -and
+                    (Select-String -Path $log -SimpleMatch `
+                       -Pattern 'autocert: certificate provisioned for' -Quiet)) {
+                  $issued = $true; break
+                }
+                if ((Test-Path $log) -and
+                    (Select-String -Path $log `
+                       -Pattern 'autocert: (finalize failed|order poll timed out|order did not become valid|certificate download failed|ACME order failed)' `
+                       -Quiet)) {
+                  break
+                }
+                Start-Sleep -Milliseconds 500
+              }
+              if (-not $issued) {
+                Get-Content $pebbleOut, $pebbleErr -ErrorAction SilentlyContinue |
+                  Select-Object -Last 40 | Write-Host
+                throw "certificate was not provisioned for the IP identifier"
+              }
+              Write-Host "OK certificate provisioned (finalize -> poll -> download -> store)"
+
+              # Pebble echoes the ordered identifier back into its own log.
+              # Seeing a "dns" identifier holding the dotted quad proves the
+              # module sent {"type":"dns"} instead of {"type":"ip"} -- an
+              # RFC 8738 violation that STILL issues a working cert, so no
+              # other assertion here catches it. Native Pebble has no `docker
+              # logs`; its stdout/stderr were redirected to files above.
+              $pebbleLog = Get-Content $pebbleOut, $pebbleErr -ErrorAction SilentlyContinue -Raw
+              if ($pebbleLog -match [regex]::Escape('"type":"dns","value":"' + $hostIp + '"')) {
+                throw "module ordered the IP as a dns identifier (RFC 8738 violation)"
+              }
+              Write-Host "OK the IP was ordered as an 'ip' identifier, not 'dns'"
+
+              # An IPv4 literal is stored verbatim (only IPv6 segments are
+              # mangled).
+              $key   = "$root/store/$hostIp/privkey.pem"
+              $chain = "$root/store/$hostIp/fullchain.pem"
+              if (-not (Test-Path $key))   { throw "missing $key" }
+              if (-not (Test-Path $chain)) { throw "missing $chain" }
+              Write-Host "OK store segment is the verbatim IPv4 literal ($hostIp)"
+
+              # openssl.exe is not on PATH on windows-latest; use the vcpkg
+              # build staged for this job's own nginx link (OPENSSL_ROOT was
+              # exported to GITHUB_ENV by the "Locate OpenSSL" step above).
+              $openssl = "$env:OPENSSL_ROOT\tools\openssl\openssl.exe"
+              if (-not (Test-Path $openssl)) {
+                $openssl = (Get-ChildItem -Path $env:OPENSSL_ROOT -Recurse -Filter 'openssl.exe' `
+                              -ErrorAction SilentlyContinue | Select-Object -First 1).FullName
+              }
+              if (-not $openssl -or -not (Test-Path $openssl)) {
+                throw "openssl.exe not found under `$env:OPENSSL_ROOT ($env:OPENSSL_ROOT)"
+              }
+
+              # The SAN must be an iPAddress, NOT a DNS name -- X509_check_host
+              # never matches an iPAddress SAN, so a cert carrying
+              # "DNS:127.0.0.1" would fail to serve even though it looks right
+              # by eye. Assert the SAN *type* explicitly, both ways.
+              $san = & $openssl x509 -in $chain -noout -ext subjectAltName 2>$null
+              $sanText = $san -join "`n"
+              if ($sanText -notmatch [regex]::Escape("IP Address:$hostIp")) {
+                throw "leaf SAN has no iPAddress:$hostIp (got: $sanText)"
+              }
+              if ($sanText -match 'DNS:') {
+                throw "leaf SAN carries a DNS name for an IP identifier (got: $sanText)"
+              }
+              Write-Host "OK leaf SAN is an iPAddress (RFC 8738), with no DNS SAN"
+
+              $certPub = & $openssl x509 -in $chain -noout -pubkey 2>$null
+              $keyPub  = & $openssl pkey -in $key -pubout 2>$null
+              if (($certPub -join "`n") -ne ($keyPub -join "`n")) {
+                throw "issued certificate pubkey != stored private key"
+              }
+              Write-Host "OK issued certificate public key matches the stored private key"
+
+              Write-Host "full IPv4-literal issuance verified end-to-end (RFC 8738, http-01)"
+            }
+            finally {
+              $ErrorActionPreference = 'Continue'
+              & .\objs\nginx.exe -p $root -c conf/nginx.conf -s stop 2>&1 |
+                Out-String | Write-Host
+              if (-not $proc.WaitForExit(10000)) {
+                Write-Host "nginx did not exit on -s stop; killing"
+                Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+              }
+              Get-Process -Name nginx -ErrorAction SilentlyContinue |
+                Stop-Process -Force -ErrorAction SilentlyContinue
+              $ErrorActionPreference = $prev
+            }
+          }
+          finally {
+            if ($pebbleProc -and -not $pebbleProc.HasExited) {
+              Stop-Process -Id $pebbleProc.Id -Force -ErrorAction SilentlyContinue
+              $pebbleProc.WaitForExit(10000) | Out-Null
+            }
+            Get-Process -Name 'pebble*' -ErrorAction SilentlyContinue |
+              Stop-Process -Force -ErrorAction SilentlyContinue
           }
 
           exit 0
