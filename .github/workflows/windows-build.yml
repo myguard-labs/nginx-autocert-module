@@ -1,4 +1,4 @@
-# sync-sha: 48a94be1ee085cb29cec3fefe56dbf3e6a52af5b14185005d5550dd5ce678609
+# sync-sha: 0cf0a45258a54c8ba8ca6fb4fc4b92674a1d626e5d8c1060ba3b70b61d588355
 name: Windows build
 
 # Native Windows port gate (W17). Proves the module compiles and links on
@@ -1131,17 +1131,73 @@ jobs:
               if (-not (Test-Path $chain)) { throw "missing $chain" }
               Write-Host "OK store segment is the verbatim IPv4 literal ($hostIp)"
 
-              # openssl.exe is not on PATH on windows-latest; use the vcpkg
-              # build staged for this job's own nginx link (OPENSSL_ROOT was
-              # exported to GITHUB_ENV by the "Locate OpenSSL" step above).
-              $openssl = "$env:OPENSSL_ROOT\tools\openssl\openssl.exe"
-              if (-not (Test-Path $openssl)) {
-                $openssl = (Get-ChildItem -Path $env:OPENSSL_ROOT -Recurse -Filter 'openssl.exe' `
-                              -ErrorAction SilentlyContinue | Select-Object -First 1).FullName
+              # openssl.exe is not on PATH on windows-latest, and OPENSSL_ROOT
+              # (vcpkg's x64-windows-static triplet) ships libraries only --
+              # the static triplet has no tools/apps output, so looking under
+              # it for openssl.exe always misses. DIAGNOSTIC: dump every
+              # candidate location before deciding, so a future drift in the
+              # runner image or vcpkg layout shows up in the log instead of
+              # as a silent throw.
+              Write-Host "== openssl.exe candidate search =="
+              $cmd = Get-Command openssl -ErrorAction SilentlyContinue
+              Write-Host ("Get-Command openssl: {0}" -f ($(if ($cmd) { $cmd.Source } else { '<not found>' })))
+              foreach ($root in @("$env:OPENSSL_ROOT", "$env:OPENSSL_STAGE",
+                                   'C:\vcpkg\installed\x64-windows-static',
+                                   'C:\vcpkg\installed\x64-windows',
+                                   'C:\Program Files\OpenSSL-Win64',
+                                   'C:\Program Files\OpenSSL',
+                                   'C:\Strawberry\c\bin')) {
+                if ($root -and (Test-Path $root)) {
+                  $hits = Get-ChildItem -Path $root -Recurse -Filter 'openssl.exe' `
+                            -ErrorAction SilentlyContinue
+                  foreach ($h in $hits) { Write-Host ("found: {0}" -f $h.FullName) }
+                }
+              }
+
+              # Ordered candidate list, first hit wins. Preference order:
+              #  1. PATH (Chocolatey/Strawberry openssl.exe, if the image has one)
+              #  2. This job's own OPENSSL_STAGE junction tree -- populated by
+              #     the "Locate OpenSSL" step, points at the same vcpkg tree,
+              #     kept as a candidate in case a future stage changes shape.
+              #  3. vcpkg's dynamic (non-static) triplet, which vcpkg installs
+              #     tools into even when the static triplet is selected for
+              #     linking.
+              #  4. Chocolatey's default OpenSSL-Win64 install location, used
+              #     by some windows-latest images.
+              $candidates = @(
+                $(if ($cmd) { $cmd.Source }),
+                "$env:OPENSSL_STAGE\openssl\tools\openssl\openssl.exe",
+                "$env:OPENSSL_ROOT\tools\openssl\openssl.exe",
+                'C:\vcpkg\installed\x64-windows\tools\openssl\openssl.exe',
+                'C:\Program Files\OpenSSL-Win64\bin\openssl.exe'
+              ) | Where-Object { $_ }
+
+              $openssl = $null
+              foreach ($c in $candidates) {
+                if (Test-Path $c) { $openssl = $c; break }
+              }
+              if (-not $openssl) {
+                # Last resort: recursive search under every root that exists,
+                # first hit wins.
+                foreach ($root in @("$env:OPENSSL_ROOT", "$env:OPENSSL_STAGE",
+                                     'C:\vcpkg\installed\x64-windows',
+                                     'C:\Program Files\OpenSSL-Win64',
+                                     'C:\Program Files\OpenSSL')) {
+                  if ($root -and (Test-Path $root)) {
+                    $hit = Get-ChildItem -Path $root -Recurse -Filter 'openssl.exe' `
+                             -ErrorAction SilentlyContinue | Select-Object -First 1
+                    if ($hit) { $openssl = $hit.FullName; break }
+                  }
+                }
               }
               if (-not $openssl -or -not (Test-Path $openssl)) {
-                throw "openssl.exe not found under `$env:OPENSSL_ROOT ($env:OPENSSL_ROOT)"
+                throw ("openssl.exe not found. Tried: " + (($candidates + @(
+                  "$env:OPENSSL_ROOT (recursive)", "$env:OPENSSL_STAGE (recursive)",
+                  'C:\vcpkg\installed\x64-windows (recursive)',
+                  'C:\Program Files\OpenSSL-Win64 (recursive)',
+                  'C:\Program Files\OpenSSL (recursive)')) -join '; '))
               }
+              Write-Host "using openssl at $openssl"
 
               # The SAN must be an iPAddress, NOT a DNS name -- X509_check_host
               # never matches an iPAddress SAN, so a cert carrying
