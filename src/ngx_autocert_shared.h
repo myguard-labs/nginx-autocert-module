@@ -482,6 +482,54 @@ ngx_autocert_win32_is_alpha(char c)
 
 
 /*
+ * Whether a configured dns-01 hook names a fully-qualified executable path.
+ * POSIX has one absolute form, rooted at '/'.  On win32, a leading separator
+ * alone is rooted at the current drive and C:foo is relative to C:'s current
+ * directory, so neither is safe for a worker whose CWD is unspecified.  Take
+ * only a drive root (C:/... or C:\\...) or a UNC server/share root.
+ */
+static ngx_inline ngx_int_t
+ngx_autocert_dns_hook_path_is_absolute(ngx_str_t *path)
+{
+#if (NGX_WIN32)
+    u_char  *p, *end, *share;
+
+    if (path->len >= 3 && ngx_autocert_win32_is_alpha(path->data[0])
+        && path->data[1] == ':'
+        && (path->data[2] == '/' || path->data[2] == '\\'))
+    {
+        return 1;
+    }
+
+    if (path->len < 5
+        || (path->data[0] != '/' && path->data[0] != '\\')
+        || (path->data[1] != '/' && path->data[1] != '\\'))
+    {
+        return 0;
+    }
+
+    p = path->data + 2;
+    end = path->data + path->len;
+    while (p < end && *p != '/' && *p != '\\') {
+        p++;
+    }
+    if (p == path->data + 2 || p == end) {
+        return 0;
+    }
+
+    share = ++p;
+    while (p < end && *p != '/' && *p != '\\') {
+        p++;
+    }
+
+    return p != share;
+#else
+    return path->len != 0 && path->data[0] == '/';
+#endif
+}
+
+
+/*
  * Fold '\' to '/' into `norm` (size `norm_cap`), the same '\'-vs-'/'
  * normalisation ngx_autocert_win32_classify_root() does as the FIRST step
  * before it looks at root syntax at all. Split out on its own because a

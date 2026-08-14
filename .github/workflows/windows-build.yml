@@ -1,4 +1,4 @@
-# sync-sha: d8b646d2ba424f6750c4ced965bc3b04794a1f764100e41d7b6fd9d6df5a212b
+# sync-sha: 57908a43d8a40aee48576ba488b33a528176fce2e9675a231e1ba53bff5ad488
 name: Windows build
 
 # Native Windows port gate (W17). Proves the module compiles and links on
@@ -436,6 +436,24 @@ jobs:
           Write-Conf 'autocert_store_path temp/store;'
           if ((Invoke-NginxTest) -ne 0) {
             throw "nginx -t rejected a valid autocert directive"
+          }
+
+          # DNS hooks must accept only fully-qualified Windows executable
+          # paths: drive-rooted and UNC are valid; current-drive-rooted,
+          # drive-relative and plain relative spellings are not.
+          Write-Conf 'autocert_dns_hook_add C:/hooks/add.exe; autocert_dns_hook_remove C:\\hooks\\remove.exe;'
+          if ((Invoke-NginxTest) -ne 0) {
+            throw "nginx -t rejected fully-qualified Windows DNS hook paths"
+          }
+          Write-Conf 'autocert_dns_hook_add \\\\server\\share\\add.exe; autocert_dns_hook_remove //server/share/remove.exe;'
+          if ((Invoke-NginxTest) -ne 0) {
+            throw "nginx -t rejected fully-qualified UNC DNS hook paths"
+          }
+          foreach ($hook in @('/hooks/add.exe', '\\hooks\\add.exe', 'C:hooks\\add.exe', 'hooks\\add.exe')) {
+            Write-Conf "autocert_dns_hook_add $hook;"
+            if ((Invoke-NginxTest) -eq 0) {
+              throw "nginx -t accepted a non-fully-qualified DNS hook path: $hook"
+            }
           }
 
           # Negative control: a bogus directive must be REJECTED. If this passes,
@@ -1542,6 +1560,20 @@ jobs:
           # Positive: a real directive must be accepted.
           write_conf 'autocert_store_path temp/store;'
           ./objs/nginx.exe -p . -c conf/nginx.conf -t
+
+          # The shared DNS-hook path predicate accepts drive and UNC roots,
+          # but refuses all spellings that depend on a current directory.
+          write_conf 'autocert_dns_hook_add C:/hooks/add.exe; autocert_dns_hook_remove C:\\hooks\\remove.exe;'
+          ./objs/nginx.exe -p . -c conf/nginx.conf -t
+          write_conf 'autocert_dns_hook_add \\\\server\\share\\add.exe; autocert_dns_hook_remove //server/share/remove.exe;'
+          ./objs/nginx.exe -p . -c conf/nginx.conf -t
+          for hook in '/hooks/add.exe' '\\hooks\\add.exe' 'C:hooks\\add.exe' 'hooks\\add.exe'; do
+            write_conf "autocert_dns_hook_add $hook;"
+            if ./objs/nginx.exe -p . -c conf/nginx.conf -t 2>&1; then
+              echo "negative control passed: accepted non-fully-qualified DNS hook: $hook"
+              exit 1
+            fi
+          done
 
           # Negative control: a bogus directive must be REJECTED, or the check
           # above proved nothing. `!` rather than `|| true` so an unexpected
