@@ -70,9 +70,10 @@ static int
 ngx_autocert_account_open_keydir(ngx_autocert_account_t *acct,
     char *norm, size_t norm_cap, const char **leaf)
 {
-    u_char  *path;
-    char    *slash, *comp;
-    int      dfd, nfd;
+    u_char       *path;
+    char         *slash, *comp;
+    const char   *rest;
+    int           dfd, nfd;
 
     path = acct->key_path.data;         /* NUL-terminated */
 
@@ -92,12 +93,13 @@ ngx_autocert_account_open_keydir(ngx_autocert_account_t *acct,
      * local: a stack-local here would leave *leaf dangling the moment this
      * function returns, and the caller dereferences it immediately. */
     dfd = ngx_autocert_split_root((const char *) path, norm, norm_cap,
-                                  (const char **) &comp);
+                                  &rest);
     if (dfd == -1) {
         ngx_log_error(NGX_LOG_ERR, acct->log, ngx_errno,
                       "autocert: open store root failed");
         return -1;
     }
+    comp = (char *) rest;
 
     /* Walk each "/"-separated directory component, pinning as we go. The final
      * component (after the last '/') is the leaf the caller opens itself. */

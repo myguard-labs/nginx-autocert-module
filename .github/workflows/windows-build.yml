@@ -1,4 +1,4 @@
-# sync-sha: 0cf0a45258a54c8ba8ca6fb4fc4b92674a1d626e5d8c1060ba3b70b61d588355
+# sync-sha: d8b646d2ba424f6750c4ced965bc3b04794a1f764100e41d7b6fd9d6df5a212b
 name: Windows build
 
 # Native Windows port gate (W17). Proves the module compiles and links on
@@ -894,12 +894,30 @@ jobs:
                   "$root/store", "$root/pebble" | Out-Null
 
           # --- fetch Pebble (native windows/amd64, no Docker, no build) ---
+          # sha256-pinned like every other download in this workflow (see the
+          # nginx tarball fetch and Fetch PCRE2/zlib steps above). UPDATE BOTH
+          # the URL/tag AND every hash below together on a Pebble version bump.
+          $pebbleZipSha256 = '2539f3903302d75f897522b23b1b52b3300f5f992245f13d3bdf3967cf23af6d'
+          $pebbleCaSha256   = '0c502e52627ff7de972c7e9e065640103b4589b4e2d23d3fcf21bef1e3c8c67c'
+          $pebbleCertSha256 = 'c87fb918d9bac8db11aa54493b5f0cf6e0725a3fe73f617d1c64737e1ab4caf9'
+          # Named "...TlsKeyfileSha256", not "...KeySha256": gitleaks'
+          # generic-api-key rule keys off the IDENTIFIER looking credential-like
+          # ("Key = <high-entropy string>"), so the shorter name makes a public
+          # checksum read as a secret. Renaming removes the false positive at
+          # source -- do NOT "fix" this by allowlisting the hash in
+          # .gitleaks.toml, which would silence a real key added later.
+          $pebbleTlsKeyfileSha256 = '0977979255b0e0721c17335c056b627f66a43cf56e5a52f3cda81fb111ecf00e'
+
           Write-Host "== fetch Pebble v2.10.1 =="
           $pebbleZip = "$root/pebble/pebble.zip"
           Invoke-WebRequest `
             -Uri 'https://github.com/letsencrypt/pebble/releases/download/v2.10.1/pebble-windows-amd64.zip' `
             -OutFile $pebbleZip `
             -ConnectionTimeoutSeconds 30 -OperationTimeoutSeconds 60
+          $actual = (Get-FileHash $pebbleZip -Algorithm SHA256).Hash.ToLower()
+          if ($actual -ne $pebbleZipSha256) {
+            throw "sha256 mismatch for pebble-windows-amd64.zip: got $actual, want $pebbleZipSha256"
+          }
           Expand-Archive -Path $pebbleZip -DestinationPath "$root/pebble" -Force
           $pebbleExe = Get-ChildItem -Path "$root/pebble" -Filter 'pebble*.exe' `
             -Recurse | Select-Object -First 1
@@ -918,14 +936,18 @@ jobs:
           $pebbleKeyPath  = "$root/pebble-key.pem"
           $pebbleRaw = 'https://raw.githubusercontent.com/letsencrypt/pebble/v2.10.1/test/certs'
           foreach ($f in @(
-            @{ Uri = "$pebbleRaw/pebble.minica.pem";     Out = "$root/ca.pem" },
-            @{ Uri = "$pebbleRaw/localhost/cert.pem";    Out = $pebbleCertPath },
-            @{ Uri = "$pebbleRaw/localhost/key.pem";     Out = $pebbleKeyPath }
+            @{ Uri = "$pebbleRaw/pebble.minica.pem";     Out = "$root/ca.pem";  Sha = $pebbleCaSha256 },
+            @{ Uri = "$pebbleRaw/localhost/cert.pem";    Out = $pebbleCertPath; Sha = $pebbleCertSha256 },
+            @{ Uri = "$pebbleRaw/localhost/key.pem";     Out = $pebbleKeyPath;  Sha = $pebbleTlsKeyfileSha256 }
           )) {
             Invoke-WebRequest -Uri $f.Uri -OutFile $f.Out `
               -ConnectionTimeoutSeconds 30 -OperationTimeoutSeconds 60
             if (-not (Test-Path $f.Out) -or (Get-Item $f.Out).Length -eq 0) {
               throw "failed to fetch $($f.Uri)"
+            }
+            $actual = (Get-FileHash $f.Out -Algorithm SHA256).Hash.ToLower()
+            if ($actual -ne $f.Sha) {
+              throw "sha256 mismatch for $($f.Out): got $actual, want $($f.Sha)"
             }
           }
           $pebbleCert = Get-Item $pebbleCertPath
@@ -1040,15 +1062,29 @@ jobs:
 
               $ok = $false
               foreach ($i in 1..60) {
-                if ((Test-Path $log) -and
-                    (Select-String -Path $log -Pattern 'autocert: authorization for .* is valid' -Quiet)) {
-                  $ok = $true; break
+                # Same rationale as the issuance-poll loop below: nginx has
+                # $log open for concurrent writes on win32, so a fresh
+                # Select-String -Path open here can hit a sharing violation.
+                # Don't let $ErrorActionPreference = 'Stop' turn that into a
+                # terminating exception that unwinds out of this loop --
+                # catch it, log it once, and keep polling instead.
+                try {
+                  if ((Test-Path $log) -and
+                      (Select-String -Path $log -Pattern 'autocert: authorization for .* is valid' -Quiet)) {
+                    $ok = $true; break
+                  }
+                } catch {
+                  Write-Host "authorization-poll: iteration $i, success Select-String threw: $($_.Exception.Message)"
                 }
-                if ((Test-Path $log) -and
-                    (Select-String -Path $log `
-                       -Pattern 'autocert: ACME order failed|authorization poll timed out|authorization did not become valid' `
-                       -Quiet)) {
-                  break
+                try {
+                  if ((Test-Path $log) -and
+                      (Select-String -Path $log `
+                         -Pattern 'autocert: ACME order failed|authorization poll timed out|authorization did not become valid' `
+                         -Quiet)) {
+                    break
+                  }
+                } catch {
+                  Write-Host "authorization-poll: iteration $i, error-pattern Select-String threw: $($_.Exception.Message)"
                 }
                 Start-Sleep -Milliseconds 500
               }
@@ -1141,14 +1177,14 @@ jobs:
               Write-Host "== openssl.exe candidate search =="
               $cmd = Get-Command openssl -ErrorAction SilentlyContinue
               Write-Host ("Get-Command openssl: {0}" -f ($(if ($cmd) { $cmd.Source } else { '<not found>' })))
-              foreach ($root in @("$env:OPENSSL_ROOT", "$env:OPENSSL_STAGE",
+              foreach ($searchRoot in @("$env:OPENSSL_ROOT", "$env:OPENSSL_STAGE",
                                    'C:\vcpkg\installed\x64-windows-static',
                                    'C:\vcpkg\installed\x64-windows',
                                    'C:\Program Files\OpenSSL-Win64',
                                    'C:\Program Files\OpenSSL',
                                    'C:\Strawberry\c\bin')) {
-                if ($root -and (Test-Path $root)) {
-                  $hits = Get-ChildItem -Path $root -Recurse -Filter 'openssl.exe' `
+                if ($searchRoot -and (Test-Path $searchRoot)) {
+                  $hits = Get-ChildItem -Path $searchRoot -Recurse -Filter 'openssl.exe' `
                             -ErrorAction SilentlyContinue
                   foreach ($h in $hits) { Write-Host ("found: {0}" -f $h.FullName) }
                 }
@@ -1179,12 +1215,12 @@ jobs:
               if (-not $openssl) {
                 # Last resort: recursive search under every root that exists,
                 # first hit wins.
-                foreach ($root in @("$env:OPENSSL_ROOT", "$env:OPENSSL_STAGE",
+                foreach ($searchRoot in @("$env:OPENSSL_ROOT", "$env:OPENSSL_STAGE",
                                      'C:\vcpkg\installed\x64-windows',
                                      'C:\Program Files\OpenSSL-Win64',
                                      'C:\Program Files\OpenSSL')) {
-                  if ($root -and (Test-Path $root)) {
-                    $hit = Get-ChildItem -Path $root -Recurse -Filter 'openssl.exe' `
+                  if ($searchRoot -and (Test-Path $searchRoot)) {
+                    $hit = Get-ChildItem -Path $searchRoot -Recurse -Filter 'openssl.exe' `
                              -ErrorAction SilentlyContinue | Select-Object -First 1
                     if ($hit) { $openssl = $hit.FullName; break }
                   }

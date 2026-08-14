@@ -2047,8 +2047,8 @@ ngx_autocert_renameat2(int oldfd, const char *oldp, int newfd,
          * correct on 32-bit too (FileName offset=12 there) without a magic
          * number.
          */
-        name_off = offsetof(struct ngx_autocert_rename_hdr_s, FileNameLength)
-                   + sizeof(ULONG);
+        name_off = NGX_AUTOCERT_FILE_NAME_INFO_OFF(
+            struct ngx_autocert_rename_hdr_s);
 
         struct_len = name_off + (size_t) (n - 1) * sizeof(wchar_t);
         if (struct_len > sizeof(buf)) {
@@ -2180,8 +2180,8 @@ ngx_autocert_linkat(int oldfd, const char *oldpath, int newfd,
          * the true on-the-wire FileName offset. Derive it from the real
          * field offset instead of trusting sizeof().
          */
-        name_off = offsetof(struct ngx_autocert_link_hdr_s, FileNameLength)
-                   + sizeof(ULONG);
+        name_off = NGX_AUTOCERT_FILE_NAME_INFO_OFF(
+            struct ngx_autocert_link_hdr_s);
 
         struct_len = name_off + (size_t) (n - 1) * sizeof(wchar_t);
         if (struct_len > sizeof(buf)) {

@@ -237,14 +237,17 @@ gcc -D_GNU_SOURCE -Wall -Wextra -Werror $CORE_INC \
 # ngx_autocert_linkat() in src/ngx_autocert_win32.h (W18b): pins that the
 # trailing FileName[] array starts at offsetof(FileNameLength)+sizeof(ULONG)
 # ON THE WIRE, which is NOT the same as sizeof(the hand-laid header struct)
-# once HANDLE's 8-byte alignment pads the struct's overall size. Cannot
-# include <windows.h> or call the real (win32-only) functions from Linux, so
-# this pins the layout model directly with ABI-matched stand-in types --
-# same reasoning as the other test_win32_*.c files in this list, adapted
-# because this one has no win32-header-free production function to call.
-# No nginx objects needed (plain stddef/stdint).
-gcc -Wall -Wextra -Werror -o test_win32_rename_info_layout \
-	"$WORKSPACE/ci/tests/unit/test_win32_rename_info_layout.c"
+# once HANDLE's 8-byte alignment pads the struct's overall size. The offset
+# arithmetic is factored into NGX_AUTOCERT_FILE_NAME_INFO_OFF() in
+# ngx_autocert_shared.h (the SAME macro both win32.h callers use), with a
+# POSIX-arm ABI-matched stand-in struct alongside it -- so this test binds to
+# and asserts the PRODUCTION macro/struct rather than a hand-copied
+# reimplementation. Needs ngx_string.o for the same reason
+# test_win32_split_root.c does (shared.h pulls in ngx_core.h).
+# shellcheck disable=SC2086
+gcc -D_GNU_SOURCE -Wall -Wextra -Werror $CORE_INC \
+	"$WORKSPACE/ci/tests/unit/test_win32_rename_info_layout.c" \
+	"$NGX/objs/src/core/ngx_string.o" -o test_win32_rename_info_layout
 ./test_win32_rename_info_layout
 
 # shellcheck disable=SC2086
