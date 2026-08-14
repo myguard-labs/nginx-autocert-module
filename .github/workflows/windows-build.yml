@@ -1,4 +1,4 @@
-# sync-sha: bbfc13b6baa065c0d9b6f9a3504dc7de3a173a720242f8328350f970923f27e5
+# sync-sha: 48a94be1ee085cb29cec3fefe56dbf3e6a52af5b14185005d5550dd5ce678609
 name: Windows build
 
 # Native Windows port gate (W17). Proves the module compiles and links on
@@ -1065,21 +1065,46 @@ jobs:
               Write-Host "OK authorization reached valid (http-01 served at the IP literal)"
 
               $issued = $false
+              $issuedSw = [System.Diagnostics.Stopwatch]::StartNew()
+              $brokeOnError = $false
+              $iterReached = 0
               foreach ($i in 1..60) {
-                if ((Test-Path $log) -and
-                    (Select-String -Path $log -SimpleMatch `
-                       -Pattern 'autocert: certificate provisioned for' -Quiet)) {
-                  $issued = $true; break
+                $iterReached = $i
+                # Select-String -Path opens the file fresh each call; on
+                # win32 nginx has $log open for concurrent writes, so a
+                # sharing-violation here is possible. Do not let
+                # $ErrorActionPreference = 'Stop' turn that into a
+                # terminating exception that unwinds straight out of this
+                # loop -- catch it, log it once, and keep polling instead.
+                try {
+                  if ((Test-Path $log) -and
+                      (Select-String -Path $log -SimpleMatch `
+                         -Pattern 'autocert: certificate provisioned for' -Quiet)) {
+                    $issued = $true; break
+                  }
+                } catch {
+                  Write-Host "issuance-poll: iteration $i, success Select-String threw: $($_.Exception.Message)"
                 }
-                if ((Test-Path $log) -and
-                    (Select-String -Path $log `
-                       -Pattern 'autocert: (finalize failed|order poll timed out|order did not become valid|certificate download failed|ACME order failed)' `
-                       -Quiet)) {
-                  break
+                try {
+                  if ((Test-Path $log) -and
+                      (Select-String -Path $log `
+                         -Pattern 'autocert: (finalize failed|order poll timed out|order did not become valid|certificate download failed|ACME order failed)' `
+                         -Quiet)) {
+                    $brokeOnError = $true; break
+                  }
+                } catch {
+                  Write-Host "issuance-poll: iteration $i, error-pattern Select-String threw: $($_.Exception.Message)"
                 }
                 Start-Sleep -Milliseconds 500
               }
+              $issuedSw.Stop()
+              Write-Host ("issuance-poll: stopped after iteration {0}/60, elapsed {1} ms, issued={2}, brokeOnError={3}" `
+                -f $iterReached, $issuedSw.ElapsedMilliseconds, $issued, $brokeOnError)
               if (-not $issued) {
+                if (Test-Path $log) {
+                  Write-Host "== nginx error.log (last 60 lines) =="
+                  Get-Content $log -Tail 60 -ErrorAction SilentlyContinue | Write-Host
+                }
                 Get-Content $pebbleOut, $pebbleErr -ErrorAction SilentlyContinue |
                   Select-Object -Last 40 | Write-Host
                 throw "certificate was not provisioned for the IP identifier"
