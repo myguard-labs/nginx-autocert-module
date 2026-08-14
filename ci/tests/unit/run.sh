@@ -232,6 +232,24 @@ gcc -D_GNU_SOURCE -Wall -Wextra -Werror $CORE_INC \
 	-o test_win32_dacl_mode
 ./test_win32_dacl_mode
 
+# FILE_RENAME_INFORMATION / FILE_LINK_INFORMATION variable-length-buffer
+# layout arithmetic used by ngx_autocert_renameat2() and
+# ngx_autocert_linkat() in src/ngx_autocert_win32.h (W18b): pins that the
+# trailing FileName[] array starts at offsetof(FileNameLength)+sizeof(ULONG)
+# ON THE WIRE, which is NOT the same as sizeof(the hand-laid header struct)
+# once HANDLE's 8-byte alignment pads the struct's overall size. The offset
+# arithmetic is factored into NGX_AUTOCERT_FILE_NAME_INFO_OFF() in
+# ngx_autocert_shared.h (the SAME macro both win32.h callers use), with a
+# POSIX-arm ABI-matched stand-in struct alongside it -- so this test binds to
+# and asserts the PRODUCTION macro/struct rather than a hand-copied
+# reimplementation. Needs ngx_string.o for the same reason
+# test_win32_split_root.c does (shared.h pulls in ngx_core.h).
+# shellcheck disable=SC2086
+gcc -D_GNU_SOURCE -Wall -Wextra -Werror $CORE_INC \
+	"$WORKSPACE/ci/tests/unit/test_win32_rename_info_layout.c" \
+	"$NGX/objs/src/core/ngx_string.o" -o test_win32_rename_info_layout
+./test_win32_rename_info_layout
+
 # shellcheck disable=SC2086
 gcc -Wall -Werror $CORE_INC -c \
 	"$WORKSPACE/src/ngx_autocert_alpn.c" -o alpn.o

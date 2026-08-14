@@ -14,6 +14,77 @@
 #include <ngx_config.h>
 #include <ngx_core.h>
 
+#include <stddef.h>   /* offsetof — NGX_AUTOCERT_FILE_NAME_INFO_OFF below */
+
+
+/*
+ * FILE_RENAME_INFORMATION / FILE_LINK_INFORMATION trailing-array layout —
+ * the pure arithmetic half of ngx_autocert_renameat2()/ngx_autocert_linkat()
+ * (src/ngx_autocert_win32.h), extracted here so it is ONE definition both
+ * functions call and the unit suite can bind to directly, following the same
+ * pure-core pattern as ngx_autocert_win32_classify_root() below. Defined
+ * BEFORE the ngx_autocert_win32.h include just below, because that header's
+ * renameat2()/linkat() bodies use this macro at compile time -- the macro
+ * must already be visible when their text is pasted in.
+ *
+ * Both NT structs share the identical header shape:
+ *
+ *     struct { BOOLEAN ReplaceIfExists; HANDLE RootDirectory;
+ *              ULONG FileNameLength; } *hdr;
+ *
+ * and the trailing FileName[] array starts, ON THE WIRE, at
+ * offsetof(FileNameLength) + sizeof(ULONG) -- immediately after the ULONG,
+ * with NO padding. A compiler is free to pad the OVERALL struct size up to
+ * its widest member's alignment (HANDLE, 8 bytes on LLP64/64-bit Windows),
+ * so sizeof(hdr) rounds up PAST that true offset (24 vs. the true 20 for
+ * this field layout) -- copying/sizing off sizeof(*hdr) instead of this
+ * offset writes the filename 4 bytes late, corrupting the trailing
+ * FileNameLength bytes and the first wchar_t's of the name (observed on
+ * MSVC/x64 as NtSetInformationFile failing with a generic status, surfaced
+ * to the caller as ERROR_GEN_FAILURE). NEVER "simplify" a caller back to
+ * sizeof(*hdr) -- that is the exact bug this macro exists to prevent.
+ *
+ * `hdr_type` is the real win32 struct tag (ngx_autocert_rename_hdr_s /
+ * ngx_autocert_link_hdr_s) on win32, or NGX_AUTOCERT_TEST_RENAME_HDR_T
+ * defined below on any other host, so this macro is usable unconditionally
+ * (it needs only <stddef.h>'s offsetof and the ULONG width, no win32
+ * header), letting the unit suite assert against the SAME symbol production
+ * code uses instead of a hand-copied stand-in that could silently drift.
+ */
+#if NGX_WIN32
+
+#define NGX_AUTOCERT_FILE_NAME_INFO_OFF(hdr_type) \
+    (offsetof(hdr_type, FileNameLength) + sizeof(ULONG))
+
+#else /* !NGX_WIN32 */
+
+/*
+ * Linux/POSIX has no <windows.h>, so ULONG/HANDLE/BOOLEAN do not exist here.
+ * Stand-in typedefs matching the win32 ABI widths this code targets (LLP64,
+ * 1-byte BOOLEAN, 8-byte HANDLE, 4-byte ULONG) let the SAME macro, on the
+ * SAME field layout, be evaluated on Linux -- this is what makes the layout
+ * arithmetic unit-testable on the only host these tests run on, instead of
+ * being asserted only via a test-local reimplementation that proves nothing
+ * about the production header.
+ */
+typedef unsigned char   ngx_autocert_test_boolean_t;
+typedef void            *ngx_autocert_test_handle_t;
+typedef unsigned int    ngx_autocert_test_ulong_t;
+
+struct ngx_autocert_test_rename_hdr_s {
+    ngx_autocert_test_boolean_t  ReplaceIfExists;
+    ngx_autocert_test_handle_t   RootDirectory;
+    ngx_autocert_test_ulong_t    FileNameLength;
+};
+
+#define NGX_AUTOCERT_TEST_RENAME_HDR_T struct ngx_autocert_test_rename_hdr_s
+
+#define NGX_AUTOCERT_FILE_NAME_INFO_OFF(hdr_type) \
+    (offsetof(hdr_type, FileNameLength) + sizeof(ngx_autocert_test_ulong_t))
+
+#endif /* NGX_WIN32 */
+
+
 #include "ngx_autocert_win32.h"   /* win32 shim types; empty on POSIX builds */
 
 #include <fcntl.h>

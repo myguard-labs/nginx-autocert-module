@@ -68,39 +68,48 @@ static void ngx_autocert_account_finish(ngx_autocert_account_t *acct,
  */
 static int
 ngx_autocert_account_open_keydir(ngx_autocert_account_t *acct,
-    const char **leaf)
+    char *norm, size_t norm_cap, const char **leaf)
 {
-    u_char  *path, *slash, *comp;
-    int      dfd, nfd;
+    u_char       *path;
+    char         *slash, *comp;
+    const char   *rest;
+    int           dfd, nfd;
 
     path = acct->key_path.data;         /* NUL-terminated */
 
-    /* Start fd: "/" for an absolute path, "." otherwise. Both NOFOLLOW.
-     * Routed through ngx_autocert_open_dir_path() (the shared root-open
-     * shim) rather than a bare open(): on POSIX it is a byte-identical
-     * open("/")/open(".") passthrough, and on win32 it goes through
-     * NtCreateFile instead of the MSVC-deprecated open() (C4996 -> C2220
-     * under -WX). */
-    if (path[0] == '/') {
-        dfd = ngx_autocert_open_dir_path("/", 0, 0);
-        comp = path + 1;
-    } else {
-        dfd = ngx_autocert_open_dir_path(".", 0, 0);
-        comp = path;
-    }
+    /* Open the root and split it off the rest of the path via the shared
+     * ngx_autocert_split_root(). Do NOT hand-roll a `path[0] == '/'` test
+     * here: that spelling is only correct on POSIX, and on win32 it
+     * misclassifies an ordinary absolute path like "D:/store" as relative,
+     * so the walk starts at "." and dies trying to open a "D:" component --
+     * surfacing as ERROR_GEN_FAILURE ("31: A device attached to the system
+     * is not functioning"), which reads like hardware but means "no such
+     * path". split_root's win32 arm classifies the drive/UNC root and opens
+     * it with NtCreateFile; its POSIX arm is the byte-identical
+     * open("/")/open(".") passthrough this code used to do inline.
+     *
+     * `comp` -- and the *leaf handed back to the caller -- point INTO `norm`,
+     * which split_root fills. `norm` is therefore the CALLER's buffer, not a
+     * local: a stack-local here would leave *leaf dangling the moment this
+     * function returns, and the caller dereferences it immediately. */
+    dfd = ngx_autocert_split_root((const char *) path, norm, norm_cap,
+                                  &rest);
     if (dfd == -1) {
         ngx_log_error(NGX_LOG_ERR, acct->log, ngx_errno,
                       "autocert: open store root failed");
         return -1;
     }
+    comp = (char *) rest;
 
     /* Walk each "/"-separated directory component, pinning as we go. The final
      * component (after the last '/') is the leaf the caller opens itself. */
     for ( ;; ) {
-        slash = (u_char *) strchr((const char *) comp, '/');
+        slash = strchr(comp, '/');
         if (slash == NULL) {
-            /* comp is the leaf (the key filename). dfd is its pinned parent. */
-            *leaf = (const char *) comp;
+            /* comp is the leaf (the key filename). dfd is its pinned parent.
+             * It points into `norm`, which the caller-visible *leaf now
+             * aliases -- see the contract note on this function. */
+            *leaf = comp;
             return dfd;
         }
 
@@ -110,11 +119,11 @@ ngx_autocert_account_open_keydir(ngx_autocert_account_t *acct,
         }
 
         *slash = '\0';                  /* temporarily isolate this component */
-        nfd = ngx_autocert_openat(dfd, (char *) comp,
+        nfd = ngx_autocert_openat(dfd, comp,
                      O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
         {
             ngx_err_t  err = ngx_errno;
-            *slash = '/';               /* restore key_path before any return */
+            *slash = '/';               /* restore `norm` before any return */
             (void) ngx_autocert_close(dfd);
             if (nfd == -1) {
                 ngx_log_error(NGX_LOG_ERR, acct->log, err,
@@ -209,6 +218,9 @@ ngx_autocert_account_load_key(ngx_autocert_account_t *acct)
 
     int          dfd;
     const char  *leaf;
+    /* Backs `leaf` and the component walk inside open_keydir() -- must
+     * outlive that call, hence the caller's frame. */
+    char         norm[NGX_MAX_PATH];
 
     /* TOCTOU: pin the parent dir (full chain walked component-by-component),
      * open the leaf relative to it. O_NOFOLLOW on every component + the leaf:
@@ -216,7 +228,7 @@ ngx_autocert_account_load_key(ngx_autocert_account_t *acct)
      * is held across the ENOENT->save path so the directory the key is created
      * in is provably the same inode we just probed (no swap window between the
      * absence check and the O_EXCL create). */
-    dfd = ngx_autocert_account_open_keydir(acct, &leaf);
+    dfd = ngx_autocert_account_open_keydir(acct, norm, sizeof(norm), &leaf);
     if (dfd == -1) {
         return NGX_ERROR;
     }

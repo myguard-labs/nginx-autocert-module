@@ -1,4 +1,4 @@
-# sync-sha: 4e946e3549f7329af15d894d14f5289d06c40ef737b7f1f8eac7378ec23dc006
+# sync-sha: d8b646d2ba424f6750c4ced965bc3b04794a1f764100e41d7b6fd9d6df5a212b
 name: Windows build
 
 # Native Windows port gate (W17). Proves the module compiles and links on
@@ -847,6 +847,437 @@ jobs:
             Get-Process -Name nginx -ErrorAction SilentlyContinue |
               Stop-Process -Force -ErrorAction SilentlyContinue
             $ErrorActionPreference = $prev
+          }
+
+          exit 0
+
+      # W18b: full ACME issuance (RFC 8738 IP-literal), ported from the POSIX
+      # e2e script ci/tests/e2e/ipv4-issue.sh. That script runs Pebble and
+      # pebble-challtestsrv as Linux Docker containers on a docker network,
+      # using the network's gateway IP as both the ordered identifier and the
+      # address the VA dials. None of that exists here:
+      #
+      #  - windows-latest hosts no Linux containers. Pebble ships a native
+      #    windows-amd64 binary (CGO_ENABLED=0 build), fetched below instead
+      #    of built or dockerized.
+      #  - challtestsrv exists ONLY to resolve the CA's own "pebble" hostname
+      #    for the module's ACME client; every challenge listener is disabled
+      #    in the bash version (-http01 "" -https01 "" -tlsalpn01 ""). Pointed
+      #    directly at https://127.0.0.1:14000/dir there is nothing left for
+      #    it to do, so it is dropped rather than ported.
+      #  - HOST_IP there is the docker network gateway. On this runner the
+      #    ordered identifier is 127.0.0.1: both nginx and Pebble's VA are on
+      #    the same host, so the VA's http-01 GET reaches nginx over loopback
+      #    without any network setup. Confirmed working in this job (see the
+      #    "authorization ... is valid" assertion below) rather than assumed.
+      - name: Runtime ACME issuance test (IPv4 literal, RFC 8738)
+        shell: pwsh
+        working-directory: nginx-${{ env.NGINX_VERSION }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          $root   = 'w18b'
+          $hostIp = '127.0.0.1'
+          $httpPort  = 5002
+          $pebblePort = 14000
+
+          Remove-Item -Recurse -Force $root -ErrorAction SilentlyContinue
+          # "temp" is not optional: the build configures
+          # --http-client-body-temp-path=temp/client_body_temp (and the proxy,
+          # fastcgi, uwsgi, scgi siblings) RELATIVE to the prefix, and nginx
+          # creates them at startup. Without it `nginx -t` reports "syntax is
+          # ok" and then fails with
+          #   [emerg] CreateDirectory() "temp/client_body_temp" failed (3)
+          # which reads like a config error but is a missing directory.
+          New-Item -ItemType Directory -Force `
+            -Path $root, "$root/conf", "$root/logs", "$root/temp", `
+                  "$root/store", "$root/pebble" | Out-Null
+
+          # --- fetch Pebble (native windows/amd64, no Docker, no build) ---
+          # sha256-pinned like every other download in this workflow (see the
+          # nginx tarball fetch and Fetch PCRE2/zlib steps above). UPDATE BOTH
+          # the URL/tag AND every hash below together on a Pebble version bump.
+          $pebbleZipSha256 = '2539f3903302d75f897522b23b1b52b3300f5f992245f13d3bdf3967cf23af6d'
+          $pebbleCaSha256   = '0c502e52627ff7de972c7e9e065640103b4589b4e2d23d3fcf21bef1e3c8c67c'
+          $pebbleCertSha256 = 'c87fb918d9bac8db11aa54493b5f0cf6e0725a3fe73f617d1c64737e1ab4caf9'
+          # Named "...TlsKeyfileSha256", not "...KeySha256": gitleaks'
+          # generic-api-key rule keys off the IDENTIFIER looking credential-like
+          # ("Key = <high-entropy string>"), so the shorter name makes a public
+          # checksum read as a secret. Renaming removes the false positive at
+          # source -- do NOT "fix" this by allowlisting the hash in
+          # .gitleaks.toml, which would silence a real key added later.
+          $pebbleTlsKeyfileSha256 = '0977979255b0e0721c17335c056b627f66a43cf56e5a52f3cda81fb111ecf00e'
+
+          Write-Host "== fetch Pebble v2.10.1 =="
+          $pebbleZip = "$root/pebble/pebble.zip"
+          Invoke-WebRequest `
+            -Uri 'https://github.com/letsencrypt/pebble/releases/download/v2.10.1/pebble-windows-amd64.zip' `
+            -OutFile $pebbleZip `
+            -ConnectionTimeoutSeconds 30 -OperationTimeoutSeconds 60
+          $actual = (Get-FileHash $pebbleZip -Algorithm SHA256).Hash.ToLower()
+          if ($actual -ne $pebbleZipSha256) {
+            throw "sha256 mismatch for pebble-windows-amd64.zip: got $actual, want $pebbleZipSha256"
+          }
+          Expand-Archive -Path $pebbleZip -DestinationPath "$root/pebble" -Force
+          $pebbleExe = Get-ChildItem -Path "$root/pebble" -Filter 'pebble*.exe' `
+            -Recurse | Select-Object -First 1
+          if (-not $pebbleExe) { throw "pebble-windows-amd64.zip did not contain an exe" }
+
+          # The release zip ships ONLY the binary -- test/certs/ is repo
+          # content, not release content. The bash version gets all three PEMs
+          # from inside the container image; here every one is fetched from the
+          # SAME tag as the binary, which keeps the leaf and its issuer paired.
+          # (Verified against v2.10.1: `openssl verify -CAfile pebble.minica.pem
+          # cert.pem` is OK, and the leaf's SANs are DNS:localhost, DNS:pebble,
+          # IP Address:127.0.0.1 -- the IP SAN is what lets the module validate
+          # https://127.0.0.1:14000/dir without challtestsrv resolving `pebble.`)
+          Write-Host "== fetch Pebble CA cert and TLS keypair (tag v2.10.1) =="
+          $pebbleCertPath = "$root/pebble-cert.pem"
+          $pebbleKeyPath  = "$root/pebble-key.pem"
+          $pebbleRaw = 'https://raw.githubusercontent.com/letsencrypt/pebble/v2.10.1/test/certs'
+          foreach ($f in @(
+            @{ Uri = "$pebbleRaw/pebble.minica.pem";     Out = "$root/ca.pem";  Sha = $pebbleCaSha256 },
+            @{ Uri = "$pebbleRaw/localhost/cert.pem";    Out = $pebbleCertPath; Sha = $pebbleCertSha256 },
+            @{ Uri = "$pebbleRaw/localhost/key.pem";     Out = $pebbleKeyPath;  Sha = $pebbleTlsKeyfileSha256 }
+          )) {
+            Invoke-WebRequest -Uri $f.Uri -OutFile $f.Out `
+              -ConnectionTimeoutSeconds 30 -OperationTimeoutSeconds 60
+            if (-not (Test-Path $f.Out) -or (Get-Item $f.Out).Length -eq 0) {
+              throw "failed to fetch $($f.Uri)"
+            }
+            $actual = (Get-FileHash $f.Out -Algorithm SHA256).Hash.ToLower()
+            if ($actual -ne $f.Sha) {
+              throw "sha256 mismatch for $($f.Out): got $actual, want $($f.Sha)"
+            }
+          }
+          $pebbleCert = Get-Item $pebbleCertPath
+          $pebbleKey  = Get-Item $pebbleKeyPath
+
+          # tlsPort points at a closed port so tls-alpn-01 cannot be reached:
+          # the VA only hits httpPort for this challenge (same intent as the
+          # bash version's AC_PORT_5998).
+          $pebbleConfig = @{
+            pebble = @{
+              listenAddress               = "0.0.0.0:$pebblePort"
+              managementListenAddress     = '0.0.0.0:15000'
+              certificate                 = $pebbleCert.FullName -replace '\\', '/'
+              privateKey                  = $pebbleKey.FullName -replace '\\', '/'
+              httpPort                    = $httpPort
+              tlsPort                     = 5998
+              ocspResponderURL            = ''
+              externalAccountBindingRequired = $false
+            }
+          } | ConvertTo-Json -Depth 5
+          Set-Content -Encoding ascii -Path "$root/pebble-config.json" -Value $pebbleConfig
+
+          Write-Host "== start Pebble (VA -> http-01 at ${hostIp}:${httpPort}) =="
+          $pebbleOut = "$root/pebble-stdout.log"
+          $pebbleErr = "$root/pebble-stderr.log"
+          # Start-Process has no -Environment parameter; set the two Pebble
+          # env vars in THIS process so the child inherits them, then restore
+          # afterwards so later steps see an unmodified environment.
+          $prevNoSleep    = $env:PEBBLE_VA_NOSLEEP
+          $prevNonceReject = $env:PEBBLE_WFE_NONCEREJECT
+          $env:PEBBLE_VA_NOSLEEP = '1'
+          $env:PEBBLE_WFE_NONCEREJECT = '0'
+          # Foreground process on Windows too -- same trap as nginx.exe below:
+          # launch detached, keep the handle, kill it in finally.
+          $pebbleProc = Start-Process -FilePath $pebbleExe.FullName `
+            -ArgumentList '-config', (Resolve-Path "$root/pebble-config.json").Path, `
+                           '-strict' `
+            -RedirectStandardOutput $pebbleOut -RedirectStandardError $pebbleErr `
+            -PassThru -NoNewWindow
+          $env:PEBBLE_VA_NOSLEEP = $prevNoSleep
+          $env:PEBBLE_WFE_NONCEREJECT = $prevNonceReject
+          Start-Sleep -Seconds 2
+          if ($pebbleProc.HasExited) {
+            Get-Content $pebbleOut, $pebbleErr -ErrorAction SilentlyContinue | Write-Host
+            throw "pebble.exe exited immediately with $($pebbleProc.ExitCode)"
+          }
+
+          try {
+            Write-Host "== wait for Pebble directory =="
+            $up = $false
+            foreach ($i in 1..30) {
+              try {
+                Invoke-WebRequest -Uri "https://${hostIp}:${pebblePort}/dir" `
+                  -SkipCertificateCheck -UseBasicParsing `
+                  -ConnectionTimeoutSeconds 5 -OperationTimeoutSeconds 5 |
+                  Out-Null
+                $up = $true; break
+              } catch { Start-Sleep -Seconds 1 }
+            }
+            if (-not $up) {
+              Get-Content $pebbleOut, $pebbleErr -ErrorAction SilentlyContinue | Write-Host
+              throw "Pebble did not come up"
+            }
+
+            # --- config: the IP literal is the server_name; the listener
+            # binds it on the VA's httpPort so the http-01 GET lands. ---
+            $store = ((Resolve-Path "$root/store").Path -replace '\\', '/')
+            $ca    = ((Resolve-Path "$root/ca.pem").Path -replace '\\', '/')
+            $lines = @(
+              'error_log logs/error.log info;',
+              'events {}',
+              'http {',
+              '    autocert on;',
+              '    autocert_contact admin@example.com;',
+              "    autocert_ca https://${hostIp}:${pebblePort}/dir;",
+              "    autocert_ca_trusted_certificate $ca;",
+              "    autocert_store_path $store;",
+              '    autocert_challenge http-01;',
+              '    server {',
+              "        listen $httpPort;",
+              "        server_name ${hostIp};",
+              '        autocert on;',
+              '    }',
+              '}'
+            )
+            Set-Content -Encoding ascii -Path "$root/conf/nginx.conf" -Value $lines
+
+            Write-Host "== config test =="
+            $prev = $ErrorActionPreference
+            $ErrorActionPreference = 'Continue'
+            $tOut = (& .\objs\nginx.exe -p $root -c conf/nginx.conf -t 2>&1 | Out-String)
+            $tRc  = $LASTEXITCODE
+            $ErrorActionPreference = $prev
+            Write-Host $tOut
+            if ($tRc -ne 0) { throw "nginx -t rejected the IPv4-issuance config" }
+
+            Write-Host "== start: register account, run http-01 order for $hostIp =="
+            # nginx does NOT daemonize on win32 -- see the HTTP-01 step above.
+            $proc = Start-Process -FilePath (Resolve-Path .\objs\nginx.exe) `
+                      -ArgumentList '-p', $root, '-c', 'conf/nginx.conf' `
+                      -PassThru -NoNewWindow
+            Start-Sleep -Seconds 2
+            if ($proc.HasExited) {
+              if (Test-Path "$root/logs/error.log") {
+                Get-Content "$root/logs/error.log" | Write-Host
+              }
+              throw "nginx.exe exited immediately with $($proc.ExitCode)"
+            }
+
+            try {
+              $log = "$root/logs/error.log"
+
+              $ok = $false
+              foreach ($i in 1..60) {
+                # Same rationale as the issuance-poll loop below: nginx has
+                # $log open for concurrent writes on win32, so a fresh
+                # Select-String -Path open here can hit a sharing violation.
+                # Don't let $ErrorActionPreference = 'Stop' turn that into a
+                # terminating exception that unwinds out of this loop --
+                # catch it, log it once, and keep polling instead.
+                try {
+                  if ((Test-Path $log) -and
+                      (Select-String -Path $log -Pattern 'autocert: authorization for .* is valid' -Quiet)) {
+                    $ok = $true; break
+                  }
+                } catch {
+                  Write-Host "authorization-poll: iteration $i, success Select-String threw: $($_.Exception.Message)"
+                }
+                try {
+                  if ((Test-Path $log) -and
+                      (Select-String -Path $log `
+                         -Pattern 'autocert: ACME order failed|authorization poll timed out|authorization did not become valid' `
+                         -Quiet)) {
+                    break
+                  }
+                } catch {
+                  Write-Host "authorization-poll: iteration $i, error-pattern Select-String threw: $($_.Exception.Message)"
+                }
+                Start-Sleep -Milliseconds 500
+              }
+              if (Test-Path $log) {
+                Write-Host "== helper log =="
+                Select-String -Path $log -Pattern 'autocert' |
+                  ForEach-Object { Write-Host $_.Line }
+              }
+              if (-not $ok) {
+                Get-Content $pebbleOut, $pebbleErr -ErrorAction SilentlyContinue |
+                  Select-Object -Last 40 | Write-Host
+                throw "authorization did not reach valid for the IP identifier"
+              }
+              Write-Host "OK authorization reached valid (http-01 served at the IP literal)"
+
+              $issued = $false
+              $issuedSw = [System.Diagnostics.Stopwatch]::StartNew()
+              $brokeOnError = $false
+              $iterReached = 0
+              foreach ($i in 1..60) {
+                $iterReached = $i
+                # Select-String -Path opens the file fresh each call; on
+                # win32 nginx has $log open for concurrent writes, so a
+                # sharing-violation here is possible. Do not let
+                # $ErrorActionPreference = 'Stop' turn that into a
+                # terminating exception that unwinds straight out of this
+                # loop -- catch it, log it once, and keep polling instead.
+                try {
+                  if ((Test-Path $log) -and
+                      (Select-String -Path $log -SimpleMatch `
+                         -Pattern 'autocert: certificate provisioned for' -Quiet)) {
+                    $issued = $true; break
+                  }
+                } catch {
+                  Write-Host "issuance-poll: iteration $i, success Select-String threw: $($_.Exception.Message)"
+                }
+                try {
+                  if ((Test-Path $log) -and
+                      (Select-String -Path $log `
+                         -Pattern 'autocert: (finalize failed|order poll timed out|order did not become valid|certificate download failed|ACME order failed)' `
+                         -Quiet)) {
+                    $brokeOnError = $true; break
+                  }
+                } catch {
+                  Write-Host "issuance-poll: iteration $i, error-pattern Select-String threw: $($_.Exception.Message)"
+                }
+                Start-Sleep -Milliseconds 500
+              }
+              $issuedSw.Stop()
+              Write-Host ("issuance-poll: stopped after iteration {0}/60, elapsed {1} ms, issued={2}, brokeOnError={3}" `
+                -f $iterReached, $issuedSw.ElapsedMilliseconds, $issued, $brokeOnError)
+              if (-not $issued) {
+                if (Test-Path $log) {
+                  Write-Host "== nginx error.log (last 60 lines) =="
+                  Get-Content $log -Tail 60 -ErrorAction SilentlyContinue | Write-Host
+                }
+                Get-Content $pebbleOut, $pebbleErr -ErrorAction SilentlyContinue |
+                  Select-Object -Last 40 | Write-Host
+                throw "certificate was not provisioned for the IP identifier"
+              }
+              Write-Host "OK certificate provisioned (finalize -> poll -> download -> store)"
+
+              # Pebble echoes the ordered identifier back into its own log.
+              # Seeing a "dns" identifier holding the dotted quad proves the
+              # module sent {"type":"dns"} instead of {"type":"ip"} -- an
+              # RFC 8738 violation that STILL issues a working cert, so no
+              # other assertion here catches it. Native Pebble has no `docker
+              # logs`; its stdout/stderr were redirected to files above.
+              $pebbleLog = Get-Content $pebbleOut, $pebbleErr -ErrorAction SilentlyContinue -Raw
+              if ($pebbleLog -match [regex]::Escape('"type":"dns","value":"' + $hostIp + '"')) {
+                throw "module ordered the IP as a dns identifier (RFC 8738 violation)"
+              }
+              Write-Host "OK the IP was ordered as an 'ip' identifier, not 'dns'"
+
+              # An IPv4 literal is stored verbatim (only IPv6 segments are
+              # mangled).
+              $key   = "$root/store/$hostIp/privkey.pem"
+              $chain = "$root/store/$hostIp/fullchain.pem"
+              if (-not (Test-Path $key))   { throw "missing $key" }
+              if (-not (Test-Path $chain)) { throw "missing $chain" }
+              Write-Host "OK store segment is the verbatim IPv4 literal ($hostIp)"
+
+              # openssl.exe is not on PATH on windows-latest, and OPENSSL_ROOT
+              # (vcpkg's x64-windows-static triplet) ships libraries only --
+              # the static triplet has no tools/apps output, so looking under
+              # it for openssl.exe always misses. DIAGNOSTIC: dump every
+              # candidate location before deciding, so a future drift in the
+              # runner image or vcpkg layout shows up in the log instead of
+              # as a silent throw.
+              Write-Host "== openssl.exe candidate search =="
+              $cmd = Get-Command openssl -ErrorAction SilentlyContinue
+              Write-Host ("Get-Command openssl: {0}" -f ($(if ($cmd) { $cmd.Source } else { '<not found>' })))
+              foreach ($searchRoot in @("$env:OPENSSL_ROOT", "$env:OPENSSL_STAGE",
+                                   'C:\vcpkg\installed\x64-windows-static',
+                                   'C:\vcpkg\installed\x64-windows',
+                                   'C:\Program Files\OpenSSL-Win64',
+                                   'C:\Program Files\OpenSSL',
+                                   'C:\Strawberry\c\bin')) {
+                if ($searchRoot -and (Test-Path $searchRoot)) {
+                  $hits = Get-ChildItem -Path $searchRoot -Recurse -Filter 'openssl.exe' `
+                            -ErrorAction SilentlyContinue
+                  foreach ($h in $hits) { Write-Host ("found: {0}" -f $h.FullName) }
+                }
+              }
+
+              # Ordered candidate list, first hit wins. Preference order:
+              #  1. PATH (Chocolatey/Strawberry openssl.exe, if the image has one)
+              #  2. This job's own OPENSSL_STAGE junction tree -- populated by
+              #     the "Locate OpenSSL" step, points at the same vcpkg tree,
+              #     kept as a candidate in case a future stage changes shape.
+              #  3. vcpkg's dynamic (non-static) triplet, which vcpkg installs
+              #     tools into even when the static triplet is selected for
+              #     linking.
+              #  4. Chocolatey's default OpenSSL-Win64 install location, used
+              #     by some windows-latest images.
+              $candidates = @(
+                $(if ($cmd) { $cmd.Source }),
+                "$env:OPENSSL_STAGE\openssl\tools\openssl\openssl.exe",
+                "$env:OPENSSL_ROOT\tools\openssl\openssl.exe",
+                'C:\vcpkg\installed\x64-windows\tools\openssl\openssl.exe',
+                'C:\Program Files\OpenSSL-Win64\bin\openssl.exe'
+              ) | Where-Object { $_ }
+
+              $openssl = $null
+              foreach ($c in $candidates) {
+                if (Test-Path $c) { $openssl = $c; break }
+              }
+              if (-not $openssl) {
+                # Last resort: recursive search under every root that exists,
+                # first hit wins.
+                foreach ($searchRoot in @("$env:OPENSSL_ROOT", "$env:OPENSSL_STAGE",
+                                     'C:\vcpkg\installed\x64-windows',
+                                     'C:\Program Files\OpenSSL-Win64',
+                                     'C:\Program Files\OpenSSL')) {
+                  if ($searchRoot -and (Test-Path $searchRoot)) {
+                    $hit = Get-ChildItem -Path $searchRoot -Recurse -Filter 'openssl.exe' `
+                             -ErrorAction SilentlyContinue | Select-Object -First 1
+                    if ($hit) { $openssl = $hit.FullName; break }
+                  }
+                }
+              }
+              if (-not $openssl -or -not (Test-Path $openssl)) {
+                throw ("openssl.exe not found. Tried: " + (($candidates + @(
+                  "$env:OPENSSL_ROOT (recursive)", "$env:OPENSSL_STAGE (recursive)",
+                  'C:\vcpkg\installed\x64-windows (recursive)',
+                  'C:\Program Files\OpenSSL-Win64 (recursive)',
+                  'C:\Program Files\OpenSSL (recursive)')) -join '; '))
+              }
+              Write-Host "using openssl at $openssl"
+
+              # The SAN must be an iPAddress, NOT a DNS name -- X509_check_host
+              # never matches an iPAddress SAN, so a cert carrying
+              # "DNS:127.0.0.1" would fail to serve even though it looks right
+              # by eye. Assert the SAN *type* explicitly, both ways.
+              $san = & $openssl x509 -in $chain -noout -ext subjectAltName 2>$null
+              $sanText = $san -join "`n"
+              if ($sanText -notmatch [regex]::Escape("IP Address:$hostIp")) {
+                throw "leaf SAN has no iPAddress:$hostIp (got: $sanText)"
+              }
+              if ($sanText -match 'DNS:') {
+                throw "leaf SAN carries a DNS name for an IP identifier (got: $sanText)"
+              }
+              Write-Host "OK leaf SAN is an iPAddress (RFC 8738), with no DNS SAN"
+
+              $certPub = & $openssl x509 -in $chain -noout -pubkey 2>$null
+              $keyPub  = & $openssl pkey -in $key -pubout 2>$null
+              if (($certPub -join "`n") -ne ($keyPub -join "`n")) {
+                throw "issued certificate pubkey != stored private key"
+              }
+              Write-Host "OK issued certificate public key matches the stored private key"
+
+              Write-Host "full IPv4-literal issuance verified end-to-end (RFC 8738, http-01)"
+            }
+            finally {
+              $ErrorActionPreference = 'Continue'
+              & .\objs\nginx.exe -p $root -c conf/nginx.conf -s stop 2>&1 |
+                Out-String | Write-Host
+              if (-not $proc.WaitForExit(10000)) {
+                Write-Host "nginx did not exit on -s stop; killing"
+                Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+              }
+              Get-Process -Name nginx -ErrorAction SilentlyContinue |
+                Stop-Process -Force -ErrorAction SilentlyContinue
+              $ErrorActionPreference = $prev
+            }
+          }
+          finally {
+            if ($pebbleProc -and -not $pebbleProc.HasExited) {
+              Stop-Process -Id $pebbleProc.Id -Force -ErrorAction SilentlyContinue
+              $pebbleProc.WaitForExit(10000) | Out-Null
+            }
+            Get-Process -Name 'pebble*' -ErrorAction SilentlyContinue |
+              Stop-Process -Force -ErrorAction SilentlyContinue
           }
 
           exit 0
