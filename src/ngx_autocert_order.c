@@ -1473,6 +1473,10 @@ ngx_autocert_order_dns_hook(ngx_autocert_order_t *order, ngx_str_t *hook,
         timeout_ms = (ngx_msec_t) order->dns_hook_timeout * 1000;
     }
 
+    /* Each hook has its own deadline outcome.  In particular, a timed-out
+     * add-hook must not make the later remove-hook report a timeout too. */
+    order->dns_hook_timed_out = 0;
+
     return ngx_autocert_dns_hook_spawn(order, hook, argv, timeout_ms);
 }
 
