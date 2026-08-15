@@ -240,12 +240,10 @@ only="$(sed -n 's/^ *LINT_ONLY: *//p' .github/workflows/lint.yml)"
 # Checkers knowingly absent from lint.yml's LINT_ONLY. Listed HERE, explicitly,
 # so the control still fails on an ACCIDENTAL omission -- the case it exists
 # for -- while a deliberate one costs an edit to this line and shows up in the
-# diff. Both reasons are spelled out in lint.yml's header:
-#   c        permanent -- security-scanners.yml already scans src/
-#   the rest temporary -- red against pre-existing conditions, one issues.md
-#            row each; a name leaves this list in the PR that makes it green.
+# diff. The reason is spelled out in lint.yml's header:
+#   c  permanent -- security-scanners.yml already scans src/
 # This list must only ever SHRINK.
-staged_out="c ci-cadence"
+staged_out="c"
 
 for s in ci/linter/lint-*.sh; do
     n="${s#ci/linter/lint-}"; n="${n%.sh}"
