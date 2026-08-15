@@ -148,14 +148,12 @@ policy_ 1 verify-after-bind ports
 # band left this check green.
 policy_ 1 prove-only-binder-exempt ports
 
-# A workflow_call member carrying its own `push:` runs twice per change and BOTH
-# runs are green, so nothing else in the toolchain notices. Every member here is
-# correct today, but only a per-file comment says so, and a comment does not
-# survive the next workflow copied in. These run as a PAIR: the -ok fixture is
-# the same file with `schedule:` (the intended shape), and without it the red
-# above is equally consistent with "any second trigger is flagged".
-policy_ 1 member-with-push cadence
+# Direct master `push:` and `schedule:` are deliberate member entry points;
+# neither duplicates the PR invocation. These green controls ensure cadence
+# remains focused on a second `pull_request:` trigger.
+policy_ 0 member-with-push cadence
 policy_ 0 member-with-push-ok cadence
+policy_ 1 member-with-pull-request cadence
 
 # The three ways a secret goes missing between a caller and a member, none of
 # which fails anything at the time it is introduced. `inherit` is green and

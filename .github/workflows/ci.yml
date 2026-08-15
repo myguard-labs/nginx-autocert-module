@@ -1,4 +1,4 @@
-# sync-sha: 574cc19a64a366c05f577e75013e6adb552f9f40872d2402e5fd12a2d3f1b73f
+# sync-sha: d414ff68397514768188d73c33d28af194b2f276293f2d0013942e2dcd2ff382
 name: CI
 
 # Single entry point for the PR suite (skeleton standard, ci/PROMPT.md step 17).
@@ -6,10 +6,11 @@ name: CI
 # Step 18 landed for the PR path: build-test.yml, lint.yml, codeql.yml and
 # security-scanners.yml no longer carry a standalone `pull_request:`, so ci.yml
 # is the sole PR entry point and each member runs exactly once per PR.
-# build-test.yml, codeql.yml and security-scanners.yml do still carry `push:`
-# (and their own `schedule:`), which is the remaining `check_cadence()` finding
-# -- `ci-cadence` is one of the checkers still in `selftest.sh`'s `staged_out`
-# list, and leaves it in the PR that makes it green. Not a lane-topology issue.
+# build-test.yml, codeql.yml and security-scanners.yml deliberately retain
+# `push:` for direct master coverage; their bounded `schedule:` triggers cover
+# drift/scanner jobs. `ci-cadence` permits both and rejects only a duplicate
+# `pull_request:` trigger on a workflow_call member (policy decision
+# 2026-08-15).
 #
 # Lane map (step 37/38, ci/PROMPT.md): NO new orchestrator-level lanes. The
 # lane structure already exists as build-test.yml's internal `needs:` graph
