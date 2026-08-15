@@ -1,4 +1,4 @@
-# sync-sha: 21c6e860bf849447495b271209fd4a2648a45cdb4e74392f7403a59ceab9b6f3
+# sync-sha: 4269b1705636c4a263f88f0e182b60b03140ebdf3a094be7493a5073420983ba
 name: ASan
 
 # Manual ASan+UBSan soak — 30s mixed-load soak of the HTTP-01 serve path with an
@@ -43,7 +43,7 @@ jobs:
   # ── ASan+UBSan soak — 30s mixed load, sanitizer compiled into the binary ───
   asan-soak:
     name: ASan+UBSan (30s soak)
-    runs-on: [self-hosted, builder02, lxc]
+    runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || fromJSON('["self-hosted","builder02","lxc"]') }}
     timeout-minutes: 45
     steps:
       - name: Checkout module

@@ -1,4 +1,4 @@
-# sync-sha: 2e3f9b456d56b29ee7dacbadb9f58465099d99d017a52a62f72ffc2f2d31eb26
+# sync-sha: 93db13a9631166ddd6a22f0f9df415f9327b969cb929ae1aceacd3c858104c1d
 name: Valgrind
 
 # Manual Valgrind memcheck lite soak — 30s soak of the HTTP-01 serve path, no
@@ -26,7 +26,7 @@ jobs:
   # ── Short memcheck soak — 30s, no helgrind (helgrind = deep only) ─────────
   memcheck-lite:
     name: Memcheck lite (30s soak)
-    runs-on: [self-hosted, builder02, lxc]
+    runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || fromJSON('["self-hosted","builder02","lxc"]') }}
     timeout-minutes: 45
     steps:
       - name: Checkout module
