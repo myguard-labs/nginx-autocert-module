@@ -30,6 +30,7 @@
 #include <openssl/core_names.h>
 
 #if (OPENSSL_VERSION_NUMBER < 0x30000000L)
+// cppcheck-suppress preprocessorErrorDirective -- intentional OpenSSL 3.0 floor guard
 #error "nginx-autocert-module requires OpenSSL 3.0.0 or newer"
 #endif
 
