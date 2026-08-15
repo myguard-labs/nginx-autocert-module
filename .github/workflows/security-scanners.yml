@@ -1,4 +1,4 @@
-# sync-sha: 621146f6175c85ba375673a47f882532c64618efe0c0bcc74c8e25c0c3a2b16c
+# sync-sha: 4415fdb4acfcf89e25454827a597ae201762ee3ccffbd8b0dd490a874cc933f5
 name: Security scanners
 
 # Static / security scanners gate on every PR/push — flawfinder, clang-tidy
@@ -36,6 +36,8 @@ jobs:
     steps:
       - name: Checkout module
         uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          persist-credentials: false
       - name: Setup scanner deps + ccache
         uses: ./.github/actions/setup
         with:

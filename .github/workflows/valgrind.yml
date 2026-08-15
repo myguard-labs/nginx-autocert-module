@@ -1,4 +1,4 @@
-# sync-sha: 93db13a9631166ddd6a22f0f9df415f9327b969cb929ae1aceacd3c858104c1d
+# sync-sha: 69173d77f75b718d9f5a03c21b9eb8dbae57b86626f43281403c78b6e2cf3ae3
 name: Valgrind
 
 # Manual Valgrind memcheck lite soak — 30s soak of the HTTP-01 serve path, no
@@ -31,6 +31,8 @@ jobs:
     steps:
       - name: Checkout module
         uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          persist-credentials: false
 
       - name: Setup build deps + ccache
         uses: ./.github/actions/setup

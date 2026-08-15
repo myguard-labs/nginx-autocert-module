@@ -245,7 +245,7 @@ only="$(sed -n 's/^ *LINT_ONLY: *//p' .github/workflows/lint.yml)"
 #   the rest temporary -- red against pre-existing conditions, one issues.md
 #            row each; a name leaves this list in the PR that makes it green.
 # This list must only ever SHRINK.
-staged_out="c yaml ci-cadence"
+staged_out="c ci-cadence"
 
 for s in ci/linter/lint-*.sh; do
     n="${s#ci/linter/lint-}"; n="${n%.sh}"
