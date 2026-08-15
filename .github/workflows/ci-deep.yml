@@ -1,4 +1,4 @@
-# sync-sha: 040f853603c8fcd6ebf3cb3a12f9ac9ce813798bfd77253a03eda6b9f1609107
+# sync-sha: 78b9880134fc8a6916aaa432a1670def32642d1031dac8f608347e5764a85075
 name: CI Deep
 
 # Exhaustive dynamic analysis — monthly cron, release, and on-demand only,
@@ -135,12 +135,15 @@ jobs:
         env:
           DISCORD_BOT_TOKEN: ${{ secrets.DISCORD_BOT_TOKEN }}
           DISCORD_CHANNEL_BUILDS: ${{ secrets.DISCORD_CHANNEL_BUILDS }}
+          GH_REPOSITORY: ${{ github.repository }}
+          GH_RUN_ID: ${{ github.run_id }}
+          GH_SERVER_URL: ${{ github.server_url }}
         run: |
           [ -n "$DISCORD_BOT_TOKEN" ] || exit 0
           curl -fsS -X POST -H "Authorization: Bot $DISCORD_BOT_TOKEN" \
             -H "Content-Type: application/json" \
             "https://discord.com/api/v10/channels/$DISCORD_CHANNEL_BUILDS/messages" \
-            -d "{\"content\":\"🔴 ${{ github.repository }} — CI Deep / fuzz FAILED. ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\"}" || true
+            -d "{\"content\":\"🔴 $GH_REPOSITORY — CI Deep / fuzz FAILED. $GH_SERVER_URL/$GH_REPOSITORY/actions/runs/$GH_RUN_ID\"}" || true
 
   memcheck:
     name: Valgrind Memcheck soak
@@ -172,12 +175,15 @@ jobs:
         env:
           DISCORD_BOT_TOKEN: ${{ secrets.DISCORD_BOT_TOKEN }}
           DISCORD_CHANNEL_BUILDS: ${{ secrets.DISCORD_CHANNEL_BUILDS }}
+          GH_REPOSITORY: ${{ github.repository }}
+          GH_RUN_ID: ${{ github.run_id }}
+          GH_SERVER_URL: ${{ github.server_url }}
         run: |
           [ -n "$DISCORD_BOT_TOKEN" ] || exit 0
           curl -fsS -X POST -H "Authorization: Bot $DISCORD_BOT_TOKEN" \
             -H "Content-Type: application/json" \
             "https://discord.com/api/v10/channels/$DISCORD_CHANNEL_BUILDS/messages" \
-            -d "{\"content\":\"🔴 ${{ github.repository }} — CI Deep / memcheck FAILED. ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\"}" || true
+            -d "{\"content\":\"🔴 $GH_REPOSITORY — CI Deep / memcheck FAILED. $GH_SERVER_URL/$GH_REPOSITORY/actions/runs/$GH_RUN_ID\"}" || true
 
   helgrind:
     name: Valgrind Helgrind soak
@@ -209,12 +215,15 @@ jobs:
         env:
           DISCORD_BOT_TOKEN: ${{ secrets.DISCORD_BOT_TOKEN }}
           DISCORD_CHANNEL_BUILDS: ${{ secrets.DISCORD_CHANNEL_BUILDS }}
+          GH_REPOSITORY: ${{ github.repository }}
+          GH_RUN_ID: ${{ github.run_id }}
+          GH_SERVER_URL: ${{ github.server_url }}
         run: |
           [ -n "$DISCORD_BOT_TOKEN" ] || exit 0
           curl -fsS -X POST -H "Authorization: Bot $DISCORD_BOT_TOKEN" \
             -H "Content-Type: application/json" \
             "https://discord.com/api/v10/channels/$DISCORD_CHANNEL_BUILDS/messages" \
-            -d "{\"content\":\"🔴 ${{ github.repository }} — CI Deep / helgrind FAILED. ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\"}" || true
+            -d "{\"content\":\"🔴 $GH_REPOSITORY — CI Deep / helgrind FAILED. $GH_SERVER_URL/$GH_REPOSITORY/actions/runs/$GH_RUN_ID\"}" || true
 
   scanners:
     name: Security scanners
@@ -347,9 +356,11 @@ jobs:
           sudo apt-get install -y python3-cryptography
 
       - name: Run the full e2e suite against angie
+        env:
+          ANGIE_DIR: ${{ steps.v.outputs.angie_dir }}
         run: |
           set -uo pipefail
-          NGX="$GITHUB_WORKSPACE/${{ steps.v.outputs.angie_dir }}"
+          NGX="$GITHUB_WORKSPACE/$ANGIE_DIR"
           BIN="$NGX/objs/angie"
           [ -f "$BIN" ] || BIN="$NGX/objs/nginx"
           chmod +x "$BIN"
@@ -379,9 +390,12 @@ jobs:
         env:
           DISCORD_BOT_TOKEN: ${{ secrets.DISCORD_BOT_TOKEN }}
           DISCORD_CHANNEL_BUILDS: ${{ secrets.DISCORD_CHANNEL_BUILDS }}
+          GH_REPOSITORY: ${{ github.repository }}
+          GH_RUN_ID: ${{ github.run_id }}
+          GH_SERVER_URL: ${{ github.server_url }}
         run: |
           [ -n "$DISCORD_BOT_TOKEN" ] || exit 0
           curl -fsS -X POST -H "Authorization: Bot $DISCORD_BOT_TOKEN" \
             -H "Content-Type: application/json" \
             "https://discord.com/api/v10/channels/$DISCORD_CHANNEL_BUILDS/messages" \
-            -d "{\"content\":\"🔴 ${{ github.repository }} — CI Deep / e2e-angie FAILED. ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\"}" || true
+            -d "{\"content\":\"🔴 $GH_REPOSITORY — CI Deep / e2e-angie FAILED. $GH_SERVER_URL/$GH_REPOSITORY/actions/runs/$GH_RUN_ID\"}" || true

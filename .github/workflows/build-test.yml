@@ -1,4 +1,4 @@
-# sync-sha: f49c15b17ad440587a8a587a06ae61f1b8f5ba094d148ef8d60bdcd69c7736c1
+# sync-sha: 21e7ba60a89615b902d78ad269e171f86718ef6736ece4fd51f29eaa9f06de9f
 name: Build & Test
 
 # Third-party actions pinned to commit SHAs for supply-chain safety.
@@ -75,6 +75,8 @@ jobs:
     steps:
       - name: Checkout module
         uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          persist-credentials: false
 
       - name: Install validation tools
         run: |
@@ -200,6 +202,8 @@ jobs:
     steps:
       - name: Checkout module
         uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          persist-credentials: false
       - name: Build module + load/serve tests
         uses: ./.github/actions/build-module
         with:
@@ -222,6 +226,8 @@ jobs:
     steps:
       - name: Checkout module
         uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          persist-credentials: false
       - name: Build module + load/serve tests
         uses: ./.github/actions/build-module
         with:
@@ -247,6 +253,8 @@ jobs:
     steps:
       - name: Checkout module
         uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          persist-credentials: false
 
       - name: Setup build deps
         uses: ./.github/actions/setup
@@ -264,19 +272,26 @@ jobs:
         # Do NOT gate on cache-hit: on self-hosted runners actions/cache can
         # report a hit while the path is empty, so always ensure the file is
         # actually present (idempotent — curl only when missing).
+        env:
+          ANGIE_SHA256: ${{ needs.resolve.outputs.angie_sha256 }}
+          ANGIE_URL: ${{ needs.resolve.outputs.angie_url }}
+          ANGIE_VERSION: ${{ needs.resolve.outputs.angie_version }}
+          NGINX_SHA256: ${{ needs.resolve.outputs.nginx_sha256 }}
+          NGINX_URL: ${{ needs.resolve.outputs.nginx_url }}
+          NGINX_VERSION: ${{ needs.resolve.outputs.nginx_version }}
         run: |
           set -euo pipefail
           mkdir -p ~/.cache/src-tarballs
-          nginx_tar=~/.cache/src-tarballs/nginx-${{ needs.resolve.outputs.nginx_version }}.tar.gz
-          angie_tar=~/.cache/src-tarballs/angie-${{ needs.resolve.outputs.angie_version }}.tar.gz
-          [ -s "$nginx_tar" ] || curl -fsSL -o "$nginx_tar" "${{ needs.resolve.outputs.nginx_url }}"
-          [ -s "$angie_tar" ] || curl -fsSL -o "$angie_tar" "${{ needs.resolve.outputs.angie_url }}"
+          nginx_tar=~/.cache/src-tarballs/nginx-${NGINX_VERSION}.tar.gz
+          angie_tar=~/.cache/src-tarballs/angie-${ANGIE_VERSION}.tar.gz
+          [ -s "$nginx_tar" ] || curl -fsSL -o "$nginx_tar" "$NGINX_URL"
+          [ -s "$angie_tar" ] || curl -fsSL -o "$angie_tar" "$ANGIE_URL"
           # Now that the versions are pinned, the digest can be enforced: a
           # changed upstream archive (or a poisoned runner cache, which is why
           # this also covers the cache-hit path) fails here instead of being
           # compiled. Digests come from .github/versions.env via `resolve`.
-          echo "${{ needs.resolve.outputs.nginx_sha256 }}  $nginx_tar" | sha256sum -c -
-          echo "${{ needs.resolve.outputs.angie_sha256 }}  $angie_tar" | sha256sum -c -
+          echo "$NGINX_SHA256  $nginx_tar" | sha256sum -c -
+          echo "$ANGIE_SHA256  $angie_tar" | sha256sum -c -
 
       - name: ABI-drift guard (matched OK, mismatch refused)
         env:
@@ -286,16 +301,18 @@ jobs:
           WORKSPACE="$GITHUB_WORKSPACE" bash ci/tests/e2e/abi-build-and-check.sh
 
       - name: Test-only directives rejected in prod build
+        env:
+          NGINX_VERSION: ${{ needs.resolve.outputs.nginx_version }}
         run: |
           set -euo pipefail
-          tar -xzf ~/.cache/src-tarballs/nginx-${{ needs.resolve.outputs.nginx_version }}.tar.gz \
+          tar -xzf "$HOME/.cache/src-tarballs/nginx-${NGINX_VERSION}.tar.gz" \
             -C "$GITHUB_WORKSPACE"
           # AUTOCERT_TEST=0: the test-only directives must be absent.
-          AC_BUILD_DIR="nginx-${{ needs.resolve.outputs.nginx_version }}" \
+          AC_BUILD_DIR="nginx-${NGINX_VERSION}" \
             AC_BUILD_AUTOCERT_TEST=0 \
             AC_BUILD_EXTRA_CC_OPT="-Wall -Wextra -Werror" \
             bash ci/tools/ci-build.sh release
-          cd "nginx-${{ needs.resolve.outputs.nginx_version }}"
+          cd "nginx-${NGINX_VERSION}"
           # ci-build.sh performed a full build: `nginx -t` below needs the
           # server binary, not just the .so.
           test -f objs/ngx_http_autocert_module.so
@@ -360,6 +377,9 @@ jobs:
           ccache -s || true
 
       - name: Slow-drip total-read budget (#37)
+        env:
+          ANGIE_VERSION: ${{ needs.resolve.outputs.angie_version }}
+          NGINX_VERSION: ${{ needs.resolve.outputs.nginx_version }}
         run: |
           set -euo pipefail
           run_slowloris() {
@@ -384,10 +404,10 @@ jobs:
             cd "$GITHUB_WORKSPACE"
             echo "✓ slowloris budget guard passed for ${flavor} ${version}"
           }
-          run_slowloris nginx "${{ needs.resolve.outputs.nginx_version }}" \
-            "$HOME/.cache/src-tarballs/nginx-${{ needs.resolve.outputs.nginx_version }}.tar.gz"
-          run_slowloris angie "${{ needs.resolve.outputs.angie_version }}" \
-            "$HOME/.cache/src-tarballs/angie-${{ needs.resolve.outputs.angie_version }}.tar.gz"
+          run_slowloris nginx "$NGINX_VERSION" \
+            "$HOME/.cache/src-tarballs/nginx-${NGINX_VERSION}.tar.gz"
+          run_slowloris angie "$ANGIE_VERSION" \
+            "$HOME/.cache/src-tarballs/angie-${ANGIE_VERSION}.tar.gz"
 
   unit-tests:
     name: Unit tests
@@ -397,6 +417,8 @@ jobs:
     steps:
       - name: Checkout module
         uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          persist-credentials: false
 
       - name: Setup build deps
         uses: ./.github/actions/setup
@@ -461,6 +483,8 @@ jobs:
     steps:
       - name: Checkout module
         uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          persist-credentials: false
 
       - name: Setup runtime deps
         uses: ./.github/actions/setup
@@ -480,12 +504,16 @@ jobs:
           path: ${{ matrix.dir }}
 
       - name: Run the full e2e suite against ${{ matrix.flavor }}
+        env:
+          MATRIX_DIR: ${{ matrix.dir }}
+          MATRIX_FLAVOR: ${{ matrix.flavor }}
+          MATRIX_PORT_OFFSET: ${{ matrix.port_offset }}
         run: |
           set -uo pipefail
-          NGX="$GITHUB_WORKSPACE/${{ matrix.dir }}"
+          NGX="$GITHUB_WORKSPACE/$MATRIX_DIR"
           # Artifacts don't preserve the exec bit; test EXISTENCE then chmod.
           # nginx ships objs/nginx, angie ships objs/angie.
-          BIN="$NGX/objs/${{ matrix.flavor }}"
+          BIN="$NGX/objs/$MATRIX_FLAVOR"
           [ -f "$BIN" ] || BIN="$NGX/objs/nginx"
           chmod +x "$BIN"
           # Every published host port MUST stay below the ephemeral range
@@ -497,8 +525,8 @@ jobs:
           # id yielded a new offset. Keep run_offset small enough that
           #   max(PORT_BASES) + run_offset + flavor_offset + max_slot*100 < 32768.
           run_offset=$(( (GITHUB_RUN_ID % 6) * 1500 ))
-          port_offset=$(( run_offset + ${{ matrix.port_offset }} ))
-          echo "e2e port offset: run_offset=${run_offset} flavor_offset=${{ matrix.port_offset }} port_offset=${port_offset}"
+          port_offset=$(( run_offset + MATRIX_PORT_OFFSET ))
+          echo "e2e port offset: run_offset=${run_offset} flavor_offset=${MATRIX_PORT_OFFSET} port_offset=${port_offset}"
 
           # Fail LOUDLY if the budget is ever blown — a silent overflow back into
           # the ephemeral range is exactly the failure this guard exists to stop.
@@ -520,8 +548,8 @@ jobs:
           # and tls-alpn-issue.sh/retry-after.sh, which share AC_PORT_15453).
           # A stride wider than the span would need >13189 per slot and blow the
           # ephemeral ceiling, so the port scheme has to change first.
-          SERVER_BIN="$BIN" NGX_BUILD_DIR="$NGX" FLAVOR="${{ matrix.flavor }}" AC_PORT_OFFSET="$port_offset" \
-            AC_E2E_TIMINGS="$GITHUB_WORKSPACE/e2e-timings-${{ matrix.flavor }}.tsv" \
+          SERVER_BIN="$BIN" NGX_BUILD_DIR="$NGX" FLAVOR="$MATRIX_FLAVOR" AC_PORT_OFFSET="$port_offset" \
+            AC_E2E_TIMINGS="$GITHUB_WORKSPACE/e2e-timings-${MATRIX_FLAVOR}.tsv" \
             bash ci/tests/e2e/run-all.sh
 
       # Per-script wall-clock, slowest first. Kept as an artifact so shard

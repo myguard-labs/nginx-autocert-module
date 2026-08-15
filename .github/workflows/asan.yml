@@ -1,4 +1,4 @@
-# sync-sha: 4269b1705636c4a263f88f0e182b60b03140ebdf3a094be7493a5073420983ba
+# sync-sha: d891c1cb3548c86519c87e95c7ab5daefbbf8a735aaa6ec8bf9c5b3298f5fece
 name: ASan
 
 # Manual ASan+UBSan soak — 30s mixed-load soak of the HTTP-01 serve path with an
@@ -48,6 +48,8 @@ jobs:
     steps:
       - name: Checkout module
         uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          persist-credentials: false
 
       - name: Setup build deps + ccache
         uses: ./.github/actions/setup

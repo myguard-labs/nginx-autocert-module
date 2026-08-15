@@ -1,0 +1,11 @@
+---
+# GitHub Actions expressions, immutable action pins and shell commands are often
+# unbreakable. Keep them visible as warnings while reserving errors for YAML
+# syntax and structural defects that would make the workflow unsafe to gate.
+extends: default
+
+rules:
+  document-start: disable
+  line-length:
+    max: 120
+    level: warning
