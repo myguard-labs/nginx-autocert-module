@@ -97,7 +97,9 @@ TRUST_SPLITS = frozenset(
     )
 )
 
-HOSTED = re.compile(r"ubuntu-(?:latest|[0-9]+\.[0-9]+)")
+# GitHub-hosted Windows jobs do not need a fork split: they never select the
+# persistent build pool. Keep them accepted alongside the Ubuntu fork arm.
+HOSTED = re.compile(r"(?:ubuntu-(?:latest|[0-9]+\.[0-9]+)|windows-latest)")
 
 # The runtime driver. A job that starts it is a "runtime-bearing" job and owes
 # the port-band declaration checked below.

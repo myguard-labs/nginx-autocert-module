@@ -1,4 +1,4 @@
-# sync-sha: ca0ef3b3393a70fdda579bde9c156cd60eb547ab375d849644d9f892ead320da
+# sync-sha: 2608a403d35c7d7d37f4c1128bc3dbbe10f0822771c4e626e7d6422b78d11997
 name: Bump versions
 
 # Weekly: check nginx.org/angie.software for newer releases than what is
@@ -45,7 +45,7 @@ permissions:
 jobs:
   bump:
     name: Bump nginx/angie version pins
-    runs-on: [self-hosted, builder02, lxc]
+    runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || fromJSON('["self-hosted","builder02","lxc"]') }}
     timeout-minutes: 15
     steps:
       - name: Checkout

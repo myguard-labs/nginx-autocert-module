@@ -1,4 +1,4 @@
-# sync-sha: 21eb85f39ec39ef172e4b87171344f008f7bfe0e67aae0566b7158fafcfaa4dc
+# sync-sha: 84e209d2cde553c6ab0ab015575f7f42b6d16d5b108ea5759ccaa42618573eb0
 name: Fuzzing
 
 # Fast fuzz regression — 30s/target on the JSON + HTTP + base64url ACME parsers
@@ -36,7 +36,7 @@ jobs:
   # ── Short fuzz regression — all three parser targets, 30s each ────────────
   fuzz-regression:
     name: Fuzz regression (30s/target)
-    runs-on: [self-hosted, builder02, lxc]
+    runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || fromJSON('["self-hosted","builder02","lxc"]') }}
     timeout-minutes: 30
     steps:
       - name: Checkout module

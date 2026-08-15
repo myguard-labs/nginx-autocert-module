@@ -1,4 +1,4 @@
-# sync-sha: efa28aaeb83ba709560b74c37d88dcf92a6ed35a553a2aae69b31cb9241002f8
+# sync-sha: f49c15b17ad440587a8a587a06ae61f1b8f5ba094d148ef8d60bdcd69c7736c1
 name: Build & Test
 
 # Third-party actions pinned to commit SHAs for supply-chain safety.
@@ -70,7 +70,7 @@ jobs:
   # the shell test harness and the workflows before the build matrix spins up.
   validation:
     name: Validation
-    runs-on: [self-hosted, builder02, lxc]
+    runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || fromJSON('["self-hosted","builder02","lxc"]') }}
     timeout-minutes: 15
     steps:
       - name: Checkout module
@@ -144,7 +144,7 @@ jobs:
     # Scheduled runs exist only to catch toolchain drift in `validation`; skip
     # the rest of the matrix here to keep self-hosted runner cost down.
     if: github.event_name != 'schedule'
-    runs-on: [self-hosted, builder02, lxc]
+    runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || fromJSON('["self-hosted","builder02","lxc"]') }}
     timeout-minutes: 5
     outputs:
       nginx_version: ${{ steps.v.outputs.nginx_version }}
@@ -195,7 +195,7 @@ jobs:
   build-nginx:
     name: Build & load (nginx ${{ needs.resolve.outputs.nginx_version }})
     needs: [validation, resolve]
-    runs-on: [self-hosted, builder02, lxc]
+    runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || fromJSON('["self-hosted","builder02","lxc"]') }}
     timeout-minutes: 20
     steps:
       - name: Checkout module
@@ -217,7 +217,7 @@ jobs:
   build-angie:
     name: Build & load (angie ${{ needs.resolve.outputs.angie_version }})
     needs: [validation, resolve]
-    runs-on: [self-hosted, builder02, lxc]
+    runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || fromJSON('["self-hosted","builder02","lxc"]') }}
     timeout-minutes: 20
     steps:
       - name: Checkout module
@@ -242,7 +242,7 @@ jobs:
   guard-suite:
     name: Guard suite
     needs: [validation, resolve]
-    runs-on: [self-hosted, builder02, docker]
+    runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || fromJSON('["self-hosted","builder02","docker"]') }}
     timeout-minutes: 35
     steps:
       - name: Checkout module
@@ -392,7 +392,7 @@ jobs:
   unit-tests:
     name: Unit tests
     needs: [resolve, build-nginx, guard-suite]
-    runs-on: [self-hosted, builder02, lxc]
+    runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || fromJSON('["self-hosted","builder02","lxc"]') }}
     timeout-minutes: 15
     steps:
       - name: Checkout module
@@ -448,7 +448,7 @@ jobs:
   e2e:
     name: e2e suite (Pebble) [${{ matrix.flavor }}]
     needs: [resolve, build-nginx]
-    runs-on: [self-hosted, builder02, docker]
+    runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || fromJSON('["self-hosted","builder02","docker"]') }}
     timeout-minutes: 60
     strategy:
       fail-fast: false
