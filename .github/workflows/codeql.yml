@@ -1,4 +1,4 @@
-# sync-sha: f4f265c54d4f9ab182957953896e07195e6085dc7a5552aace9b9eab1f587a28
+# sync-sha: ea3026bd8139ccddbfad7d8743bd8d28e0bdecca746017d4133cca34fa05ac4b
 name: CodeQL
 
 env:
@@ -34,7 +34,7 @@ jobs:
     timeout-minutes: 30
     permissions:
       contents: read
-      security-events: write # Upload CodeQL SARIF to the Security tab.
+      security-events: write  # Upload CodeQL SARIF to the Security tab.
     steps:
       - name: Checkout module
         uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5

@@ -1,4 +1,4 @@
-# sync-sha: 9e0dad645a545f682d4fd5e495e60e02aa60cb51d01a4f388b0170228b597110
+# sync-sha: 66fbe18632e9fec278cd89f506f5a63ad2fb6dd326aee396d9805b43cdd0a2ad
 name: Windows build
 
 # Native Windows port gate (W17). Proves the module compiles and links on
@@ -323,7 +323,7 @@ jobs:
 
       - name: Pre-build PCRE2 and zlib
         # vcvars.bat plus cl/link continuation and exit syntax are native cmd.
-        shell: cmd # zizmor: ignore[misfeature]
+        shell: cmd  # zizmor: ignore[misfeature]
         run: |
           call "%VCVARS%" || exit /b 1
 
@@ -353,7 +353,7 @@ jobs:
 
       - name: Build
         # vcvars.bat and nmake require the Visual Studio cmd environment.
-        shell: cmd # zizmor: ignore[misfeature]
+        shell: cmd  # zizmor: ignore[misfeature]
         working-directory: nginx-${{ env.NGINX_VERSION }}
         run: |
           call "%VCVARS%" || exit /b 1
