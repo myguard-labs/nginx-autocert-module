@@ -1,4 +1,4 @@
-# sync-sha: 278f08bf26ab3ea0f6824110079aafb823a27c7513e24a64998bea4c2ae445cc
+# sync-sha: 95e9fa5ac8b34119ee8d705f6f78bc9a4d2d70d4848e07e6df1cc76fc78a9173
 name: Security scanners
 
 # Static / security scanners gate on every PR/push — flawfinder, clang-tidy
@@ -36,10 +36,15 @@ jobs:
     steps:
       - name: Checkout module
         uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
-      - name: Install dependencies
+      - name: Setup scanner deps + ccache
+        uses: ./.github/actions/setup
+        with:
+          packages: >-
+            build-essential ccache clang-tidy flawfinder libpcre2-dev libssl-dev
+            nginx-dev pipx python3 python3-pip zlib1g-dev
+          ccache-key: security-scanners
+      - name: Install semgrep
         run: |
-          sudo apt-get update
-          sudo apt-get install -y flawfinder clang-tidy python3 python3-pip pipx nginx-dev libssl-dev
           # semgrep: isolate via pipx (PEP 668 blocks a bare pip3 install into the
           # system Python on the Ubuntu 24.04 self-hosted runner). Fall back to a
           # user pip install with --break-system-packages if pipx is unavailable.

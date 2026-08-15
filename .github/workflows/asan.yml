@@ -1,4 +1,4 @@
-# sync-sha: 50e59435d141913eb070ea9fec4b00047ec2c752debc496272e623ee070b4a49
+# sync-sha: 21c6e860bf849447495b271209fd4a2648a45cdb4e74392f7403a59ceab9b6f3
 name: ASan
 
 # Manual ASan+UBSan soak — 30s mixed-load soak of the HTTP-01 serve path with an
@@ -49,12 +49,13 @@ jobs:
       - name: Checkout module
         uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
 
-      - name: Install dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            build-essential curl libpcre2-dev libssl-dev pkg-config \
-            wget zlib1g-dev
+      - name: Setup build deps + ccache
+        uses: ./.github/actions/setup
+        with:
+          packages: >-
+            build-essential ccache curl libpcre2-dev libssl-dev pkg-config wget
+            zlib1g-dev
+          ccache-key: asan
 
       - name: Build ASan+UBSan nginx + autocert module (dynamic, AUTOCERT_TEST=1)
         run: bash ci/tools/ci-build.sh asan

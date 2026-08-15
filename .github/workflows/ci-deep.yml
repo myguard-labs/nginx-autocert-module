@@ -1,4 +1,4 @@
-# sync-sha: 86f315cddd5ec7f36e9ca2e5bb19c4af88e1dd256c3f90858d16846d7785433a
+# sync-sha: d2161e1f489ee4f74e6ec027f25a3398af8fc1128ef7576f72e34fc8e72e076d
 name: CI Deep
 
 # Exhaustive dynamic analysis — monthly cron, release, and on-demand only,
@@ -151,12 +151,13 @@ jobs:
         uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
         with:
           persist-credentials: false
-      - name: Install dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            build-essential curl libpcre2-dev libssl-dev pkg-config \
+      - name: Setup build deps + ccache
+        uses: ./.github/actions/setup
+        with:
+          packages: >-
+            build-essential ccache curl libpcre2-dev libssl-dev pkg-config
             valgrind wget zlib1g-dev
+          ccache-key: ci-deep-valgrind
       - name: Build debug nginx + autocert module (dynamic, AUTOCERT_TEST=1)
         run: bash ci/tools/ci-build.sh valgrind
       - name: Memcheck soak (600s @ 4 conc, WITH suppressions)
@@ -187,12 +188,13 @@ jobs:
         uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
         with:
           persist-credentials: false
-      - name: Install dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            build-essential curl libpcre2-dev libssl-dev pkg-config \
+      - name: Setup build deps + ccache
+        uses: ./.github/actions/setup
+        with:
+          packages: >-
+            build-essential ccache curl libpcre2-dev libssl-dev pkg-config
             valgrind wget zlib1g-dev
+          ccache-key: ci-deep-valgrind
       - name: Build debug nginx + autocert module (dynamic, AUTOCERT_TEST=1)
         run: bash ci/tools/ci-build.sh valgrind
       - name: Helgrind soak (600s @ 4 conc, --error-exitcode=99, WITH suppressions)
@@ -223,10 +225,15 @@ jobs:
         uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
         with:
           persist-credentials: false
-      - name: Install dependencies
+      - name: Setup scanner deps + ccache
+        uses: ./.github/actions/setup
+        with:
+          packages: >-
+            build-essential ccache clang-tidy flawfinder libpcre2-dev libssl-dev
+            nginx-dev pipx python3 python3-pip zlib1g-dev
+          ccache-key: ci-deep-scanners
+      - name: Install semgrep
         run: |
-          sudo apt-get update
-          sudo apt-get install -y flawfinder clang-tidy python3 python3-pip pipx nginx-dev libssl-dev
           # semgrep: isolate via pipx (PEP 668 blocks a bare pip3 install into the
           # system Python on the Ubuntu 24.04 self-hosted runner). Fall back to a
           # user pip install with --break-system-packages if pipx is unavailable.

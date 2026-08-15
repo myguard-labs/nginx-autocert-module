@@ -1,4 +1,4 @@
-# sync-sha: 140406a0ebea3bb74a32f2bf0554136951f761f9066d4512706b8a4f7c6d424e
+# sync-sha: 59bf74695cb5ab7638d9c9e65f7d6b0b5f16572fe46f0097853a874c34a5f58c
 name: CodeQL
 
 env:
@@ -39,11 +39,12 @@ jobs:
       - name: Checkout module
         uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
 
-      - name: Install build dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            build-essential curl libpcre2-dev libssl-dev zlib1g-dev
+      - name: Setup build deps + ccache
+        uses: ./.github/actions/setup
+        with:
+          packages: >-
+            build-essential ccache curl libpcre2-dev libssl-dev zlib1g-dev
+          ccache-key: codeql
 
       - name: Initialize CodeQL
         uses: github/codeql-action/init@8aad20d150bbac5944a9f9d289da16a4b0d87c1e # v4
