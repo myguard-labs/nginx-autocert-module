@@ -1,4 +1,4 @@
-# sync-sha: 2448a01dab54d65fd202ba50174e48fde877ab8a2c20ae79f4732d1fa69968fe
+# sync-sha: f14fe02f0deeaefd4f0b0c14a1f92769f6f5dbbd6889317d4da84e890e9b1e5a
 name: Lint
 
 # The same ci/linter/ scripts a developer runs locally, run again on the PR --
@@ -7,27 +7,15 @@ name: Lint
 # remote run the SAME entry point on purpose: a CI-only reimplementation drifts
 # from the hook and the two stop agreeing.
 #
-# LINT_ONLY is deliberately a SUBSET of the ci/linter/lint-*.sh set. Two
-# distinct reasons, and the difference matters:
+# LINT_ONLY deliberately excludes the `c` checker:
 #
 #   "c"  -- permanently excluded. flawfinder / clang-tidy / semgrep already run
 #           over src/ in security-scanners.yml on every PR and push, so running
 #           lint-c.sh here would pay for the same scan twice and report each C
 #           finding in two places. This matches the reference skeleton.
 #
-#   ci-cadence -- excluded TEMPORARILY.
-#           Each is red against conditions that predate this gate, none of
-#           which this workflow introduced:
-#             ci-cadence  build-test / codeql / security-scanners each carry a
-#                         push: while also being workflow_call members
-#           Turning them on here before fixing those would make Lint a gate
-#           that is red on arrival and blocks every unrelated PR, which trains
-#           people to ignore it. Each has a row in issues.md; a checker is
-#           added back to this list in the same PR that makes it green, so the
-#           gate only ever ratchets forward.
-#
-# Every checker still runs locally and in the pre-commit hook via run-all.sh --
-# the exclusions are about what BLOCKS a PR, not about what is checked.
+# lint-c.sh still runs locally and in the pre-commit hook via run-all.sh. The
+# exclusion only avoids duplicating the PR security scan.
 #
 # runs-on: ubuntu-latest, NOT the self-hosted pool. This job needs no nginx
 # build, and ci.yml deliberately caps peak self-hosted use; putting lint on a
@@ -85,5 +73,5 @@ jobs:
           # fails on any omission not named there. Adding a lint-*.sh without
           # adding its name leaves it running locally and never in CI, which is
           # the quieter half of a gate that is not really a gate.
-          LINT_ONLY: ci-ports ci-runners ci-secrets docs-drift nginx python sh spelling sync-stamp yaml
+          LINT_ONLY: ci-cadence ci-ports ci-runners ci-secrets docs-drift nginx python sh spelling sync-stamp yaml
         run: ci/linter/run-all.sh
