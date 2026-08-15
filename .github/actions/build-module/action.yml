@@ -1,4 +1,4 @@
-# sync-sha: b68ff284aaa5a07d7c3e2dcedd65f8a080d98adbf3124f352d4788b83a5aef9c
+# sync-sha: 64228d6f058a954a3aaf7649158d9473382c7391d77f713353d94d20843fb725
 name: Build module + load/serve tests
 description: >
   Fetch one flavor (nginx | angie), configure + build the autocert dynamic
@@ -73,7 +73,6 @@ runs:
       shell: bash
       run: |
         set -euo pipefail
-        cd "${{ inputs.dir }}"
         # AUTOCERT_TEST=1 compiles in the test-only seed directives
         # (autocert_test_challenge / autocert_test_alpn) the e2e suite needs.
         # Production builds omit them; the "test-directives rejected" job proves
@@ -82,21 +81,18 @@ runs:
         # (native acme + this module's autocert in one instance — the prod
         # scenario that SIGSEGV'd, memory issues.md 2026-06-22) is exercised.
         # Mainline nginx has no such flag.
-        ACME_FLAG=
-        [ "${{ inputs.flavor }}" = angie ] && ACME_FLAG=--with-http_acme_module
-        AUTOCERT_TEST=1 ./configure --with-compat --with-http_ssl_module \
-          $ACME_FLAG \
-          --with-cc="ccache cc" \
-          --with-cc-opt="-Wall -Wextra -Werror" \
-          --add-dynamic-module="$GITHUB_WORKSPACE" > /tmp/conf.log 2>&1 \
-          || { tail -40 /tmp/conf.log; exit 1; }
+        acme_module=0
+        [ "${{ inputs.flavor }}" = angie ] && acme_module=1
+        AC_BUILD_DIR="${{ inputs.dir }}" \
+          AC_BUILD_EXTRA_CC_OPT="-Wall -Wextra -Werror" \
+          AC_BUILD_WITH_HTTP_ACME_MODULE="$acme_module" \
+          bash ci/tools/ci-build.sh release
         # Full build (not `make modules`): the load test needs the server
         # binary too. angie names it objs/angie, nginx names it objs/nginx.
-        make > /tmp/make.log 2>&1 || { tail -40 /tmp/make.log; exit 1; }
-        test -f objs/ngx_http_autocert_module.so
-        BIN=objs/nginx; [ -x objs/angie ] && BIN=objs/angie
+        test -f "${{ inputs.dir }}/objs/ngx_http_autocert_module.so"
+        BIN="${{ inputs.dir }}/objs/nginx"; [ -x "${{ inputs.dir }}/objs/angie" ] && BIN="${{ inputs.dir }}/objs/angie"
         test -x "$BIN"
-        echo "SERVER_BIN=$PWD/$BIN" >> "$GITHUB_ENV"
+        echo "SERVER_BIN=$GITHUB_WORKSPACE/$BIN" >> "$GITHUB_ENV"
         echo "✓ built autocert .so (http) + $BIN"
         # Hit-rate visibility (CACHE-4): confirm ccache is actually warming.
         ccache -s || true
