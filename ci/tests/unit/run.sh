@@ -188,6 +188,11 @@ gcc -D_GNU_SOURCE -Wall -Wextra -Werror $CORE_INC \
 	"$NGX/objs/src/core/ngx_string.o" -o test_win32_quote_arg
 ./test_win32_quote_arg
 
+# dns-01 hooks share one order across add/remove invocations.  The timeout
+# verdict is per-hook state, so keep the source-level control-flow invariant
+# pinned: a timed-out add hook must not poison a successful remove hook.
+bash "$WORKSPACE/ci/tests/unit/assert_dns_hook_timeout_reset.sh"
+
 # win32 named-mutex singleton NAME construction
 # (ngx_autocert_win32_singleton_name, W9): "Global\ngx_autocert_singleton_<hash>"
 # from a (caller-canonicalized) store path -- same path -> same name, different
