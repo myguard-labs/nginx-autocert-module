@@ -1,4 +1,4 @@
-# sync-sha: d12647ba5e386b6280d5b1576e3546511a8d9b7e8c202c88d08c5bdac1951ec5
+# sync-sha: 2e3f9b456d56b29ee7dacbadb9f58465099d99d017a52a62f72ffc2f2d31eb26
 name: Valgrind
 
 # Manual Valgrind memcheck lite soak — 30s soak of the HTTP-01 serve path, no
@@ -32,12 +32,13 @@ jobs:
       - name: Checkout module
         uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
 
-      - name: Install dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            build-essential curl libpcre2-dev libssl-dev pkg-config \
+      - name: Setup build deps + ccache
+        uses: ./.github/actions/setup
+        with:
+          packages: >-
+            build-essential ccache curl libpcre2-dev libssl-dev pkg-config
             valgrind wget zlib1g-dev
+          ccache-key: valgrind
 
       - name: Build debug nginx + autocert module (dynamic, AUTOCERT_TEST=1)
         run: bash ci/tools/ci-build.sh valgrind
