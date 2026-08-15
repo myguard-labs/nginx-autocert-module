@@ -35,6 +35,9 @@
 
 #include <ngx_config.h>
 #include <ngx_core.h>
+#if !(NGX_WIN32)
+#include <signal.h>
+#endif
 
 #include <openssl/evp.h>
 
@@ -111,11 +114,24 @@ struct ngx_autocert_order_s {
     ngx_uint_t                       challenge_set;    /* token in store? */
     ngx_uint_t                       alpn_set;         /* M10c: cert in alpn store? */
     ngx_uint_t                       dns_set;          /* M16: TXT published? */
+    ngx_uint_t                       dns_hook_is_add;  /* current hook publishes TXT */
+    ngx_uint_t                       dns_hook_timed_out;
+    ngx_uint_t                       dns_hook_cleanup; /* finish waits for remove */
+    ngx_int_t                        finish_rc;
     ngx_str_t                        dns_txt_value;    /* M16: base64url digest */
     ngx_uint_t                       done;
     ngx_event_t                      poll_timer;       /* authz polling */
     ngx_event_t                      order_timer;      /* order polling (M6b) */
     ngx_event_t                      dns_delay_timer;  /* M16 propagation wait */
+    ngx_event_t                      dns_hook_timer;   /* nonblocking child status */
+    ngx_event_t                      dns_hook_deadline_timer;
+    ngx_pid_t                        dns_hook_pid;
+#if (NGX_WIN32)
+    void                            *dns_hook_process;
+    void                            *dns_hook_job;
+#else
+    sigset_t                         dns_hook_sigmask;
+#endif
 
     /* M6b issuance state */
     EVP_PKEY                        *cert_key;        /* fresh cert key */

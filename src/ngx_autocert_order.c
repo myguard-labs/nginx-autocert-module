@@ -117,6 +117,10 @@ static ngx_int_t ngx_autocert_order_publish_alpn(ngx_autocert_order_t *order);
 static ngx_int_t ngx_autocert_order_publish_dns(ngx_autocert_order_t *order);
 static ngx_int_t ngx_autocert_order_dns_hook(ngx_autocert_order_t *order,
     ngx_str_t *hook, ngx_uint_t is_add);
+static void ngx_autocert_order_dns_hook_timer(ngx_event_t *ev);
+static void ngx_autocert_order_dns_hook_deadline(ngx_event_t *ev);
+static void ngx_autocert_order_dns_hook_done(ngx_autocert_order_t *order,
+    ngx_int_t rc);
 static void ngx_autocert_order_dns_delay_timer(ngx_event_t *ev);
 static void ngx_autocert_order_unpublish(ngx_autocert_order_t *order);
 static void ngx_autocert_order_finish(ngx_autocert_order_t *order,
@@ -899,7 +903,7 @@ ngx_autocert_dns_elapsed_ms(uint64_t start)
  * exec failure, SIGCHLD masking).
  */
 static ngx_int_t
-ngx_autocert_dns_hook_spawn(ngx_autocert_order_t *order, ngx_str_t *hook,
+ngx_autocert_dns_hook_spawn_blocking(ngx_autocert_order_t *order, ngx_str_t *hook,
     ngx_str_t *name, char **argv, ngx_msec_t timeout_ms)
 {
     pid_t             pid, w;
@@ -1094,7 +1098,7 @@ unblock:
  * handle would keep KILL_ON_JOB_CLOSE from ever firing on the next call.
  */
 static ngx_int_t
-ngx_autocert_dns_hook_spawn(ngx_autocert_order_t *order, ngx_str_t *hook,
+ngx_autocert_dns_hook_spawn_blocking(ngx_autocert_order_t *order, ngx_str_t *hook,
     ngx_str_t *name, char **argv, ngx_msec_t timeout_ms)
 {
     ngx_int_t                          rc;
@@ -1409,6 +1413,156 @@ cleanup:
 #endif /* NGX_WIN32 */
 
 
+/* Launch once; completion is observed only from nginx timer callbacks.  SIGCHLD
+ * stays blocked in this worker while the raw child is outstanding so nginx's
+ * generic reaper cannot consume the status before our one-shot waitpid call. */
+static ngx_int_t
+ngx_autocert_dns_hook_spawn(ngx_autocert_order_t *order, ngx_str_t *hook,
+    ngx_str_t *name, char **argv, ngx_msec_t timeout_ms)
+{
+#if (NGX_WIN32)
+    /* Kept as a conservative fallback until the native-handle state machine is
+     * available on this platform. */
+    return ngx_autocert_dns_hook_spawn_blocking(order, hook, name, argv,
+                                                 timeout_ms);
+#else
+    pid_t      pid;
+    sigset_t   set;
+
+    sigemptyset(&set);
+    sigaddset(&set, SIGCHLD);
+    if (sigprocmask(SIG_BLOCK, &set, &order->dns_hook_sigmask) != 0) {
+        ngx_log_error(NGX_LOG_ERR, order->log, ngx_errno,
+                      "autocert: dns-01 sigprocmask() failed");
+        return NGX_ERROR;
+    }
+
+    pid = fork();
+    if (pid < 0) {
+        (void) sigprocmask(SIG_SETMASK, &order->dns_hook_sigmask, NULL);
+        ngx_log_error(NGX_LOG_ERR, order->log, ngx_errno,
+                      "autocert: dns-01 fork() failed");
+        return NGX_ERROR;
+    }
+
+    if (pid == 0) {
+        long  maxfd, fd;
+        extern char **environ;
+
+        (void) sigprocmask(SIG_SETMASK, &order->dns_hook_sigmask, NULL);
+        (void) setpgid(0, 0);
+#if defined(__linux__) && defined(SYS_close_range)
+        if (syscall(SYS_close_range, 3, ~0U, 0) != 0)
+#endif
+        {
+            maxfd = sysconf(_SC_OPEN_MAX);
+            if (maxfd < 0) { maxfd = 1024; }
+            for (fd = 3; fd < maxfd; fd++) { (void) ngx_autocert_close((int) fd); }
+        }
+        (void) execve(argv[0], argv, environ);
+        _exit(127);
+    }
+
+    (void) setpgid(pid, pid);
+    order->dns_hook_pid = pid;
+    ngx_memzero(&order->dns_hook_timer, sizeof(ngx_event_t));
+    ngx_memzero(&order->dns_hook_deadline_timer, sizeof(ngx_event_t));
+    order->dns_hook_timer.handler = ngx_autocert_order_dns_hook_timer;
+    order->dns_hook_timer.data = order;
+    order->dns_hook_timer.log = order->log;
+    order->dns_hook_timer.cancelable = 1;
+    order->dns_hook_deadline_timer.handler = ngx_autocert_order_dns_hook_deadline;
+    order->dns_hook_deadline_timer.data = order;
+    order->dns_hook_deadline_timer.log = order->log;
+    order->dns_hook_deadline_timer.cancelable = 1;
+    ngx_add_timer(&order->dns_hook_timer, 20);
+    ngx_add_timer(&order->dns_hook_deadline_timer, timeout_ms);
+    return NGX_AGAIN;
+#endif
+}
+
+
+static void
+ngx_autocert_order_dns_hook_done(ngx_autocert_order_t *order, ngx_int_t rc)
+{
+    if (order->dns_hook_deadline_timer.timer_set) {
+        ngx_del_timer(&order->dns_hook_deadline_timer);
+    }
+    order->dns_hook_pid = NGX_INVALID_PID;
+
+    if (!order->dns_hook_is_add) {
+        order->dns_set = 0;
+        if (order->dns_hook_cleanup && order->handler) {
+            order->dns_hook_cleanup = 0;
+            order->handler(order, order->finish_rc);
+        }
+        return;
+    }
+
+    if (rc != NGX_OK) {
+        ngx_autocert_order_finish(order, NGX_ERROR);
+        return;
+    }
+    ngx_add_timer(&order->dns_delay_timer,
+                  (ngx_msec_t) order->dns_propagation_delay * 1000);
+}
+
+
+static void
+ngx_autocert_order_dns_hook_timer(ngx_event_t *ev)
+{
+#if !(NGX_WIN32)
+    ngx_autocert_order_t  *order;
+    pid_t                   w;
+    int                     status;
+
+    order = ev->data;
+    w = waitpid(order->dns_hook_pid, &status, WNOHANG);
+    if (w == 0) {
+        ngx_add_timer(ev, 20);
+        return;
+    }
+    (void) sigprocmask(SIG_SETMASK, &order->dns_hook_sigmask, NULL);
+    if (w != order->dns_hook_pid) {
+        ngx_log_error(NGX_LOG_ERR, order->log, ngx_errno,
+                      "autocert: dns-01 waitpid() failed");
+        ngx_autocert_order_dns_hook_done(order, NGX_ERROR);
+        return;
+    }
+    if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+        ngx_log_error(NGX_LOG_ERR, order->log, 0,
+                      "autocert: dns-01 hook failed (%s %d) for \"%V\"",
+                      WIFEXITED(status) ? "exit" : "signal",
+                      WIFEXITED(status) ? WEXITSTATUS(status) : WTERMSIG(status),
+                      &order->domain);
+        ngx_autocert_order_dns_hook_done(order, NGX_ERROR);
+        return;
+    }
+    ngx_autocert_order_dns_hook_done(order, NGX_OK);
+#endif
+}
+
+
+static void
+ngx_autocert_order_dns_hook_deadline(ngx_event_t *ev)
+{
+    ngx_autocert_order_t  *order = ev->data;
+
+#if !(NGX_WIN32)
+    if (order->dns_hook_pid != NGX_INVALID_PID) {
+        ngx_log_error(NGX_LOG_ERR, order->log, 0,
+                      "autocert: dns-01 hook timed out after %T s, killing",
+                      order->dns_hook_timeout);
+        if (kill(-order->dns_hook_pid, SIGKILL) != 0) {
+            (void) kill(order->dns_hook_pid, SIGKILL);
+        }
+        order->dns_hook_timed_out = 1;
+        if (!order->dns_hook_timer.timer_set) { ngx_add_timer(&order->dns_hook_timer, 20); }
+    }
+#endif
+}
+
+
 static ngx_int_t
 ngx_autocert_order_dns_hook(ngx_autocert_order_t *order, ngx_str_t *hook,
     ngx_uint_t is_add)
@@ -1546,10 +1700,17 @@ ngx_autocert_order_publish_dns(ngx_autocert_order_t *order)
      * plumbing test; production dns-01 requires the hook (enforced at config).
      */
     order->dns_set = 1;
-    if (order->dns_hook_add.len != 0
-        && ngx_autocert_order_dns_hook(order, &order->dns_hook_add, 1) != NGX_OK)
-    {
-        return NGX_ERROR;
+    if (order->dns_hook_add.len != 0) {
+        ngx_int_t  hook_rc;
+
+        order->dns_hook_is_add = 1;
+        hook_rc = ngx_autocert_order_dns_hook(order, &order->dns_hook_add, 1);
+        if (hook_rc == NGX_ERROR) {
+            return NGX_ERROR;
+        }
+        if (hook_rc == NGX_AGAIN) {
+            return NGX_OK;
+        }
     }
 
     /* Wait for DNS propagation before asking the CA to validate. Clamp the
@@ -3251,6 +3412,21 @@ ngx_autocert_order_finish(ngx_autocert_order_t *order, ngx_int_t rc)
     }
     if (order->dns_delay_timer.timer_set) {
         ngx_del_timer(&order->dns_delay_timer);
+    }
+
+    if (order->dns_set && order->dns_hook_remove.len != 0) {
+        ngx_int_t  hook_rc;
+
+        order->dns_hook_is_add = 0;
+        order->dns_hook_cleanup = 1;
+        order->finish_rc = rc;
+        hook_rc = ngx_autocert_order_dns_hook(order, &order->dns_hook_remove,
+                                              0);
+        if (hook_rc == NGX_AGAIN) {
+            return;
+        }
+        order->dns_hook_cleanup = 0;
+        order->dns_set = 0;
     }
 
     /* Drop the published challenge answer now the authz is settled. It is no
