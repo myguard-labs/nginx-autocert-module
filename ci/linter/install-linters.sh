@@ -42,10 +42,6 @@ APT_TOOLS=(
     "flawfinder:flawfinder"      # C, risky-API scan
     "yamllint:yamllint"          # YAML
     "clang-tidy:clang-tidy"      # C, CI-only (needs a configured nginx tree)
-    "bear:bear"                  # records the build's real compiler argv into
-                                 # compile_commands.json, so clang-tidy parses
-                                 # the same TU that ships instead of a
-                                 # hand-kept -I list that drifts from configure
     "perlcritic:libperl-critic-perl"  # Perl test suite
     "perl:perl"
 )
