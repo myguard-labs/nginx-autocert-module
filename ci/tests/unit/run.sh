@@ -78,7 +78,7 @@ gcc -Wall -Wextra -Werror $CORE_INC -o test_json \
 
 HTTP_INC="-I$NGX/src/core -I$NGX/src/event -I$NGX/src/event/modules \
      -I$NGX/src/event/quic -I$NGX/src/os/unix -I$NGX/objs \
-     -I$NGX/src/http -I$NGX/src/http/modules"
+     -I$NGX/src/http -I$NGX/src/http/modules -I$NGX/src/http/v2"
 IPIDENT_OBJS="$NGX/objs/src/core/ngx_string.o $NGX/objs/src/core/ngx_inet.o \
       $NGX/objs/src/core/ngx_palloc.o $NGX/objs/src/os/unix/ngx_alloc.o"
 # shellcheck disable=SC2086
