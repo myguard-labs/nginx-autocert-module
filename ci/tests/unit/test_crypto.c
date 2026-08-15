@@ -54,6 +54,9 @@ static ngx_pool_t *pool;
  * in --with-debug builds instead of dereferencing a NULL log (segfault). */
 static ngx_log_t   test_log;
 
+extern ngx_uint_t  ngx_http_autocert_test_fail_pnalloc;
+extern ngx_uint_t  ngx_http_autocert_test_fail_md_ctx_new;
+
 #define CHECK(cond, msg)                                                      \
     do {                                                                      \
         if (!(cond)) {                                                        \
@@ -115,6 +118,22 @@ test_base64url(void)
     in = S("Zm+9");
     CHECK(ngx_http_autocert_base64url_decode(pool, &in, &dec) == NGX_ERROR,
           "b64url decode rejects non-URL-safe '+'");
+}
+
+
+static void
+test_base64url_alloc_failure(void)
+{
+    ngx_str_t  in, out, sentinel;
+
+    in = S("f");
+    sentinel = S("base64url sentinel");
+    out = sentinel;
+    ngx_http_autocert_test_fail_pnalloc = 1;
+    CHECK(ngx_http_autocert_base64url_encode(pool, &in, &out) == NGX_ERROR
+          && out.data == sentinel.data && out.len == sentinel.len,
+          "b64url allocation failure preserves output sentinel");
+    ngx_http_autocert_test_fail_pnalloc = 0;
 }
 
 
@@ -313,6 +332,32 @@ test_jws_sign_verify(ngx_uint_t curve, const char *expect_alg)
 
     EVP_MD_CTX_free(mdctx);
     ECDSA_SIG_free(sig);
+    ngx_http_autocert_key_free(pkey);
+}
+
+
+static void
+test_jws_mdctx_alloc_failure(void)
+{
+    EVP_PKEY  *pkey;
+    ngx_str_t  protected_json, payload, out, sentinel;
+
+    pkey = ngx_http_autocert_key_generate(NGX_HTTP_AUTOCERT_CRYPTO_P256);
+    CHECK(pkey != NULL, "jws failpoint key generation");
+    if (pkey == NULL) {
+        return;
+    }
+
+    protected_json = S("{\"alg\":\"ES256\"}");
+    payload = S("{}");
+    sentinel = S("jws sentinel");
+    out = sentinel;
+    ngx_http_autocert_test_fail_md_ctx_new = 1;
+    CHECK(ngx_http_autocert_jws_sign(pool, pkey, &protected_json, &payload,
+                                      &out) == NGX_ERROR
+          && out.data == sentinel.data && out.len == sentinel.len,
+          "jws digest-context failure preserves output sentinel");
+    ngx_http_autocert_test_fail_md_ctx_new = 0;
     ngx_http_autocert_key_free(pkey);
 }
 
@@ -598,12 +643,14 @@ main(void)
     pool = p;
 
     test_base64url();
+    test_base64url_alloc_failure();
     test_hmac_sha256();
     test_dns01_txt();
     test_jwk_and_thumbprint();
     test_key_curve_name();
     test_jws_sign_verify(NGX_HTTP_AUTOCERT_CRYPTO_P256, "ES256");
     test_jws_sign_verify(NGX_HTTP_AUTOCERT_CRYPTO_P384, "ES384");
+    test_jws_mdctx_alloc_failure();
     test_csr(NGX_HTTP_AUTOCERT_CRYPTO_P256, "le.example.com");
     test_csr(NGX_HTTP_AUTOCERT_CRYPTO_P384, "example.org");
     test_acme_tls_cert(NGX_HTTP_AUTOCERT_CRYPTO_P256, "le.example.com",

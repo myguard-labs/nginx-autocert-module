@@ -63,7 +63,7 @@ STORE_OBJS="$BASE_OBJS $NGX/objs/src/core/ngx_slab.o \
 # ngx_inet.o: crypto.c now pulls ngx_autocert_str_is_ip (IP-cert arc),
 # which references ngx_inet_addr / ngx_inet6_addr.
 # shellcheck disable=SC2086
-gcc -Wall -Wextra -Werror $CORE_INC -o test_crypto \
+gcc -Wall -Wextra -Werror -DNGX_AUTOCERT_TEST_FAULTS $CORE_INC -o test_crypto \
 	"$WORKSPACE/ci/tests/unit/test_crypto.c" \
 	"$WORKSPACE/src/ngx_http_autocert_crypto.c" \
 	$INET_OBJS -lssl -lcrypto
