@@ -1,4 +1,4 @@
-# sync-sha: 130c0132f03313e9b526673060466ed6a6981c394990158ab3a79e8a4bbfd1c8
+# sync-sha: 86f315cddd5ec7f36e9ca2e5bb19c4af88e1dd256c3f90858d16846d7785433a
 name: CI Deep
 
 # Exhaustive dynamic analysis — monthly cron, release, and on-demand only,
@@ -66,9 +66,20 @@ jobs:
           sudo apt-get install -y clang
 
       - name: Select fuzz duration
+        # Workflow-dispatch inputs are untrusted.  Keep the expression out of
+        # the shell program, then validate the environment value before using
+        # it to write the subsequent job environment.
+        env:
+          FUZZ_SECONDS_INPUT: ${{ github.event.inputs.fuzz_seconds }}
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "FUZZ_SECS=${{ github.event.inputs.fuzz_seconds }}" >> "$GITHUB_ENV"
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+            case "$FUZZ_SECONDS_INPUT" in
+              ''|*[!0-9]*)
+                echo "fuzz_seconds must be a non-negative integer" >&2
+                exit 1
+                ;;
+            esac
+            echo "FUZZ_SECS=$FUZZ_SECONDS_INPUT" >> "$GITHUB_ENV"
           else
             echo "FUZZ_SECS=3600" >> "$GITHUB_ENV"
           fi
