@@ -101,6 +101,9 @@ docker cp "$PEBBLE_NAME:/test/certs/pebble.minica.pem" "$PREFIX/ca.pem"
 cat > "$PREFIX/hooks/add.sh" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
+# Keep the hook alive long enough for the regression below to prove nginx's
+# event loop remains responsive while its child is pending.
+sleep 2
 curl -sf -X POST "http://127.0.0.1:${MGMT_PORT}/set-txt" \
     -d "{\"host\":\"\${1}.\",\"value\":\"\${2}\"}" >/dev/null
 EOF
@@ -143,6 +146,22 @@ echo "✓ config accepted"
 
 echo "== start: dns-01 order with exec hooks for ${ORDER_DOMAIN} =="
 "$SERVER_BIN" -p "$PREFIX" -c "$PREFIX/conf/nginx.conf"
+
+# A synchronous waitpid()/WaitForSingleObject() on the worker would hold this
+# request until add.sh's sleep completes.  The status is deliberately ignored:
+# this server has no content handler; prompt completion is the contract.
+for i in $(seq 1 20); do
+    if grep -q 'autocert: dns-01 exec add hook' "$PREFIX/logs/error.log"; then
+        break
+    fi
+    sleep 0.1
+done
+grep -q 'autocert: dns-01 exec add hook' "$PREFIX/logs/error.log" \
+    || { echo "::error::add-hook did not start"; exit 1; }
+curl --max-time 1 -sS -o /dev/null -w '%{http_code}' \
+    "http://127.0.0.1:${AC_PORT_8080:-8080}/" | grep -Eq '^[0-9]{3}$' \
+    || { echo "::error::worker blocked while dns-01 hook was running"; exit 1; }
+echo "✓ worker remained responsive while dns-01 add-hook ran"
 
 issued=
 for i in $(seq 1 90); do
