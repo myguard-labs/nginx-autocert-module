@@ -104,7 +104,7 @@ void ngx_autocert_serve_reload(void);
  * Delegation cannot use that copy-the-code trick: the cert_cb's state is
  * autocert's private per-server sctx plus a process-static per-worker cert cache,
  * so a vendored copy compiled into the consumer's .so would hold its own zeroed
- * statics and could never serve autocert's certs. A real cross-.so call is
+ * static variables and could never serve autocert's certs. A real cross-.so call is
  * required — and nginx dlopen()s modules RTLD_NOW|RTLD_GLOBAL, so this symbol
  * lands in the global namespace where a consumer can reach it.
  *

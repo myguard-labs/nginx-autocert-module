@@ -1,4 +1,4 @@
-# sync-sha: fc14f27374a651144ef3ab6366773d7e12ee9852c3649d9b32389473e212016b
+# sync-sha: 2fd6f7a3338d1cf731f55ce5125d71eaa8f6ce4571252a8fea645101c4b413aa
 name: Lint
 
 # The same ci/linter/ scripts a developer runs locally, run again on the PR --
@@ -15,12 +15,11 @@ name: Lint
 #           lint-c.sh here would pay for the same scan twice and report each C
 #           finding in two places. This matches the reference skeleton.
 #
-#   yaml, nginx, spelling, ci-cadence, ci-runners -- excluded TEMPORARILY.
+#   yaml, nginx, ci-cadence, ci-runners -- excluded TEMPORARILY.
 #           Each is red against conditions that predate this gate, none of
 #           which this workflow introduced:
 #             yaml        line length / document-start across all 9 workflows
 #             nginx       80-column style across src/
-#             spelling    codespell hits
 #             ci-cadence  build-test / codeql / security-scanners each carry a
 #                         push: while also being workflow_call members
 #             ci-runners  every self-hosted runs-on is a plain label list, not
@@ -91,5 +90,5 @@ jobs:
           # fails on any omission not named there. Adding a lint-*.sh without
           # adding its name leaves it running locally and never in CI, which is
           # the quieter half of a gate that is not really a gate.
-          LINT_ONLY: ci-ports ci-secrets docs-drift python sh sync-stamp
+          LINT_ONLY: ci-ports ci-secrets docs-drift python sh spelling sync-stamp
         run: ci/linter/run-all.sh

@@ -231,7 +231,7 @@ Note this is a **real exported symbol**, unlike the `ngx_autocert_requests_*`
 helpers you vendored in step 1: those are hidden-visibility code copies that share
 state through *shm*, whereas the cert callback's state is autocert's private
 per-worker cache and per-server config. A vendored copy of it would hold its own
-zeroed statics and could never serve autocert's certs.
+zeroed static variables and could never serve autocert's certs.
 
 ## What you must NOT do
 

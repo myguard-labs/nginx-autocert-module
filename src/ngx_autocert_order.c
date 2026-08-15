@@ -2608,7 +2608,7 @@ ngx_autocert_order_store(ngx_autocert_order_t *order)
     u_char                dir[NGX_AUTOCERT_DOMAIN_SEG_MAX + 1];
     u_char                staging[NGX_AUTOCERT_DOMAIN_SEG_MAX + sizeof(".tmp")];
     int                   cfd, sfd;
-    size_t                clen;
+    size_t                content_len;
     ngx_autocert_stat_t   st;
     ngx_int_t             rc, swap;
     ngx_uint_t            certbot;
@@ -2651,8 +2651,8 @@ ngx_autocert_order_store(ngx_autocert_order_t *order)
      */
     certbot = (order->store == NGX_HTTP_AUTOCERT_STORE_CERTBOT);
 
-    clen = order->store_path.len + (certbot ? sizeof("/live") - 1 : 0);
-    cdir = ngx_pnalloc(order->pool, clen + 1);
+    content_len = order->store_path.len + (certbot ? sizeof("/live") - 1 : 0);
+    cdir = ngx_pnalloc(order->pool, content_len + 1);
     if (cdir == NULL) {
         return NGX_ERROR;
     }

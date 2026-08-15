@@ -2283,7 +2283,7 @@ ngx_autocert_runtime_seed(ngx_cycle_t *cycle)
     ngx_autocert_conf_t   acf;
     u_char                container[NGX_MAX_PATH];
     u_char                *p;
-    size_t                clen;
+    size_t                content_len;
     ngx_autocert_dir_t    *dh;
     ngx_autocert_dirent_t *de;
     int                   dfd, mfd, cfd;
@@ -2301,10 +2301,10 @@ ngx_autocert_runtime_seed(ngx_cycle_t *cycle)
         return;
     }
 
-    clen = acf.path.len
+    content_len = acf.path.len
          + (acf.store == NGX_HTTP_AUTOCERT_STORE_CERTBOT
             ? sizeof("/live") - 1 : 0);
-    if (clen >= sizeof(container)) {
+    if (content_len >= sizeof(container)) {
         return;
     }
     p = ngx_cpymem(container, acf.path.data, acf.path.len);

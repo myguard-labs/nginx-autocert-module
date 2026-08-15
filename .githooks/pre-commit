@@ -47,8 +47,8 @@ ROOT="$(git rev-parse --show-toplevel)"
 
 # THE HOOK AND THE PR MUST RUN THE SAME SET, OR LOCAL-GREEN PREDICTS NOTHING.
 #
-# lint.yml narrows the run with LINT_ONLY: five checkers (yaml, nginx,
-# spelling, ci-cadence, ci-runners) are red on PRE-EXISTING conditions that
+# lint.yml narrows the run with LINT_ONLY: four checkers (yaml, nginx,
+# ci-cadence, ci-runners) are red on PRE-EXISTING conditions that
 # no single commit can clear, so they are staged out of the blocking set until
 # the PR that makes each one green moves it in. `c` is excluded permanently --
 # security-scanners.yml already covers src/.
@@ -57,7 +57,7 @@ ROOT="$(git rev-parse --show-toplevel)"
 # hook: every commit failed on findings the author did not introduce and could
 # not fix, so the only way to commit at all was --no-verify, which also skips
 # the checkers that DO bite. Measured 2026-08-09: a commit touching only
-# .github/ and ci/tools/ failed on ci-cadence, ci-runners, c, nginx, spelling
+# .github/ and ci/tools/ failed on ci-cadence, ci-runners, c, nginx
 # and yaml, none of them from the diff.
 #
 # Keep this value identical to lint.yml's LINT_ONLY. They are two copies of one
@@ -68,7 +68,7 @@ ROOT="$(git rev-parse --show-toplevel)"
 # value would let anything in the caller's environment narrow the gate --
 # LINT_ONLY=sh git commit would skip ci-secrets and sync-stamp while still
 # printing "all linters clean". The hook's set is not the caller's to choose.
-LINT_ONLY="ci-ports ci-secrets docs-drift python sh sync-stamp"
+LINT_ONLY="ci-ports ci-secrets docs-drift python sh spelling sync-stamp"
 export LINT_ONLY
 
 "$ROOT/ci/linter/run-all.sh" --staged
