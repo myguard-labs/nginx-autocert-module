@@ -37,6 +37,12 @@
 #   GITHUB_WORKSPACE used as --add-dynamic-module path when set; otherwise
 #                    falls back to the directory this script's repo root is
 #                    checked out in, so it also works outside Actions.
+#   AC_BUILD_DIR     pre-extracted source directory.  This lets composite
+#                    actions and guard jobs keep their verified cache layout.
+#   AC_BUILD_AUTOCERT_TEST=0 omits the test-only directives for production
+#                    rejection checks; defaults to 1 for CI builds.
+#   AC_BUILD_WITH_HTTP_ACME_MODULE=1 adds Angie's native acme module.
+#   AC_BUILD_EXTRA_CC_OPT appends lane-specific compiler warnings/options.
 #
 # OUTPUT LAYOUT (unchanged from the pre-existing inline blocks):
 #   tarball:    $PWD/nginx-$NGINX_VERSION.tar.gz
@@ -71,6 +77,10 @@ Env:
                        (if any) is taken as the make target instead
   GITHUB_WORKSPACE    module checkout root used for --add-dynamic-module
   GITHUB_ENV          when set, NGINX_VERSION is appended to it
+  AC_BUILD_DIR        pre-extracted source directory (skips download/extract)
+  AC_BUILD_AUTOCERT_TEST=0  omit test-only directives (default: 1)
+  AC_BUILD_WITH_HTTP_ACME_MODULE=1  enable Angie's native acme module
+  AC_BUILD_EXTRA_CC_OPT  extra compiler options for this lane
 
 Examples:
   ci/tools/ci-build.sh asan
@@ -175,6 +185,16 @@ if [ -n "${GITHUB_ENV:-}" ]; then
 fi
 
 workspace="${GITHUB_WORKSPACE:-$PWD}"
+build_dir="${AC_BUILD_DIR:-nginx-${NGINX_VERSION}}"
+autocert_test="${AC_BUILD_AUTOCERT_TEST:-1}"
+
+case "$autocert_test" in
+  0 | 1) ;;
+  *)
+    echo "::error::AC_BUILD_AUTOCERT_TEST must be 0 or 1" >&2
+    exit 1
+    ;;
+esac
 
 echo "== ci-build.sh =="
 echo "profile:       $profile"
@@ -182,22 +202,22 @@ echo "nginx version: $NGINX_VERSION"
 echo "make target:   ${make_target:-<default>}"
 
 # ---- idempotent tarball fetch + extract ------------------------------------
-tarball="nginx-${NGINX_VERSION}.tar.gz"
-test -f "$tarball" \
-  || wget -q -O "$tarball" "https://nginx.org/download/nginx-${NGINX_VERSION}.tar.gz"
-
-# Verify against the pin. Also covers the test -f path above: a stale or
-# tampered tarball left in the workspace by an earlier run is caught here
-# rather than compiled. Empty digest = no pin for this version (an explicit
-# NGINX_VERSION override); say so instead of silently skipping the check.
-if [ -n "${NGINX_VERSION_SHA256:-}" ]; then
-  echo "${NGINX_VERSION_SHA256}  ${tarball}" | sha256sum -c -
-else
-  echo "warning: no sha256 pin for nginx ${NGINX_VERSION}; tarball unverified" >&2
-fi
-
-build_dir="nginx-${NGINX_VERSION}"
+# Callers that already extracted a digest-verified archive supply AC_BUILD_DIR;
+# do not download a second copy or silently replace their chosen upstream.
 if [ ! -d "$build_dir" ]; then
+  tarball="nginx-${NGINX_VERSION}.tar.gz"
+  test -f "$tarball" \
+    || wget -q -O "$tarball" "https://nginx.org/download/nginx-${NGINX_VERSION}.tar.gz"
+
+  # Verify against the pin. Also covers the test -f path above: a stale or
+  # tampered tarball left in the workspace by an earlier run is caught here
+  # rather than compiled. Empty digest = no pin for this version (an explicit
+  # NGINX_VERSION override); say so instead of silently skipping the check.
+  if [ -n "${NGINX_VERSION_SHA256:-}" ]; then
+    echo "${NGINX_VERSION_SHA256}  ${tarball}" | sha256sum -c -
+  else
+    echo "warning: no sha256 pin for nginx ${NGINX_VERSION}; tarball unverified" >&2
+  fi
   tar -xzf "$tarball"
 fi
 
@@ -206,6 +226,7 @@ fi
 
   configure_args=(
     --with-compat --with-debug --with-threads --with-http_ssl_module
+    --with-http_v2_module
   )
   # nginx's configure ignores a bare CC=, so --with-cc is the only way to get
   # a warm ccache hit rate. Only pass it when ccache is actually on PATH:
@@ -216,12 +237,18 @@ fi
   if command -v ccache >/dev/null 2>&1; then
     configure_args+=(--with-cc="ccache cc")
   fi
+  if [ -n "${AC_BUILD_EXTRA_CC_OPT:-}" ]; then
+    cc_opt="${cc_opt:+$cc_opt }${AC_BUILD_EXTRA_CC_OPT}"
+  fi
   [ -n "$cc_opt" ] && configure_args+=(--with-cc-opt="$cc_opt")
   [ -n "$ld_opt" ] && configure_args+=(--with-ld-opt="$ld_opt")
+  if [ "${AC_BUILD_WITH_HTTP_ACME_MODULE:-0}" = 1 ]; then
+    configure_args+=(--with-http_acme_module)
+  fi
   configure_args+=(--add-dynamic-module="$workspace")
 
-  echo "configure: AUTOCERT_TEST=1 ./configure ${configure_args[*]}"
-  AUTOCERT_TEST=1 ./configure "${configure_args[@]}"
+  echo "configure: AUTOCERT_TEST=${autocert_test} ./configure ${configure_args[*]}"
+  AUTOCERT_TEST="$autocert_test" ./configure "${configure_args[@]}"
 
   if [ "$make_target" = "none" ]; then
     echo "make target is 'none' -- configure only, skipping make"

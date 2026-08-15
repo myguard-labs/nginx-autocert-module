@@ -1,4 +1,4 @@
-# sync-sha: 13bfeb0c308cac7909378e83998534c75732ffe58594636ebd39fbb8fdfe3ca1
+# sync-sha: efa28aaeb83ba709560b74c37d88dcf92a6ed35a553a2aae69b31cb9241002f8
 name: Build & Test
 
 # Third-party actions pinned to commit SHAs for supply-chain safety.
@@ -288,18 +288,16 @@ jobs:
       - name: Test-only directives rejected in prod build
         run: |
           set -euo pipefail
-          mkdir -p prod-nginx
           tar -xzf ~/.cache/src-tarballs/nginx-${{ needs.resolve.outputs.nginx_version }}.tar.gz \
-            -C prod-nginx --strip-components=1
-          cd prod-nginx
-          # No AUTOCERT_TEST in the env: the test-only directives must be absent.
-          ./configure --with-compat --with-http_ssl_module \
-            --with-cc="ccache cc" \
-            --with-cc-opt="-Wall -Wextra -Werror" \
-            --add-dynamic-module="$GITHUB_WORKSPACE" > /tmp/conf.log 2>&1 \
-            || { tail -40 /tmp/conf.log; exit 1; }
-          # Full build: `nginx -t` below needs the server binary, not just the .so.
-          make > /tmp/make.log 2>&1 || { tail -40 /tmp/make.log; exit 1; }
+            -C "$GITHUB_WORKSPACE"
+          # AUTOCERT_TEST=0: the test-only directives must be absent.
+          AC_BUILD_DIR="nginx-${{ needs.resolve.outputs.nginx_version }}" \
+            AC_BUILD_AUTOCERT_TEST=0 \
+            AC_BUILD_EXTRA_CC_OPT="-Wall -Wextra -Werror" \
+            bash ci/tools/ci-build.sh release
+          cd "nginx-${{ needs.resolve.outputs.nginx_version }}"
+          # ci-build.sh performed a full build: `nginx -t` below needs the
+          # server binary, not just the .so.
           test -f objs/ngx_http_autocert_module.so
 
           # ABI guard: the runtime-cert helpers must NOT be dynamic symbols.
