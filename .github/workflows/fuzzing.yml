@@ -1,4 +1,4 @@
-# sync-sha: 80e651d1ff5eb86cde85ee25c6bb8d18b8e31ac53a7a034189b8320592d4f32b
+# sync-sha: 21eb85f39ec39ef172e4b87171344f008f7bfe0e67aae0566b7158fafcfaa4dc
 name: Fuzzing
 
 # Fast fuzz regression — 30s/target on the JSON + HTTP + base64url ACME parsers
@@ -41,6 +41,8 @@ jobs:
     steps:
       - name: Checkout module
         uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          persist-credentials: false
 
       - name: Install clang + libFuzzer
         run: |
