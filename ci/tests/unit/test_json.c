@@ -216,10 +216,10 @@ test_strings_escapes(void)
           "all simple escapes decode");
 
     /* \uXXXX BMP: U+00E9 (é) -> 2-byte UTF-8 0xC3 0xA9 */
-    v = parse("{\"k\":\"caf\\u00e9\"}");
+    v = parse("{\"k\":\"caf\\u00e9\"}"); /* codespell:ignore caf */
     CHECK(ngx_autocert_json_object_str(v, "k", &s) == NGX_OK
           && s.len == 5
-          && memcmp(s.data, "caf\xc3\xa9", 5) == 0,
+          && memcmp(s.data, "caf\xc3\xa9", 5) == 0, /* codespell:ignore caf */
           "\\u00e9 -> UTF-8 café");
 
     /* \uXXXX ASCII: U+0041 -> 'A' */
@@ -336,7 +336,7 @@ test_malformed(void)
         "\"\\ud83d\"",            /* lone high surrogate */
         "\"\\udc00\"",            /* lone low surrogate */
         "\"\\ud83dx\"",           /* high surrogate not followed by \\u */
-        "tru",                    /* truncated literal */
+        "tru",                    /* truncated literal; codespell:ignore tru */
         "truefalse",              /* literal + trailing junk */
         "01",                     /* leading zero */
         "1.",                     /* fraction with no digits */

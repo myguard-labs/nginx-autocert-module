@@ -1,4 +1,4 @@
-# sync-sha: 57908a43d8a40aee48576ba488b33a528176fce2e9675a231e1ba53bff5ad488
+# sync-sha: 6d82be07efc2d4f4a92f38da3fea608a98375de201709d58ab98502fa1193a89
 name: Windows build
 
 # Native Windows port gate (W17). Proves the module compiles and links on
@@ -607,9 +607,9 @@ jobs:
             # multi-valued), so casting it straight to [int] throws
             # "Cannot convert ... System.String[] ... to type System.Int32".
             # Take the first value explicitly.
-            $clen = [int](@($r.Headers['Content-Length'])[0])
-            if ($clen -ne $keyauth.Length) {
-              throw "Content-Length $clen != $($keyauth.Length)"
+            $content_len = [int](@($r.Headers['Content-Length'])[0])
+            if ($content_len -ne $keyauth.Length) {
+              throw "Content-Length $content_len != $($keyauth.Length)"
             }
             Write-Host "OK Content-Length correct"
 

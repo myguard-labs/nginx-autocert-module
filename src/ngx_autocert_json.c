@@ -515,7 +515,7 @@ ngx_autocert_json_literal(ngx_autocert_json_ctx_t *c)
         size_t                     len;
         ngx_autocert_json_type_e   type;
         ngx_uint_t                 boolean;
-    } lits[] = {
+    } literals[] = {
         { "true",  4, NGX_AUTOCERT_JSON_BOOL, 1 },
         { "false", 5, NGX_AUTOCERT_JSON_BOOL, 0 },
         { "null",  4, NGX_AUTOCERT_JSON_NULL, 0 },
@@ -524,16 +524,16 @@ ngx_autocert_json_literal(ngx_autocert_json_ctx_t *c)
     ngx_autocert_json_value_t  *v;
     ngx_uint_t                  i;
 
-    for (i = 0; i < sizeof(lits) / sizeof(lits[0]); i++) {
-        if ((size_t) (c->last - c->p) >= lits[i].len
-            && ngx_strncmp(c->p, lits[i].text, lits[i].len) == 0)
+    for (i = 0; i < sizeof(literals) / sizeof(literals[0]); i++) {
+        if ((size_t) (c->last - c->p) >= literals[i].len
+            && ngx_strncmp(c->p, literals[i].text, literals[i].len) == 0)
         {
-            c->p += lits[i].len;
-            v = ngx_autocert_json_alloc(c, lits[i].type);
+            c->p += literals[i].len;
+            v = ngx_autocert_json_alloc(c, literals[i].type);
             if (v == NULL) {
                 return NULL;
             }
-            v->u.boolean = lits[i].boolean;
+            v->u.boolean = literals[i].boolean;
             return v;
         }
     }

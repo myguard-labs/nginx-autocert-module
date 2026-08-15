@@ -83,11 +83,11 @@ code=$(curl -s -o /dev/null -w '%{http_code}' \
 echo "✓ nested path declined"
 
 echo "== Content-Length matches keyauth =="
-clen=$(curl -fsS -D - -o /dev/null \
+content_len=$(curl -fsS -D - -o /dev/null \
     "http://127.0.0.1:$PORT/.well-known/acme-challenge/$TOKEN" \
     | awk 'tolower($1)=="content-length:"{gsub(/\r/,"",$2); print $2}')
-[ "$clen" = "${#KEYAUTH}" ] || {
-    echo "::error::Content-Length $clen != ${#KEYAUTH}"; exit 1; }
+[ "$content_len" = "${#KEYAUTH}" ] || {
+    echo "::error::Content-Length $content_len != ${#KEYAUTH}"; exit 1; }
 echo "✓ Content-Length correct"
 
 # Regression: a GET carrying a request body on a keepalive connection must not
