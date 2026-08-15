@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: BSD-2-Clause
 #
 # ci/linter/lint-ci-cadence.sh -- a workflow_call member has ci.yml as its only
-# PR entry point, and does not carry a second `push:`/`pull_request:` of its own.
+# PR entry point, and does not carry a second `pull_request:` of its own.
 #
 # The rule and the reasoning live in ci/linter/workflow_policy.py (subcommand
 # `cadence`); this wrapper exists so run-all.sh picks the check up by glob and
@@ -16,13 +16,13 @@
 # and the only evidence is the runner bill plus a README whose description of
 # what runs when has quietly stopped being true.
 #
-# `schedule:` is allowed on a member -- codeql.yml and ci-deep.yml are reached
-# from ci.yml AND on their own cadence, which is the intended shape.
+# `push:` is allowed for deliberate direct master coverage, and `schedule:` is
+# allowed for bounded drift/scanner jobs. Both differ from a second PR trigger.
 #
 # Usage: ci/linter/lint-ci-cadence.sh [files...]   Env: LINT_MODE=staged|all
 # Extend: the single-orchestrator topology this assumes is ci.yml; a module that
-# deliberately keeps a member on push: for its own branch wants the rule relaxed
-# in workflow_policy.py, not a bypass here.
+# keeps a member on pull_request: wants the policy changed in workflow_policy.py,
+# not a bypass here.
 
 # shellcheck source=ci/linter/lib.sh
 . "$(git rev-parse --show-toplevel)/ci/linter/lib.sh"

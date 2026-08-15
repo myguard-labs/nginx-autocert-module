@@ -476,41 +476,42 @@ def check_docs() -> int:
 
 
 def check_cadence() -> int:
-    """A `workflow_call` member carries no second entry point of its own.
+    """A `workflow_call` member carries no second PR entry point of its own.
 
     `workflow_call` does not suppress a member's own triggers. A member reached
-    from ci.yml that ALSO carries `push:` runs twice per change: once on the PR,
-    once on the merge commit, against a tree identical to the PR head that
-    already passed. The two runs get different concurrency keys, so
-    `cancel-in-progress` does not collapse them, and BOTH are green -- the only
-    symptoms are the bill and a README that no longer describes what runs when.
+    from ci.yml that ALSO carries `pull_request:` runs twice for the same PR.
+    The two runs get different concurrency keys, so `cancel-in-progress` does
+    not collapse them, and BOTH are green -- the only symptoms are the bill and
+    a README that no longer describes what runs when.
 
     Nothing else catches this. Every member here is correct today, but that
-    correctness is asserted only by a comment in each file ("No push/pull_request
+    correctness is asserted only by a comment in each file ("No pull_request
     trigger here on purpose"), and a comment does not survive the next workflow
-    copied in from a repo with a different topology. Downstream this cost five
-    stray post-merge runs across six of seven members before review caught it.
+    copied in from a repo with a different topology.
 
-    `schedule:` is explicitly allowed: codeql.yml and ci-deep.yml are reachable
-    both from ci.yml and on their own cadence, which is the intended shape and
-    not a duplicate run of the same tree.
+    `push:` is explicitly allowed: build-test.yml, codeql.yml, and
+    security-scanners.yml retain direct master coverage after a merge, even
+    though ci.yml already called them for the PR head. `schedule:` is likewise
+    allowed for bounded drift and scanner jobs. This is the deliberate policy
+    settled for ci-cadence on 2026-08-15; only a second PR entry point is a
+    duplicate invocation of the same PR.
     """
     errors: list[str] = []
     for path in workflows():
         trigger = events(load(path))
         if "workflow_call" not in trigger:
             continue
-        for dupe in sorted(trigger & {"push", "pull_request"}):
+        for dupe in sorted(trigger & {"pull_request"}):
             errors.append(
                 f"{path.name} is a workflow_call member and also carries "
                 f"`{dupe}:` -- it would run twice per change, on two "
                 "concurrency keys that cannot cancel each other. Reach it "
-                "from ci.yml only (schedule: is allowed)"
+                "from ci.yml only (push: and schedule: are allowed)"
             )
     return report(
         "lint-ci-cadence",
         errors,
-        "every workflow_call member has ci.yml as its only PR entry point",
+        "every workflow_call member has ci.yml as its only pull-request entry point",
     )
 
 
