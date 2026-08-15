@@ -33,6 +33,11 @@
 #error "nginx-autocert-module requires OpenSSL 3.0.0 or newer"
 #endif
 
+#if (NGX_AUTOCERT_TEST_FAULTS)
+ngx_uint_t  ngx_http_autocert_test_fail_pnalloc;
+ngx_uint_t  ngx_http_autocert_test_fail_md_ctx_new;
+#endif
+
 
 /* Per-curve facts: OpenSSL group NID, coordinate width, JOSE crv/alg names. */
 typedef struct {
@@ -334,6 +339,11 @@ ngx_http_autocert_base64url_encode(ngx_pool_t *pool, ngx_str_t *in,
 
     /* Standard base64 (with padding) sizing, then translate the alphabet. */
     std.len = ngx_base64_encoded_length(in->len);
+#if (NGX_AUTOCERT_TEST_FAULTS)
+    if (ngx_http_autocert_test_fail_pnalloc) {
+        std.data = NULL;
+    } else
+#endif
     std.data = ngx_pnalloc(pool, std.len);
     if (std.data == NULL) {
         return NGX_ERROR;
@@ -651,7 +661,11 @@ ngx_http_autocert_jws_sign(ngx_pool_t *pool, EVP_PKEY *pkey,
     *p++ = '.';
     ngx_memcpy(p, pay_b64.data, pay_b64.len);
 
+#if (NGX_AUTOCERT_TEST_FAULTS)
+    mdctx = ngx_http_autocert_test_fail_md_ctx_new ? NULL : EVP_MD_CTX_new();
+#else
     mdctx = EVP_MD_CTX_new();
+#endif
     if (mdctx == NULL) {
         return NGX_ERROR;
     }
