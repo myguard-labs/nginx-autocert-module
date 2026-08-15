@@ -122,6 +122,7 @@ static void ngx_autocert_order_dns_hook_deadline(ngx_event_t *ev);
 static void ngx_autocert_order_dns_hook_done(ngx_autocert_order_t *order,
     ngx_int_t rc);
 static void ngx_autocert_order_dns_delay_timer(ngx_event_t *ev);
+static void ngx_autocert_order_dns_delay_start(ngx_autocert_order_t *order);
 static void ngx_autocert_order_unpublish(ngx_autocert_order_t *order);
 static void ngx_autocert_order_finish(ngx_autocert_order_t *order,
     ngx_int_t rc);
@@ -828,7 +829,8 @@ done:
 }
 
 
-/* Monotonic clock in ms, for the hook wait deadline (immune to wall-clock
+#if 0
+/* Monotonic clock in ms, for the retired blocking hook wait deadline (immune to wall-clock
  * jumps and nanosleep/Sleep oversleep). POSIX: clock_gettime(CLOCK_MONOTONIC),
  * returns 0 if the read fails. win32: ngx_autocert_monotonic_ms() (GetTick-
  * Count64, see its definition in ngx_autocert_win32.h for why not QPC). */
@@ -853,6 +855,7 @@ ngx_autocert_dns_elapsed_ms(uint64_t start)
 {
     return (ngx_msec_int_t) (ngx_autocert_dns_monotonic() - start);
 }
+#endif
 
 
 /*
@@ -889,7 +892,7 @@ ngx_autocert_dns_elapsed_ms(uint64_t start)
 #define NGX_AUTOCERT_DNS_HOOK_CMDLINE_MAX  (NGX_MAX_PATH * 4)
 #endif
 
-#if !(NGX_WIN32)
+#if 0
 
 /*
  * POSIX half of the dns-01 hook spawn: fork+execve the already-validated
@@ -1058,7 +1061,9 @@ unblock:
     return rc;
 }
 
-#else /* NGX_WIN32 */
+#endif /* retired blocking POSIX implementation */
+
+#if (NGX_WIN32)
 
 /*
  * win32 half of the dns-01 hook spawn: CreateProcessW + Job Object, the
@@ -1098,7 +1103,7 @@ unblock:
  * handle would keep KILL_ON_JOB_CLOSE from ever firing on the next call.
  */
 static ngx_int_t
-ngx_autocert_dns_hook_spawn_blocking(ngx_autocert_order_t *order, ngx_str_t *hook,
+ngx_autocert_dns_hook_spawn_win32(ngx_autocert_order_t *order, ngx_str_t *hook,
     ngx_str_t *name, char **argv, ngx_msec_t timeout_ms)
 {
     ngx_int_t                          rc;
@@ -1114,9 +1119,7 @@ ngx_autocert_dns_hook_spawn_blocking(ngx_autocert_order_t *order, ngx_str_t *hoo
     HANDLE                             handles[1];
     wchar_t                             hook_w[NGX_MAX_PATH];
     wchar_t                             cmdline_w[NGX_AUTOCERT_DNS_HOOK_CMDLINE_MAX];
-    uint64_t                            start;
-    DWORD                               wait_rc, exit_code, mapped;
-    int                                 timed_out;
+    DWORD                               mapped;
 
     job = NULL;
     proc = NULL;
@@ -1301,85 +1304,25 @@ ngx_autocert_dns_hook_spawn_blocking(ngx_autocert_order_t *order, ngx_str_t *hoo
         goto cleanup;
     }
 
-    /*
-     * Bounded wait: poll WaitForSingleObject(proc, 20 ms) -- matching the
-     * POSIX 20ms pacing sleep -- against the same monotonic deadline, never
-     * an INFINITE wait.
-     */
-    start = ngx_autocert_dns_monotonic();
-    timed_out = 0;
-
-    for ( ;; ) {
-        wait_rc = WaitForSingleObject(proc, 20);
-
-        if (wait_rc == WAIT_OBJECT_0) {
-            break;
-        }
-        if (wait_rc != WAIT_TIMEOUT) {
-            errno = ngx_autocert_win32_errno(GetLastError());
-            ngx_log_error(NGX_LOG_ERR, order->log, ngx_errno,
-                          "autocert: dns-01 WaitForSingleObject() failed");
-            TerminateJobObject(job, 1);
-            goto cleanup;
-        }
-
-        if (ngx_autocert_dns_elapsed_ms(start) >= (ngx_msec_int_t) timeout_ms)
-        {
-            uint64_t  grace_start;
-
-            ngx_log_error(NGX_LOG_ERR, order->log, 0,
-                          "autocert: dns-01 hook \"%V\" timed out after %T s, "
-                          "killing", hook, order->dns_hook_timeout);
-
-            /* TerminateJobObject(): the win32 analogue of kill(-pid,
-             * SIGKILL) -- JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE plus this call
-             * kills the hook's whole subtree, not just the direct process. */
-            TerminateJobObject(job, 1);
-
-            /* bounded grace wait (~1s), same shape as the POSIX 50 x 20ms
-             * grace reap loop, so a stuck process can't pin the worker. */
-            grace_start = ngx_autocert_dns_monotonic();
-            for ( ;; ) {
-                wait_rc = WaitForSingleObject(proc, 20);
-                if (wait_rc == WAIT_OBJECT_0) {
-                    break;
-                }
-                if (ngx_autocert_dns_elapsed_ms(grace_start) >= 1000) {
-                    break;
-                }
-            }
-
-            timed_out = 1;
-            break;
-        }
-    }
-
-    if (timed_out) {
-        rc = NGX_ERROR;
-        goto cleanup;
-    }
-
-    if (!GetExitCodeProcess(proc, &exit_code)) {
-        mapped = GetLastError();
-        errno = ngx_autocert_win32_errno(mapped);
-        ngx_log_error(NGX_LOG_ERR, order->log, ngx_errno,
-                      "autocert: dns-01 GetExitCodeProcess() failed for "
-                      "\"%V\"", hook);
-        rc = NGX_ERROR;
-        goto cleanup;
-    }
-
-    if (exit_code != 0) {
-        /* No signal concept on win32: log the exit code, same message shape
-         * as the POSIX "exit"/"signal" line so operators see one format. */
-        ngx_log_error(NGX_LOG_ERR, order->log, 0,
-                      "autocert: dns-01 hook \"%V\" failed (exit %d) for "
-                      "\"%V\"", hook, (int) exit_code, name);
-        rc = NGX_ERROR;
-        goto cleanup;
-    }
-
-    rc = NGX_OK;
+    /* The nginx worker never waits for a hook.  Retain these handles until a
+     * timer callback observes its terminal state with a zero-time wait. */
+    order->dns_hook_process = proc;
+    order->dns_hook_job = job;
+    proc = NULL;
+    job = NULL;
+    ngx_memzero(&order->dns_hook_timer, sizeof(ngx_event_t));
+    ngx_memzero(&order->dns_hook_deadline_timer, sizeof(ngx_event_t));
+    order->dns_hook_timer.handler = ngx_autocert_order_dns_hook_timer;
+    order->dns_hook_timer.data = order;
+    order->dns_hook_timer.log = order->log;
+    order->dns_hook_timer.cancelable = 1;
+    order->dns_hook_deadline_timer.handler = ngx_autocert_order_dns_hook_deadline;
+    order->dns_hook_deadline_timer.data = order;
+    order->dns_hook_deadline_timer.log = order->log;
+    order->dns_hook_deadline_timer.cancelable = 1;
+    ngx_add_timer(&order->dns_hook_timer, 20);
+    ngx_add_timer(&order->dns_hook_deadline_timer, timeout_ms);
+    rc = NGX_AGAIN;
 
 cleanup:
 
@@ -1421,10 +1364,8 @@ ngx_autocert_dns_hook_spawn(ngx_autocert_order_t *order, ngx_str_t *hook,
     ngx_str_t *name, char **argv, ngx_msec_t timeout_ms)
 {
 #if (NGX_WIN32)
-    /* Kept as a conservative fallback until the native-handle state machine is
-     * available on this platform. */
-    return ngx_autocert_dns_hook_spawn_blocking(order, hook, name, argv,
-                                                 timeout_ms);
+    return ngx_autocert_dns_hook_spawn_win32(order, hook, name, argv,
+                                              timeout_ms);
 #else
     pid_t      pid;
     sigset_t   set;
@@ -1492,6 +1433,13 @@ ngx_autocert_order_dns_hook_done(ngx_autocert_order_t *order, ngx_int_t rc)
 
     if (!order->dns_hook_is_add) {
         order->dns_set = 0;
+        if (order->dns_hook_after_authz) {
+            order->dns_hook_after_authz = 0;
+            if (ngx_autocert_order_finalize(order) != NGX_OK) {
+                ngx_autocert_order_finish(order, NGX_ERROR);
+            }
+            return;
+        }
         if (order->dns_hook_cleanup && order->handler) {
             order->dns_hook_cleanup = 0;
             order->handler(order, order->finish_rc);
@@ -1503,15 +1451,49 @@ ngx_autocert_order_dns_hook_done(ngx_autocert_order_t *order, ngx_int_t rc)
         ngx_autocert_order_finish(order, NGX_ERROR);
         return;
     }
-    ngx_add_timer(&order->dns_delay_timer,
-                  (ngx_msec_t) order->dns_propagation_delay * 1000);
+    ngx_autocert_order_dns_delay_start(order);
 }
 
 
 static void
 ngx_autocert_order_dns_hook_timer(ngx_event_t *ev)
 {
-#if !(NGX_WIN32)
+#if (NGX_WIN32)
+    ngx_autocert_order_t  *order;
+    HANDLE                  proc, job;
+    DWORD                   wait_rc, exit_code;
+
+    order = ev->data;
+    proc = order->dns_hook_process;
+    job = order->dns_hook_job;
+    if (proc == NULL) {
+        return;
+    }
+    wait_rc = WaitForSingleObject(proc, 0);
+    if (wait_rc == WAIT_TIMEOUT) {
+        ngx_add_timer(ev, 20);
+        return;
+    }
+    order->dns_hook_process = NULL;
+    order->dns_hook_job = NULL;
+    if (job != NULL) { CloseHandle(job); }
+    if (wait_rc != WAIT_OBJECT_0 || !GetExitCodeProcess(proc, &exit_code)) {
+        ngx_log_error(NGX_LOG_ERR, order->log, ngx_errno,
+                      "autocert: dns-01 hook status failed");
+        CloseHandle(proc);
+        ngx_autocert_order_dns_hook_done(order, NGX_ERROR);
+        return;
+    }
+    CloseHandle(proc);
+    if (order->dns_hook_timed_out || exit_code != 0) {
+        ngx_log_error(NGX_LOG_ERR, order->log, 0,
+                      "autocert: dns-01 hook failed (exit %d) for \"%V\"",
+                      (int) exit_code, &order->domain);
+        ngx_autocert_order_dns_hook_done(order, NGX_ERROR);
+        return;
+    }
+    ngx_autocert_order_dns_hook_done(order, NGX_OK);
+#else
     ngx_autocert_order_t  *order;
     pid_t                   w;
     int                     status;
@@ -1555,6 +1537,19 @@ ngx_autocert_order_dns_hook_deadline(ngx_event_t *ev)
                       order->dns_hook_timeout);
         if (kill(-order->dns_hook_pid, SIGKILL) != 0) {
             (void) kill(order->dns_hook_pid, SIGKILL);
+        }
+        order->dns_hook_timed_out = 1;
+        if (!order->dns_hook_timer.timer_set) { ngx_add_timer(&order->dns_hook_timer, 20); }
+    }
+#else
+    if (order->dns_hook_process != NULL) {
+        ngx_log_error(NGX_LOG_ERR, order->log, 0,
+                      "autocert: dns-01 hook timed out after %T s, killing",
+                      order->dns_hook_timeout);
+        if (order->dns_hook_job != NULL) {
+            (void) TerminateJobObject(order->dns_hook_job, 1);
+        } else {
+            (void) TerminateProcess(order->dns_hook_process, 1);
         }
         order->dns_hook_timed_out = 1;
         if (!order->dns_hook_timer.timer_set) { ngx_add_timer(&order->dns_hook_timer, 20); }
@@ -1675,8 +1670,6 @@ ngx_autocert_order_dns_hook(ngx_autocert_order_t *order, ngx_str_t *hook,
 static ngx_int_t
 ngx_autocert_order_publish_dns(ngx_autocert_order_t *order)
 {
-    ngx_msec_t  delay;
-
     if (ngx_http_autocert_dns01_txt(order->pool, &order->keyauth,
                                     &order->dns_txt_value)
         != NGX_OK)
@@ -1713,10 +1706,20 @@ ngx_autocert_order_publish_dns(ngx_autocert_order_t *order)
         }
     }
 
-    /* Wait for DNS propagation before asking the CA to validate. Clamp the
+    ngx_autocert_order_dns_delay_start(order);
+    return NGX_OK;
+}
+
+
+/* Wait for DNS propagation before asking the CA to validate. Clamp the
      * seconds→ms conversion so a negative or absurd configured delay can't wrap
      * the time_t multiply (esp. 32-bit time_t) into a tiny/huge ngx_msec_t.
      * A propagation wait beyond an hour is nonsensical, so cap there. */
+static void
+ngx_autocert_order_dns_delay_start(ngx_autocert_order_t *order)
+{
+    ngx_msec_t  delay;
+
     if (order->dns_propagation_delay < 0) {
         delay = 0;
     } else if (order->dns_propagation_delay > 3600) {
@@ -1736,7 +1739,6 @@ ngx_autocert_order_publish_dns(ngx_autocert_order_t *order)
     order->dns_delay_timer.cancelable = 1;
     ngx_add_timer(&order->dns_delay_timer, delay);
 
-    return NGX_OK;
 }
 
 
@@ -1911,8 +1913,24 @@ ngx_autocert_order_poll_done(ngx_autocert_acme_request_t *req, ngx_int_t rc)
                       "autocert: authorization for \"%V\" is valid",
                       &order->domain);
 
-        /* Step 6: challenge answer no longer needed once validation completed. */
-        ngx_autocert_order_unpublish(order);
+        /* Step 6: challenge answer no longer needed once validation completed.
+         * DNS removal is asynchronous; do not finalize until its callback has
+         * cleared the record (a failed remove remains non-fatal). */
+        if (order->dns_set && order->dns_hook_remove.len != 0) {
+            ngx_int_t  hook_rc;
+
+            order->dns_hook_is_add = 0;
+            order->dns_hook_after_authz = 1;
+            hook_rc = ngx_autocert_order_dns_hook(order,
+                                                  &order->dns_hook_remove, 0);
+            if (hook_rc == NGX_AGAIN) {
+                return;
+            }
+            order->dns_hook_after_authz = 0;
+            order->dns_set = 0;
+        } else {
+            ngx_autocert_order_unpublish(order);
+        }
 
         /* M6b: finalize the order with a CSR. */
         if (ngx_autocert_order_finalize(order) != NGX_OK) {
@@ -3383,14 +3401,11 @@ ngx_autocert_order_unpublish(ngx_autocert_order_t *order)
         order->alpn_set = 0;
     }
 
-    /* M16 dns-01: remove the published TXT via the remove-hook. Cleanup failure
-     * is non-fatal — the record expires by TTL — so the result is ignored. An
-     * empty hook (plumbing/stub path) just clears the flag. */
+    /* The terminal path below owns asynchronous remove-hook launch and waits
+     * for its callback before invoking the order handler.  This helper is also
+     * called by order_free(), where launching work against a dying pool would
+     * be unsafe, so it only drops the local dns state. */
     if (order->dns_set) {
-        if (order->dns_hook_remove.len != 0) {
-            (void) ngx_autocert_order_dns_hook(order, &order->dns_hook_remove,
-                                               0);
-        }
         order->dns_set = 0;
     }
 }

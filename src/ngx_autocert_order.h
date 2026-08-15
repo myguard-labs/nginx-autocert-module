@@ -117,6 +117,7 @@ struct ngx_autocert_order_s {
     ngx_uint_t                       dns_hook_is_add;  /* current hook publishes TXT */
     ngx_uint_t                       dns_hook_timed_out;
     ngx_uint_t                       dns_hook_cleanup; /* finish waits for remove */
+    ngx_uint_t                       dns_hook_after_authz; /* remove then finalize */
     ngx_int_t                        finish_rc;
     ngx_str_t                        dns_txt_value;    /* M16: base64url digest */
     ngx_uint_t                       done;
