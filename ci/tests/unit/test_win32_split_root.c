@@ -96,6 +96,19 @@ main(void)
     const char  *rest;
     int          rc;
 
+    /* The config-time DNS-hook predicate shares this exact win32 path
+     * grammar. Its native smoke test below covers the NGX_WIN32 arm; these
+     * calls pin the POSIX contract that must remain unchanged. */
+    {
+        ngx_str_t  posix_absolute = ngx_string("/hooks/add");
+        ngx_str_t  posix_relative = ngx_string("hooks/add");
+
+        CHECK(ngx_autocert_dns_hook_path_is_absolute(&posix_absolute),
+              "POSIX DNS hook accepts /-absolute path");
+        CHECK(!ngx_autocert_dns_hook_path_is_absolute(&posix_relative),
+              "POSIX DNS hook rejects relative path");
+    }
+
     /* 1. Drive-absolute, forward slash. */
     rc = classify("C:/certs/store", root, sizeof(root), &rest);
     CHECK(rc == 0 && strcmp(root, "\\??\\C:\\") == 0

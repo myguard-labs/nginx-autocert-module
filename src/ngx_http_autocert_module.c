@@ -26,6 +26,7 @@
 #include "ngx_autocert_requests.h"
 #include "ngx_autocert_serve.h"
 #include "ngx_autocert_driver.h"
+#include "ngx_autocert_shared.h"
 
 
 #define NGX_HTTP_AUTOCERT_DEFAULT_CA \
@@ -612,15 +613,14 @@ ngx_http_autocert_init_main_conf(ngx_conf_t *cf, void *conf)
      * Reject a given-but-empty value too.
      */
     if (amcf->dns_hook_add.data != NULL
-        && (amcf->dns_hook_add.len == 0 || amcf->dns_hook_add.data[0] != '/'))
+        && !ngx_autocert_dns_hook_path_is_absolute(&amcf->dns_hook_add))
     {
         ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
             "\"autocert_dns_hook_add\" must be a non-empty absolute path");
         return NGX_CONF_ERROR;
     }
     if (amcf->dns_hook_remove.data != NULL
-        && (amcf->dns_hook_remove.len == 0
-            || amcf->dns_hook_remove.data[0] != '/'))
+        && !ngx_autocert_dns_hook_path_is_absolute(&amcf->dns_hook_remove))
     {
         ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
             "\"autocert_dns_hook_remove\" must be a non-empty absolute path");

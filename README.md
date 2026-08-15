@@ -320,6 +320,9 @@ answers the CA must therefore be (or inherit) an autocert-enabled server — a b
 
 When `autocert_challenge dns-01` is active you must supply **both**
 `autocert_dns_hook_add` and `autocert_dns_hook_remove`, each an **absolute path**.
+On Windows, use a fully-qualified drive path (`C:/...` or `C:\\...`) or a UNC
+path (`//server/share/...` or `\\\\server\\share\\...`); drive-relative (`C:...`)
+and current-drive-rooted (`/...` or `\\...`) paths are rejected.
 The module runs them with **`fork` + `execve`** — no shell, no `system()`. Both
 hooks receive the **same positional argv**:
 
