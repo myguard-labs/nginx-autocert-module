@@ -62,7 +62,7 @@ struct ngx_autocert_order_s {
     ngx_shm_zone_t                  *challenge_zone; /* M5 token store */
     ngx_uint_t                       key_type;       /* cert key curve (M6b) */
     ngx_str_t                        store_path;     /* cert store dir (M6b) */
-    ngx_uint_t                       store;          /* ngx_http_autocert_store_e */
+    ngx_uint_t                       store; /* ngx_http_autocert_store_e */
 
     /* ACME Profiles: CA issuance profile emitted in newOrder ("shortlived" for
      * LE IP certs). "" = omit the field. */
@@ -72,13 +72,13 @@ struct ngx_autocert_order_s {
      * tls-alpn-01 publishes a challenge cert into alpn_zone instead of a token
      * into challenge_zone. */
     ngx_uint_t                       challenge;
-    ngx_shm_zone_t                  *alpn_zone;      /* M10b tls-alpn cert store */
+    ngx_shm_zone_t                  *alpn_zone; /* M10b tls-alpn cert store */
 
     /* M16 dns-01: publish a TXT via the exec hooks, wait, then validate. */
-    ngx_str_t                        dns_hook_add;     /* publish-TXT exec, "" */
+    ngx_str_t                        dns_hook_add; /* publish-TXT exec, "" */
     ngx_str_t                        dns_hook_remove;  /* remove-TXT exec, "" */
     time_t                           dns_propagation_delay;  /* seconds */
-    time_t                           dns_hook_timeout;  /* hook exec wait, secs */
+    time_t dns_hook_timeout; /* hook exec wait, secs */
 
     ngx_autocert_order_handler_pt    handler;
     void                            *data;
@@ -103,28 +103,28 @@ struct ngx_autocert_order_s {
     /* internals */
     ngx_pool_t                      *pool;           /* whole-order pool */
     ngx_str_t                        new_order_url;
-    ngx_str_t                        authz_url;       /* the one authorization */
+    ngx_str_t                        authz_url; /* the one authorization */
     ngx_str_t                        challenge_url;    /* http-01 challenge */
     ngx_str_t                        token;            /* http-01 token */
     ngx_str_t                        keyauth;          /* token.thumbprint */
     ngx_uint_t                       poll_tries;       /* authz poll counter */
     ngx_uint_t                       order_poll_tries; /* order poll counter */
-    ngx_uint_t                       finalize_retried; /* re-finalized after ready? */
-    ngx_uint_t                       download_retried; /* re-downloaded after transient non-200? */
+    ngx_uint_t finalize_retried; /* re-finalized after ready? */
+    ngx_uint_t download_retried; /* re-downloaded after transient non-200? */
     ngx_uint_t                       challenge_set;    /* token in store? */
-    ngx_uint_t                       alpn_set;         /* M10c: cert in alpn store? */
+    ngx_uint_t                       alpn_set; /* M10c: cert in alpn store? */
     ngx_uint_t                       dns_set;          /* M16: TXT published? */
-    ngx_uint_t                       dns_hook_is_add;  /* current hook publishes TXT */
+    ngx_uint_t dns_hook_is_add; /* current hook publishes TXT */
     ngx_uint_t                       dns_hook_timed_out;
-    ngx_uint_t                       dns_hook_cleanup; /* finish waits for remove */
-    ngx_uint_t                       dns_hook_after_authz; /* remove then finalize */
+    ngx_uint_t dns_hook_cleanup;     /* finish waits for remove */
+    ngx_uint_t dns_hook_after_authz; /* remove then finalize */
     ngx_int_t                        finish_rc;
-    ngx_str_t                        dns_txt_value;    /* M16: base64url digest */
+    ngx_str_t                        dns_txt_value; /* M16: base64url digest */
     ngx_uint_t                       done;
     ngx_event_t                      poll_timer;       /* authz polling */
     ngx_event_t                      order_timer;      /* order polling (M6b) */
-    ngx_event_t                      dns_delay_timer;  /* M16 propagation wait */
-    ngx_event_t                      dns_hook_timer;   /* nonblocking child status */
+    ngx_event_t                      dns_delay_timer; /* M16 propagation wait */
+    ngx_event_t dns_hook_timer; /* nonblocking child status */
     ngx_event_t                      dns_hook_deadline_timer;
     ngx_pid_t                        dns_hook_pid;
 #if (NGX_WIN32)

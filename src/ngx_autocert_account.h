@@ -6,9 +6,10 @@
  * are compiled into the CORE helper module:
  *
  *   1. GET  <directory>            — discover newNonce / newAccount URLs (M4c)
- *   2. GET  <newNonce>             — take the Replay-Nonce response header (M4d-1)
- *   3. POST <newAccount> (JWS)     — register; the account URL ("kid") comes back
- *                                    in the Location response header
+ *   2. GET  <newNonce>             — take the Replay-Nonce response header
+ * (M4d-1)
+ *   3. POST <newAccount> (JWS)     — register; the account URL ("kid") comes
+ * back in the Location response header
  *
  * The account key (ECDSA, curve from autocert_key_type) is loaded from
  * <autocert_path>/account.key if present, else generated and persisted there
@@ -47,7 +48,7 @@ struct ngx_autocert_account_s {
     ngx_str_t                        key_path;       /* <path>/account.key */
     ngx_uint_t                       key_type;       /* crypto curve enum */
     ngx_str_t                        email;          /* account contact, "" */
-    ngx_str_t                        eab_kid;        /* EAB key id, "" if none */
+    ngx_str_t                        eab_kid; /* EAB key id, "" if none */
     ngx_str_t                        eab_hmac_key;   /* base64url EAB key, "" */
 
     ngx_autocert_account_handler_pt  handler;
@@ -72,16 +73,16 @@ struct ngx_autocert_account_s {
      * time; the order state machine chains them. */
     ngx_pool_t                      *post_pool;      /* per-POST pool */
     ngx_str_t                        post_url;       /* target (in post_pool) */
-    ngx_str_t                        post_payload;   /* raw body (in post_pool) */
+    ngx_str_t                        post_payload; /* raw body (in post_pool) */
     ngx_autocert_acme_handler_pt     post_handler;   /* caller completion */
     void                            *post_data;      /* caller context */
     ngx_uint_t                       post_retried;   /* badNonce retry guard */
-    ngx_uint_t                       register_retried; /* newAccount badNonce guard */
+    ngx_uint_t register_retried; /* newAccount badNonce guard */
 
     /* Last-resort failure request, reserved up front at submit so the terminal
      * failure path can ALWAYS hand the caller a non-NULL req even under OOM.
-     * Without it an allocation failure on the failure path delivered a NULL req,
-     * which the order handlers ignore -> the order never finishes and the
+     * Without it an allocation failure on the failure path delivered a NULL
+     * req, which the order handlers ignore -> the order never finishes and the
      * single-in-flight scheduler stalls forever. Consumed by post_fail (then
      * owned by the caller), or freed on the success terminal. */
     ngx_pool_t                      *post_fail_pool;

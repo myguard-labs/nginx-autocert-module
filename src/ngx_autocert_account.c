@@ -235,7 +235,7 @@ ngx_autocert_account_load_key(ngx_autocert_account_t *acct)
     fd = ngx_autocert_openat(dfd, leaf, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
 
     if (fd == -1) {
-        ngx_err_t  err = ngx_errno;     /* close(dfd) below must not clobber it */
+        ngx_err_t err = ngx_errno; /* close(dfd) below must not clobber it */
 
         if (err != NGX_ENOENT) {
             (void) ngx_autocert_close(dfd);
@@ -353,19 +353,21 @@ ngx_autocert_account_load_key(ngx_autocert_account_t *acct)
 
     /*
      * L1: the account key (the JWS signer) is always generated P-384; that is
-     * the invariant the rest of the module assumes. key_from_pem already rejects
-     * anything but a P-256/P-384 EC key, so a non-NULL curve name that is not
-     * "P-384" can only be a legacy P-256 account.key — grandfather it (it still
-     * signs valid ES256 JWS) but warn so the operator can rotate to P-384.
+     * the invariant the rest of the module assumes. key_from_pem already
+     * rejects anything but a P-256/P-384 EC key, so a non-NULL curve name that
+     * is not "P-384" can only be a legacy P-256 account.key — grandfather it
+     * (it still signs valid ES256 JWS) but warn so the operator can rotate to
+     * P-384.
      */
     {
         const char  *curve = ngx_http_autocert_key_curve_name(acct->key);
 
         if (curve != NULL && ngx_strcmp(curve, "P-384") != 0) {
-            ngx_log_error(NGX_LOG_WARN, acct->log, 0,
-                          "autocert: account key \"%V\" is %s, not the expected "
-                          "P-384; grandfathered — rotate it to P-384",
-                          &acct->key_path, curve);
+            ngx_log_error(
+                NGX_LOG_WARN, acct->log, 0,
+                "autocert: account key \"%V\" is %s, not the expected "
+                "P-384; grandfathered — rotate it to P-384",
+                &acct->key_path, curve );
         }
     }
 
@@ -374,13 +376,12 @@ ngx_autocert_account_load_key(ngx_autocert_account_t *acct)
     return NGX_OK;
 }
 
-
 /*
- * Persist the account key. dfd is the caller's pinned parent dir fd and leaf the
- * single-component key filename relative to it; the SAME fd was used for the
- * load-time absence check, so there is no swap window between probe and create,
- * and the dir fsync below is provably of the inode we wrote into. The caller
- * owns dfd and closes it; this function never closes it.
+ * Persist the account key. dfd is the caller's pinned parent dir fd and leaf
+ * the single-component key filename relative to it; the SAME fd was used for
+ * the load-time absence check, so there is no swap window between probe and
+ * create, and the dir fsync below is provably of the inode we wrote into. The
+ * caller owns dfd and closes it; this function never closes it.
  */
 static ngx_int_t
 ngx_autocert_account_save_key(ngx_autocert_account_t *acct, int dfd,
@@ -445,7 +446,7 @@ ngx_autocert_account_save_key(ngx_autocert_account_t *acct, int dfd,
                           "autocert: write account key \"%V\" failed",
                           &acct->key_path);
             ngx_autocert_close(fd);
-            (void) ngx_autocert_unlinkat(dfd, leaf, 0);                /* no partial key */
+            (void) ngx_autocert_unlinkat( dfd, leaf, 0 ); /* no partial key */
             return NGX_ERROR;
         }
         off += (size_t) n;
@@ -624,12 +625,12 @@ ngx_autocert_account_nonce_done(ngx_autocert_acme_request_t *req, ngx_int_t rc)
     }
 }
 
-
 /*
  * Build the External Account Binding object (RFC 8555 §7.3.4): a flattened-JSON
- * JWS whose protected header is {"alg":"HS256","kid":<eab_kid>,"url":<newAccount
- * URL>}, whose payload is the account-key public JWK (the SAME `jwk` string the
- * outer newAccount request embeds), and whose signature is HMAC-SHA256 over
+ * JWS whose protected header is
+ * {"alg":"HS256","kid":<eab_kid>,"url":<newAccount URL>}, whose payload is the
+ * account-key public JWK (the SAME `jwk` string the outer newAccount request
+ * embeds), and whose signature is HMAC-SHA256 over
  * "<b64(protected)>.<b64(payload)>" keyed by the base64url-decoded CA HMAC key.
  * Emits the JWS JSON into *out (acct->pool). Caller splices it into the
  * newAccount payload as "externalAccountBinding".
@@ -717,8 +718,9 @@ ngx_autocert_account_build_eab(ngx_autocert_account_t *acct, ngx_str_t *jwk,
     }
 
     /* {"protected":"<>","payload":"<>","signature":"<>"} */
-    size = sizeof("{\"protected\":\"\",\"payload\":\"\",\"signature\":\"\"}") - 1
-           + b64_protected.len + b64_payload.len + b64_sig.len;
+    size =
+        sizeof( "{\"protected\":\"\",\"payload\":\"\",\"signature\":\"\"}" ) -
+        1 + b64_protected.len + b64_payload.len + b64_sig.len;
     out->data = ngx_pnalloc(acct->pool, size);
     if (out->data == NULL) {
         return NGX_ERROR;
@@ -787,7 +789,8 @@ ngx_autocert_account_post_account(ngx_autocert_account_t *acct)
      * the email and new_account_url (json_safe above) land in signed JSON, so
      * the email is json_safe-checked too. Build the payload once with whichever
      * members are present:
-     *   {"termsOfServiceAgreed":true[,"contact":[...]][,"externalAccountBinding":...]}
+     *   {"termsOfServiceAgreed":true[,"contact":[...]]
+     *   [,"externalAccountBinding":...]}
      */
     if (acct->email.len != 0 || acct->eab_kid.len != 0) {
         ngx_str_t  contact = ngx_null_string;
@@ -819,9 +822,10 @@ ngx_autocert_account_post_account(ngx_autocert_account_t *acct)
             ngx_str_null(&eab);
         }
 
-        contact_size = sizeof("{\"termsOfServiceAgreed\":true}") - 1 + contact.len
-               + (eab.len ? sizeof(",\"externalAccountBinding\":") - 1 + eab.len
-                          : 0);
+        contact_size =
+            sizeof( "{\"termsOfServiceAgreed\":true}" ) - 1 + contact.len +
+            ( eab.len ? sizeof( ",\"externalAccountBinding\":" ) - 1 + eab.len
+                      : 0 );
         payload.data = ngx_pnalloc(acct->pool, contact_size);
         if (payload.data == NULL) {
             return NGX_ERROR;
@@ -840,7 +844,8 @@ ngx_autocert_account_post_account(ngx_autocert_account_t *acct)
         payload.len = p - payload.data;
     }
 
-    /* protected = {"alg":"<alg>","jwk":<jwk>,"nonce":"<nonce>","url":"<url>"} */
+    /* protected = {"alg":"<alg>","jwk":<jwk>,"nonce":"<nonce>","url":"<url>"}
+     */
     size = sizeof("{\"alg\":\"\",\"jwk\":,\"nonce\":\"\",\"url\":\"\"}") - 1
            + ngx_strlen(alg) + jwk.len + acct->nonce.len
            + acct->new_account_url.len;
@@ -926,11 +931,9 @@ ngx_autocert_account_register_done(ngx_autocert_acme_request_t *req,
                       "autocert: newAccount badNonce, re-fetching nonce and "
                       "retrying");
 
-        if (ngx_autocert_account_start(acct, &get, &acct->new_nonce_url,
-                                       &empty, &empty,
-                                       ngx_autocert_account_register_renonce_done)
-            != NGX_OK)
-        {
+        if ( ngx_autocert_account_start(
+                 acct, &get, &acct->new_nonce_url, &empty, &empty,
+                 ngx_autocert_account_register_renonce_done ) != NGX_OK ) {
             ngx_autocert_account_finish(acct, NGX_ERROR);
         }
         return;
@@ -940,9 +943,10 @@ ngx_autocert_account_register_done(ngx_autocert_acme_request_t *req,
         /* Surface the ACME problem document (RFC 8555 §6.7) so a CA-side
          * rejection — e.g. badNonce, malformed JWS, rejectedIdentifier — is
          * diagnosable from the log instead of an opaque status code. */
-        ngx_log_error(NGX_LOG_ERR, acct->log, 0,
-                      "autocert: newAccount failed, status %ui: %*s",
-                      req->status, (size_t) req->body_out.len, req->body_out.data);
+        ngx_log_error( NGX_LOG_ERR, acct->log, 0,
+                       "autocert: newAccount failed, status %ui: %*s",
+                       req->status, (size_t) req->body_out.len,
+                       req->body_out.data );
     }
 
     ngx_destroy_pool(req->pool);
@@ -1110,7 +1114,8 @@ ngx_autocert_account_post(ngx_autocert_account_t *acct, ngx_str_t *url,
      * synchronously (the caller handles a NGX_ERROR return without needing a
      * req). Once the POST is in flight, the only way to report failure is via
      * the handler, which must receive a non-NULL req — so this allocation must
-     * not be deferred to the failure path where OOM could leave us with none. */
+     * not be deferred to the failure path where OOM could leave us with none.
+     */
     acct->post_fail_pool = ngx_create_pool(NGX_MIN_POOL_SIZE, acct->log);
     if (acct->post_fail_pool == NULL) {
         ngx_destroy_pool(acct->post_pool);
@@ -1171,7 +1176,8 @@ ngx_autocert_account_send_post(ngx_autocert_account_t *acct)
         return NGX_ERROR;
     }
 
-    /* protected = {"alg":"<alg>","kid":"<kid>","nonce":"<nonce>","url":"<url>"} */
+    /* protected = {"alg":"<alg>","kid":"<kid>","nonce":"<nonce>","url":"<url>"}
+     */
     size = sizeof("{\"alg\":\"\",\"kid\":\"\",\"nonce\":\"\",\"url\":\"\"}") - 1
            + ngx_strlen(alg) + acct->kid.len + acct->nonce.len
            + acct->post_url.len;
@@ -1228,7 +1234,8 @@ ngx_autocert_account_send_post(ngx_autocert_account_t *acct)
 
         /* Copy url + signed body into the REQUEST pool so the request (and the
          * req handed to the caller's completion handler) does not alias the
-         * per-POST signing pool, which is destroyed before that handler runs. */
+         * per-POST signing pool, which is destroyed before that handler runs.
+         */
         req->url.data = ngx_pnalloc(pool, acct->post_url.len);
         req->body.data = ngx_pnalloc(pool, jws.len);
         if (req->url.data == NULL || (jws.len != 0 && req->body.data == NULL)) {
@@ -1351,8 +1358,9 @@ ngx_autocert_account_post_done(ngx_autocert_acme_request_t *req, ngx_int_t rc)
         acct->post_retried = 1;
         ngx_destroy_pool(req->pool);
 
-        ngx_log_error(NGX_LOG_NOTICE, acct->log, 0,
-                      "autocert: badNonce, re-fetching nonce and retrying POST");
+        ngx_log_error(
+            NGX_LOG_NOTICE, acct->log, 0,
+            "autocert: badNonce, re-fetching nonce and retrying POST" );
 
         {
             ngx_pool_t                   *pool;

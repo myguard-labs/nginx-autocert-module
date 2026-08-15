@@ -43,7 +43,8 @@
 #define NGX_AUTOCERT_IP6_SEG       "_ip6_"
 
 /* "_ip6_" + 8 groups of 4 hex + 7 '-' separators. */
-#define NGX_AUTOCERT_IP6_SEG_LEN   (sizeof(NGX_AUTOCERT_IP6_SEG) - 1 + 8 * 4 + 7)
+#define NGX_AUTOCERT_IP6_SEG_LEN                                               \
+    ( sizeof( NGX_AUTOCERT_IP6_SEG ) - 1 + 8 * 4 + 7 )
 
 /* Upper bound for a mapped store segment: a 253-char name minus "*." plus the
  * "_wildcard_." prefix, rounded up. Also covers the fixed IPv6 segment. Sizes

@@ -380,7 +380,7 @@ ngx_autocert_json_string_raw(ngx_autocert_json_ctx_t *c, ngx_str_t *out)
             return NGX_OK;
         }
 
-        if (ch < 0x20) {                      /* control chars must be escaped */
+        if ( ch < 0x20 ) { /* control chars must be escaped */
             return NGX_ERROR;
         }
 

@@ -100,13 +100,12 @@ ngx_int_t ngx_autocert_alpn_set(ngx_shm_zone_t *shm_zone, ngx_str_t *domain,
  */
 ngx_int_t ngx_autocert_alpn_remove(ngx_shm_zone_t *shm_zone, ngx_str_t *domain);
 
-
 /*
  * Look up a domain and copy its cert+key PEM into the *cert and *key outputs,
  * allocated from `pool` (worker side, in the handshake). Returns NGX_OK if
  * found, NGX_DECLINED
- * if absent, NGX_ERROR on a bad argument / OOM. Copying out under the lock keeps
- * the values stable even if the helper removes them right after.
+ * if absent, NGX_ERROR on a bad argument / OOM. Copying out under the lock
+ * keeps the values stable even if the helper removes them right after.
  */
 ngx_int_t ngx_autocert_alpn_get(ngx_shm_zone_t *shm_zone, ngx_str_t *domain,
     ngx_pool_t *pool, ngx_str_t *cert, ngx_str_t *key);

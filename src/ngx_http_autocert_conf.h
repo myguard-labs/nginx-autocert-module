@@ -47,11 +47,10 @@ typedef enum {
     NGX_HTTP_AUTOCERT_CHALLENGE_DNS_01
 } ngx_http_autocert_challenge_e;
 
-
 /*
  * multi-CA M1 (#15 residual): the CA-identifying knobs grouped into one struct
- * so they live per-server (autocert_ca / _staging / _ca_certificate / _eab_kid /
- * _eab_hmac_key). M4 gives srv_conf its own ca_conf and merges global→server;
+ * so they live per-server (autocert_ca / _staging / _ca_certificate / _eab_kid
+ * / _eab_hmac_key). M4 gives srv_conf its own ca_conf and merges global→server;
  * M2 groups names by effective CA into main_conf.ca_list; M5's driver iterates
  * ca_list and drives one ACME engine per CA from each entry's ca_conf.
  */
@@ -70,30 +69,30 @@ typedef struct {
     ngx_str_t    eab_hmac_key;      /* base64url EAB HMAC key, "" */
 } ngx_autocert_ca_conf_t;
 
-
 /*
  * multi-CA M2: one entry per distinct CA the instance issues against. Built at
- * postconfig by grouping enabled server_names by their effective CA. In the M1/M2
- * world (directives still http{}-global) there is exactly ONE entry holding every
- * name; M4 (SRV-scope) makes per-vhost CAs produce several. ca_hash is the leading
- * 64 bits of SHA-256(canonical CA URL) as 16 lowercase hex + NUL, used by M3 for
- * the per-CA account dir (<path>/accounts/<hash>/account.key). account_key_path
- * is filled by M3; "" in M2. (Was crc32/hex8 — too short to rule out two distinct
- * CA URLs aliasing onto one account.key, which would break per-CA key isolation.)
+ * postconfig by grouping enabled server_names by their effective CA. In the
+ * M1/M2 world (directives still http{}-global) there is exactly ONE entry
+ * holding every name; M4 (SRV-scope) makes per-vhost CAs produce several.
+ * ca_hash is the leading 64 bits of SHA-256(canonical CA URL) as 16 lowercase
+ * hex + NUL, used by M3 for the per-CA account dir
+ * (<path>/accounts/<hash>/account.key). account_key_path is filled by M3; "" in
+ * M2. (Was crc32/hex8 — too short to rule out two distinct CA URLs aliasing
+ * onto one account.key, which would break per-CA key isolation.)
  */
 #define NGX_AUTOCERT_CA_HASH_HEX  16
 typedef struct {
     ngx_autocert_ca_conf_t  ca_conf;          /* resolved CA config */
     ngx_array_t            *names;             /* ngx_str_t under this CA */
     u_char                  ca_hash[NGX_AUTOCERT_CA_HASH_HEX + 1];
-                                              /* sha256(ca url)[:8] hex16 + NUL */
+    /* sha256(ca url)[:8] hex16 + NUL */
     ngx_str_t               account_key_path;  /* M3 fills; "" in M2 */
     /*
-     * Per-CA account contact. Each CA has its own ACME account, so each gets its
-     * own newAccount contact: the FIRST enabled vhost in this CA group with a
-     * non-empty `autocert on <email>` supplies it; a second vhost in the same
-     * group with a DIFFERENT non-empty email is rejected at postconfig (one CA =
-     * one account = one contact). "" if no vhost in the group set an email.
+     * Per-CA account contact. Each CA has its own ACME account, so each gets
+     * its own newAccount contact: the FIRST enabled vhost in this CA group with
+     * a non-empty `autocert on <email>` supplies it; a second vhost in the same
+     * group with a DIFFERENT non-empty email is rejected at postconfig (one CA
+     * = one account = one contact). "" if no vhost in the group set an email.
      */
     ngx_str_t               email;
 } ngx_autocert_ca_entry_t;
@@ -129,7 +128,7 @@ typedef struct {
  * occurrence of create_main_conf, read by every server.
  */
 typedef struct {
-    ngx_str_t    email;             /* account contact (1st enabled vhost), "" */
+    ngx_str_t    email; /* account contact (1st enabled vhost), "" */
     time_t       renew_before;      /* seconds before notAfter to renew */
     ngx_uint_t   key_type;          /* ngx_http_autocert_key_type_e */
     ngx_array_t *key_types;         /* ngx_uint_t list (dual-cert, Phase B);
@@ -141,7 +140,8 @@ typedef struct {
 
     /* ACME Profiles (draft-aaron-acme-profiles): the CA-defined issuance
      * profile requested in newOrder. Let's Encrypt requires the "shortlived"
-     * profile for IP-address certs. "" = omit the field (CA default profile). */
+     * profile for IP-address certs. "" = omit the field (CA default profile).
+     */
     ngx_str_t    profile;
 
     /* M4b outbound-client knobs, read by the helper process. */
@@ -162,8 +162,8 @@ typedef struct {
     /*
      * autolabel C: count of vhosts with `autocert on;`, regardless of whether
      * any of them contributed an issuable server_name. This — NOT names->nelts
-     * — is the "autocert is in use" signal that provisions the runtime registry,
-     * the challenge surfaces and the ACME account.
+     * — is the "autocert is in use" signal that provisions the runtime
+     * registry, the challenge surfaces and the ACME account.
      *
      * A label-driven gateway matches its hosts with a regex/catch-all
      * server_name and learns every real hostname at runtime, so it legitimately
@@ -195,9 +195,10 @@ typedef struct {
     ngx_shm_zone_t  *alpn_zone;
 
     /* autolabel A1: runtime cert-request registry shared with a consumer module
-     * (nginx-label-autoconf) by NAME. autocert owns it (stamps api_version); the
-     * consumer attaches the same-named zone and walks it. NULL until postconfig
-     * adds it (only when autocert is enabled). Layout: ngx_autocert_requests.h. */
+     * (nginx-label-autoconf) by NAME. autocert owns it (stamps api_version);
+     * the consumer attaches the same-named zone and walks it. NULL until
+     * postconfig adds it (only when autocert is enabled). Layout:
+     * ngx_autocert_requests.h. */
     ngx_shm_zone_t  *requests_zone;
 
     /* M10b test-only seed: autocert_test_alpn <domain> <keyauth>; the helper

@@ -50,7 +50,6 @@ ngx_int_t ngx_http_autocert_serve_init(ngx_conf_t *cf,
  */
 void ngx_autocert_serve_reload(void);
 
-
 /*
  * ---------------------------------------------------------------------------
  * cert_cb delegation (autolabel B3) — the ONE exported symbol of this module.
@@ -63,8 +62,8 @@ void ngx_autocert_serve_reload(void);
  * (nginx-label-autoconf-module, which serves per-container SNI certs) installs
  * its own cert_cb, autocert's is silently dropped and EVERY autocert name —
  * runtime AND ordinary config-time server_names — is served the M7 self-signed
- * bootstrap cert. Certs still order, issue and land in the store; only the serve
- * path dies, and it dies without a single log line.
+ * bootstrap cert. Certs still order, issue and land in the store; only the
+ * serve path dies, and it dies without a single log line.
  *
  * THE CONTRACT. autocert OWNS the OpenSSL slot: it is the only module that may
  * call SSL_CTX_set_cert_cb() on an autocert-enabled server. A consumer does NOT
@@ -94,24 +93,27 @@ void ngx_autocert_serve_reload(void);
  * or skip its own lookup.
  *
  * LINKAGE. This is the module's only INTENDED cross-module entry point. It has
- * default visibility, like most of this module's internals (the .so exports them
- * because nothing hides them, not because they are API — do not call those).
- * The one deliberate exception runs the other way: the ngx_autocert_requests_*
- * shm helpers are explicitly HIDDEN (see ngx_autocert_requests.h) because they
- * are code-copied into each .so and share state through shm rather than through
- * the symbol table, and interposition between the two copies would be a bug.
+ * default visibility, like most of this module's internals (the .so exports
+ * them because nothing hides them, not because they are API — do not call
+ * those). The one deliberate exception runs the other way: the
+ * ngx_autocert_requests_* shm helpers are explicitly HIDDEN (see
+ * ngx_autocert_requests.h) because they are code-copied into each .so and share
+ * state through shm rather than through the symbol table, and interposition
+ * between the two copies would be a bug.
  *
  * Delegation cannot use that copy-the-code trick: the cert_cb's state is
- * autocert's private per-server sctx plus a process-static per-worker cert cache,
- * so a vendored copy compiled into the consumer's .so would hold its own zeroed
- * static variables and could never serve autocert's certs. A real cross-.so call is
- * required — and nginx dlopen()s modules RTLD_NOW|RTLD_GLOBAL, so this symbol
- * lands in the global namespace where a consumer can reach it.
+ * autocert's private per-server sctx plus a process-static per-worker cert
+ * cache, so a vendored copy compiled into the consumer's .so would hold its own
+ * zeroed static variables and could never serve autocert's certs. A real
+ * cross-.so call is required — and nginx dlopen()s modules
+ * RTLD_NOW|RTLD_GLOBAL, so this symbol lands in the global namespace where a
+ * consumer can reach it.
  *
- * A consumer MUST resolve it with dlsym(RTLD_DEFAULT, ...) at runtime rather than
- * referencing it directly: RTLD_NOW is EAGER, so a direct extern reference would
- * make nginx refuse to start whenever autocert is absent. A NULL dlsym result
- * simply means "autocert not loaded" and the consumer keeps its own cert_cb.
+ * A consumer MUST resolve it with dlsym(RTLD_DEFAULT, ...) at runtime rather
+ * than referencing it directly: RTLD_NOW is EAGER, so a direct extern reference
+ * would make nginx refuse to start whenever autocert is absent. A NULL dlsym
+ * result simply means "autocert not loaded" and the consumer keeps its own
+ * cert_cb.
  *
  * ORDER-INDEPENDENT. The registration is kept in a file-static slot that the
  * cert_cb reads at HANDSHAKE time, not one copied into sctx at install time, so

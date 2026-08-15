@@ -1,8 +1,9 @@
 /*
- * A3.4: pure, driver-local rate-cap + wildcard-cover primitives, factored out of
- * ngx_autocert_driver.c so they can be unit-tested without the whole driver TU
- * (which pulls order/acme/http). No global state here — all windows are passed in
- * by the caller. Header-only static-inline: the driver includes it once.
+ * A3.4: pure, driver-local rate-cap + wildcard-cover primitives, factored out
+ * of ngx_autocert_driver.c so they can be unit-tested without the whole driver
+ * TU (which pulls order/acme/http). No global state here — all windows are
+ * passed in by the caller. Header-only static-inline: the driver includes it
+ * once.
  *
  * The rate cap guards Let's Encrypt account limits against a hostile runtime
  * label flood; see the driver for how these are wired. Kept deliberately simple
@@ -106,10 +107,11 @@ ngx_autocert_name_covers(const u_char *name, size_t nlen,
     rlen = (size_t) (host + hlen - rest);
 
     /*
-     * A wildcard replaces exactly one label: the host must equal "<label>.<suffix>"
-     * where <suffix> is the whole config name after "*.". Since we split on the
-     * host's FIRST dot, rest == suffix already guarantees the host is exactly one
-     * label deeper — "a.b.example.com" splits to "b.example.com" != "example.com".
+     * A wildcard replaces exactly one label: the host must equal
+     * "<label>.<suffix>" where <suffix> is the whole config name after "*.".
+     * Since we split on the host's FIRST dot, rest == suffix already guarantees
+     * the host is exactly one label deeper — "a.b.example.com" splits to
+     * "b.example.com" != "example.com".
      */
     return (rlen == slen
             && ngx_strncasecmp((u_char *) rest, (u_char *) suffix, rlen) == 0);

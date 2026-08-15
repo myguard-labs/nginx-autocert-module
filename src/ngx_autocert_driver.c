@@ -6,9 +6,9 @@
  * outbound TLS client. Rather than run it in a privileged master-spawned helper
  * (the old M4a model, which alone caused the cold-crash problem and was the
  * outlier vs angie's native acme and the official Rust nginx-acme — both drive
- * ACME from worker 0), it is armed from the http module's init_process, gated to
- * worker 0 (or single-process mode). The store dir and account.key are therefore
- * written by the worker user.
+ * ACME from worker 0), it is armed from the http module's init_process, gated
+ * to worker 0 (or single-process mode). The store dir and account.key are
+ * therefore written by the worker user.
  *
  *   - ngx_autocert_driver_init_process() arms the one-shot kick timer (which
  *     builds the client + bootstraps the account, then arms the renewal
@@ -52,28 +52,29 @@
 #endif
 #endif
 
-#include "ngx_autocert_driver.h"
-#include "ngx_autocert_shared.h"
-#include "ngx_autocert_acme.h"
 #include "ngx_autocert_account.h"
-#include "ngx_autocert_challenge.h"
+#include "ngx_autocert_acme.h"
 #include "ngx_autocert_alpn.h"
-#include "ngx_http_autocert_conf.h"    /* store-layout enum */
+#include "ngx_autocert_challenge.h"
+#include "ngx_autocert_driver.h"
 #include "ngx_autocert_order.h"
-#include "ngx_autocert_requests.h"      /* A3.3: runtime request drain/set_state */
-#include "ngx_autocert_ratecap.h"       /* A3.4: rate-cap + wildcard-cover pures */
+#include "ngx_autocert_ratecap.h"  /* A3.4: rate-cap + wildcard-cover pures */
+#include "ngx_autocert_requests.h" /* A3.3: runtime request drain/set_state */
+#include "ngx_autocert_shared.h"
+#include "ngx_http_autocert_conf.h" /* store-layout enum */
 #include "ngx_http_autocert_crypto.h"
 
-
 #define NGX_AUTOCERT_KICK         500     /* ms; defer first ACME fetch */
-#define NGX_AUTOCERT_RELOCK       5000    /* ms; retry the singleton lock so the
-                                           * surviving worker 0 takes over after a
-                                           * reload/USR2 retires the prior holder */
+#define NGX_AUTOCERT_RELOCK                                                    \
+    5000 /* ms; retry the singleton lock so the                                \
+          * surviving worker 0 takes over after a                              \
+          * reload/USR2 retires the prior holder */
 #define NGX_AUTOCERT_KICK_RETRY   30000   /* ms; re-kick after a transient
                                            * bootstrap failure (client build /
                                            * OOM / register start) so the driver
                                            * doesn't sit idle until reload */
-#define NGX_AUTOCERT_HTTP_TIMEOUT 30000   /* ms; per-request transport timeout */
+#define NGX_AUTOCERT_HTTP_TIMEOUT 30000   /* ms; per-request transport timeout \
+                                           */
 
 /*
  * A6: marker filename dropped beside a runtime cert's fullchain so the driver
@@ -106,7 +107,7 @@ typedef struct {
  * account is live (or skipped) the scheduler is armed.
  */
 typedef struct {
-    ngx_autocert_ca_entry_t     *entry;        /* &ca_list[i]: ca_conf,names,hash,key */
+    ngx_autocert_ca_entry_t *entry; /* &ca_list[i]: ca_conf,names,hash,key */
     ngx_autocert_acme_client_t   client;       /* per-CA outbound client */
     ngx_uint_t                   client_ready;
     ngx_autocert_account_t      *account;      /* per-CA registered account */
@@ -143,7 +144,7 @@ static void ngx_autocert_runtime_seed(ngx_cycle_t *cycle);
  */
 static ngx_autocert_ca_state_t     *ngx_autocert_ca_states;
 static ngx_uint_t                   ngx_autocert_ca_states_n;
-static ngx_cycle_t                 *ngx_autocert_cycle;     /* for account_done */
+static ngx_cycle_t                 *ngx_autocert_cycle; /* for account_done */
 
 /*
  * A single ACME order is in flight at a time across every CA — serialised by
@@ -210,13 +211,15 @@ ngx_autocert_mkdirat_secure(ngx_cycle_t *cycle, int pfd, const char *leaf)
     int                   fd;
     ngx_autocert_stat_t   st;
 
-    if (ngx_autocert_mkdirat(pfd, leaf, 0700) == -1 && ngx_errno != NGX_EEXIST) {
+    if ( ngx_autocert_mkdirat( pfd, leaf, 0700 ) == -1 &&
+         ngx_errno != NGX_EEXIST ) {
         ngx_log_error(NGX_LOG_ERR, cycle->log, ngx_errno,
                       "autocert: mkdir(\"%s\") failed", leaf);
         return -1;
     }
 
-    fd = ngx_autocert_openat(pfd, leaf, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    fd = ngx_autocert_openat( pfd, leaf,
+                              O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC );
     if (fd == -1) {
         ngx_log_error(NGX_LOG_ERR, cycle->log, ngx_errno,
                       "autocert: \"%s\" is not a directory", leaf);
@@ -231,7 +234,6 @@ ngx_autocert_mkdirat_secure(ngx_cycle_t *cycle, int pfd, const char *leaf)
     return fd;
 }
 
-
 /*
  * M3/M5: ensure the per-CA account dir <path>/accounts/<ca_hash>/ exists (0700)
  * and migrate the legacy flat <path>/account.key into it ONCE (rename only if
@@ -241,9 +243,10 @@ ngx_autocert_mkdirat_secure(ngx_cycle_t *cycle, int pfd, const char *leaf)
  *
  * M5: the legacy-flat migration only makes sense for the PRIMARY CA (the one a
  * single-CA deploy used). `migrate` gates it so the second+ CA never tries to
- * rename the one shared flat key into its own dir (it would migrate to the wrong
- * CA's account dir, or — once the primary already took it — find it absent and
- * silently generate a fresh per-CA key, which is the correct behavior anyway).
+ * rename the one shared flat key into its own dir (it would migrate to the
+ * wrong CA's account dir, or — once the primary already took it — find it
+ * absent and silently generate a fresh per-CA key, which is the correct
+ * behavior anyway).
  */
 static u_char *
 ngx_autocert_prepare_account_key(ngx_cycle_t *cycle, ngx_autocert_conf_t *acf,
@@ -254,11 +257,12 @@ ngx_autocert_prepare_account_key(ngx_cycle_t *cycle, ngx_autocert_conf_t *acf,
     ngx_autocert_stat_t       st;
     char                      hash[NGX_AUTOCERT_CA_HASH_HEX + 1];
 
-    key_path = ca->account_key_path.data;       /* config pool; outlives worker */
+    key_path = ca->account_key_path.data; /* config pool; outlives worker */
 
     /* Pin the base store dir <path> (created during driver lock acquire).
      * NOFOLLOW: <path> itself must not be a planted symlink. All sub-dir
-     * creation + the migration rename are *at()-relative to fds derived here. */
+     * creation + the migration rename are *at()-relative to fds derived here.
+     */
     base = ngx_pnalloc(pool, acf->path.len + 1);
     if (base == NULL) {
         return NULL;
@@ -302,14 +306,16 @@ ngx_autocert_prepare_account_key(ngx_cycle_t *cycle, ngx_autocert_conf_t *acf,
     /* Migrate <path>/account.key -> <path>/accounts/<ca_hash>/account.key,
      * both relative to pinned dir fds. RENAME_NOREPLACE never clobbers a key
      * that raced into the destination after our absence check. */
-    if (ngx_autocert_fstatat(cafd, "account.key", &st, AT_SYMLINK_NOFOLLOW) == -1) {
+    if ( ngx_autocert_fstatat( cafd, "account.key", &st,
+                               AT_SYMLINK_NOFOLLOW ) == -1 ) {
         if (ngx_errno != NGX_ENOENT) {
             /* unknown error — do NOT treat as "absent" and migrate over it */
             ngx_log_error(NGX_LOG_WARN, cycle->log, ngx_errno,
                           "autocert: stat(\"%s\") failed; skipping account-key "
                           "migration", key_path);
 
-        } else if (ngx_autocert_fstatat(bfd, "account.key", &st, AT_SYMLINK_NOFOLLOW) == 0) {
+        } else if ( ngx_autocert_fstatat( bfd, "account.key", &st,
+                                          AT_SYMLINK_NOFOLLOW ) == 0 ) {
             /* new key absent + legacy key present: migrate atomically, once. */
             ngx_int_t  rc;
 
@@ -322,15 +328,17 @@ ngx_autocert_prepare_account_key(ngx_cycle_t *cycle, ngx_autocert_conf_t *acf,
                               key_path);
 
             } else if (rc == NGX_DECLINED) {
-                /* No RENAME_NOREPLACE on this kernel/fs. We do NOT fall back to a
-                 * plain renameat() — without the flag a destination that raced in
-                 * after the fstatat would be clobbered. Skip the migration; a
-                 * fresh per-CA key is generated at key_path instead (correct, and
-                 * the legacy flat key is left untouched). renameat2 is Linux
-                 * 3.15+ so this is effectively unreachable in practice. */
-                ngx_log_error(NGX_LOG_WARN, cycle->log, 0,
-                              "autocert: RENAME_NOREPLACE unsupported; skipping "
-                              "account-key migration (fresh key generated)");
+                /* No RENAME_NOREPLACE on this kernel/fs. We do NOT fall back to
+                 * a plain renameat() — without the flag a destination that
+                 * raced in after the fstatat would be clobbered. Skip the
+                 * migration; a fresh per-CA key is generated at key_path
+                 * instead (correct, and the legacy flat key is left untouched).
+                 * renameat2 is Linux 3.15+ so this is effectively unreachable
+                 * in practice. */
+                ngx_log_error(
+                    NGX_LOG_WARN, cycle->log, 0,
+                    "autocert: RENAME_NOREPLACE unsupported; skipping "
+                    "account-key migration (fresh key generated)" );
 
             } else if (ngx_errno == NGX_EEXIST) {
                 /* a key raced into the destination — already migrated; fine */
@@ -479,21 +487,23 @@ ngx_autocert_kick_handler(ngx_event_t *ev)
     }
 
     /*
-     * M4 (Codex #4) / M5: nothing to issue under => do NOT build any ACME client
-     * or bootstrap any account.
+     * M4 (Codex #4) / M5: nothing to issue under => do NOT build any ACME
+     * client or bootstrap any account.
      *
      * The gate is ca_list ALONE (autolabel C). It used to also require
      * names->nelts != 0, which made a runtime-only deployment — a label-driven
-     * gateway with regex/catch-all vhosts and zero config names — go permanently
-     * idle: no account, so a runtime name drained from requests_zone had nothing
-     * to order under. postconfig now materializes a CA group for the effective CA
-     * of an enabled vhost even when it collected no names, so an empty ca_list
-     * really does mean "autocert is enabled nowhere".
+     * gateway with regex/catch-all vhosts and zero config names — go
+     * permanently idle: no account, so a runtime name drained from
+     * requests_zone had nothing to order under. postconfig now materializes a
+     * CA group for the effective CA of an enabled vhost even when it collected
+     * no names, so an empty ca_list really does mean "autocert is enabled
+     * nowhere".
      *
      * A CA group with an empty name list is fine here: the renewal scheduler
      * skips it (it iterates entry->names), while the runtime drain path orders
      * by drained host, not from the group's name list. The test seeds above are
-     * intentionally exempt (they exercise the serve path without an order flow).
+     * intentionally exempt (they exercise the serve path without an order
+     * flow).
      */
     if (acf.ca_list == NULL || acf.ca_list->nelts == 0) {
         ngx_log_error(NGX_LOG_NOTICE, cycle->log, 0,
@@ -536,13 +546,13 @@ ngx_autocert_kick_handler(ngx_event_t *ev)
     ngx_autocert_bootstrap_ca(cycle, 0);
 }
 
-
 /*
- * M5: bootstrap (build client + register account) for one CA engine, then chain.
- * Skips a CA that is already live or already has an in-flight bootstrap. On a
- * transient failure to START this CA's bootstrap, SKIPS to the next CA (a single
- * bad CA must not wedge the others); the scheduler is armed once the chain
- * reaches the end with at least one live account, else the kick is re-armed.
+ * M5: bootstrap (build client + register account) for one CA engine, then
+ * chain. Skips a CA that is already live or already has an in-flight bootstrap.
+ * On a transient failure to START this CA's bootstrap, SKIPS to the next CA (a
+ * single bad CA must not wedge the others); the scheduler is armed once the
+ * chain reaches the end with at least one live account, else the kick is
+ * re-armed.
  */
 static void
 ngx_autocert_bootstrap_ca(ngx_cycle_t *cycle, ngx_uint_t ca_idx)
@@ -629,8 +639,8 @@ ngx_autocert_bootstrap_ca(ngx_cycle_t *cycle, ngx_uint_t ca_idx)
          * key type: account JWS only supports ES256/ES384, so the account key
          * is always EC (P-384) even when certificates are issued as RSA. */
         acct->key_type = NGX_HTTP_AUTOCERT_KEY_P384;
-        /* Per-CA contact: this CA group's own email, or the legacy first-overall
-         * email if the group set none. */
+        /* Per-CA contact: this CA group's own email, or the legacy
+         * first-overall email if the group set none. */
         acct->email = state->entry->email.len ? state->entry->email : acf.email;
         acct->eab_kid = state->entry->ca_conf.eab_kid;
         acct->eab_hmac_key = state->entry->ca_conf.eab_hmac_key;
@@ -656,9 +666,11 @@ ngx_autocert_bootstrap_ca(ngx_cycle_t *cycle, ngx_uint_t ca_idx)
                       &state->entry->ca_conf.ca);
 
         if (ngx_autocert_account_register(acct) != NGX_OK) {
-            ngx_log_error(NGX_LOG_ERR, cycle->log, 0,
-                          "autocert: could not start ACME account registration "
-                          "for %V; skipping this CA", &state->entry->ca_conf.ca);
+            ngx_log_error(
+                NGX_LOG_ERR, cycle->log, 0,
+                "autocert: could not start ACME account registration "
+                "for %V; skipping this CA",
+                &state->entry->ca_conf.ca );
             ngx_destroy_pool(pool);
             state->account = NULL;
             state->account_pool = NULL;
@@ -666,16 +678,17 @@ ngx_autocert_bootstrap_ca(ngx_cycle_t *cycle, ngx_uint_t ca_idx)
             continue;
         }
 
-        /* Registration started; its terminal (account_done) resumes the chain. */
+        /* Registration started; its terminal (account_done) resumes the chain.
+         */
         return;
     }
 
     /*
      * Chain reached the end. Arm the renewal scheduler if at least one account
      * came up. Independently, if ANY CA is still dead (transient client-build /
-     * OOM / register-start / registration failure), re-arm the kick timer so the
-     * dead CA(s) are retried — even when the scheduler is already armed for the
-     * live ones (Codex M5 MED: a transient failure for one CA must not be
+     * OOM / register-start / registration failure), re-arm the kick timer so
+     * the dead CA(s) are retried — even when the scheduler is already armed for
+     * the live ones (Codex M5 MED: a transient failure for one CA must not be
      * permanent just because another CA succeeded). The retry re-enters
      * bootstrap_ca(0): live accounts short-circuit, and start_order() /
      * sched arming are both idempotent.
@@ -706,16 +719,15 @@ ngx_autocert_bootstrap_ca(ngx_cycle_t *cycle, ngx_uint_t ca_idx)
     }
 }
 
-
 /*
  * Terminal callback of a CA's account bootstrap (M5: data == that CA's engine
  * state). On failure the account is freed and the CA is left dead (account_live
- * stays 0). On success the account is kept ALIVE as the ACME session for that CA
- * (it owns the kid, key and current nonce that every later kid-signed POST is
- * signed with). Either way the SEQUENTIAL bootstrap chain resumes at the NEXT CA
- * (bootstrap_ca), which arms the renewal scheduler once the last CA is handled
- * with >=1 live account. The CI asserts on the success line emitted by the
- * account module.
+ * stays 0). On success the account is kept ALIVE as the ACME session for that
+ * CA (it owns the kid, key and current nonce that every later kid-signed POST
+ * is signed with). Either way the SEQUENTIAL bootstrap chain resumes at the
+ * NEXT CA (bootstrap_ca), which arms the renewal scheduler once the last CA is
+ * handled with >=1 live account. The CI asserts on the success line emitted by
+ * the account module.
  */
 static void
 ngx_autocert_account_done(ngx_autocert_account_t *acct, ngx_int_t rc)
@@ -751,7 +763,6 @@ ngx_autocert_account_done(ngx_autocert_account_t *acct, ngx_int_t rc)
     ngx_autocert_bootstrap_ca(cycle, next);
 }
 
-
 /*
  * M8 renewal scheduler.
  *
@@ -760,16 +771,18 @@ ngx_autocert_account_done(ngx_autocert_account_t *acct, ngx_int_t rc)
  * order; for each name it decides whether the stored certificate needs work
  * (no cert on disk yet, or inside its renew_before window) and, if so, launches
  * exactly one ACME order. Orders are serialised through the single global
- * ngx_autocert_order: the order's terminal callback (ngx_autocert_order_complete)
- * pumps the scan forward to the next due name. When the scan reaches the end
- * with no order in flight, the periodic timer is rearmed.
+ * ngx_autocert_order: the order's terminal callback
+ * (ngx_autocert_order_complete) pumps the scan forward to the next due name.
+ * When the scan reaches the end with no order in flight, the periodic timer is
+ * rearmed.
  *
  * Renewed certs land on disk via the M6b atomic store; the per-worker serve
  * path (M7) hot-reloads them on mtime change, so no config reload is needed.
  */
 
 /* Periodic check interval, capped so we re-examine within a renew window. */
-#define NGX_AUTOCERT_SCHED_INTERVAL  (12 * 60 * 60 * 1000)   /* 12h, ms ceiling */
+#define NGX_AUTOCERT_SCHED_INTERVAL                                            \
+    ( 12 * 60 * 60 * 1000 ) /* 12h, ms ceiling */
 /* Never sweep faster than this, even for a tiny renew_before (avoid busy-loop).
  * Under NGX_AUTOCERT_TEST this is 5s instead of 60s so the Pebble e2e suite's
  * polling loops (retry-after.sh / backoff.sh / runtime-ttl-gc.sh / renewal.sh)
@@ -793,65 +806,69 @@ ngx_autocert_account_done(ngx_autocert_account_t *acct, ngx_int_t rc)
  * retry-after.sh don't wait a real minute per observed attempt; MAXSHIFT/CAP
  * keep their production semantics (only the base hold shrinks). */
 #if (NGX_AUTOCERT_TEST)
-#define NGX_AUTOCERT_BACKOFF_BASE    5           /* 5s first retry hold (test) */
+#define NGX_AUTOCERT_BACKOFF_BASE 5 /* 5s first retry hold (test) */
 #else
 #define NGX_AUTOCERT_BACKOFF_BASE    60          /* 60s first retry hold */
 #endif
-#define NGX_AUTOCERT_BACKOFF_MAXSHIFT 6          /* growth is BASE<<min(fails-1,MAXSHIFT):
-                                                   * 60s..3840s in production (BASE=60),
-                                                   * 5s..320s under NGX_AUTOCERT_TEST (BASE=5) */
+#define NGX_AUTOCERT_BACKOFF_MAXSHIFT                                          \
+    6 /* growth is BASE<<min(fails-1,MAXSHIFT):                                \
+       * 60s..3840s in production (BASE=60),                                   \
+       * 5s..320s under NGX_AUTOCERT_TEST (BASE=5) */
 #define NGX_AUTOCERT_BACKOFF_CAP     (60 * 60)   /* 1h ceiling, seconds */
 
 static ngx_event_t              ngx_autocert_sched_timer;
 static ngx_uint_t               ngx_autocert_sched_ca;     /* next CA to scan */
-static ngx_uint_t               ngx_autocert_sched_index;  /* next name in that CA */
-static ngx_uint_t               ngx_autocert_sched_kt;     /* next keytype for that name */
-static ngx_uint_t               ngx_autocert_sched_cur_ca; /* CA index in flight */
-static ngx_uint_t               ngx_autocert_sched_cur;    /* backoff slot in flight */
+static ngx_uint_t ngx_autocert_sched_index;  /* next name in that CA */
+static ngx_uint_t ngx_autocert_sched_kt;     /* next keytype for that name */
+static ngx_uint_t ngx_autocert_sched_cur_ca; /* CA index in flight */
+static ngx_uint_t ngx_autocert_sched_cur;    /* backoff slot in flight */
 /*
- * A3.3: the order in flight may be for a RUNTIME host (drained from the requests
- * shm zone) rather than a config name. Runtime outcomes are recorded on the shm
- * node (set_state ISSUED/FAILED) — its backoff lives there — NOT in a CA's
- * per-config-name backoff array (which has no slot for it). This flag tells
- * order_complete which ledger to write.
+ * A3.3: the order in flight may be for a RUNTIME host (drained from the
+ * requests shm zone) rather than a config name. Runtime outcomes are recorded
+ * on the shm node (set_state ISSUED/FAILED) — its backoff lives there — NOT in
+ * a CA's per-config-name backoff array (which has no slot for it). This flag
+ * tells order_complete which ledger to write.
  */
-static ngx_uint_t               ngx_autocert_sched_runtime; /* in-flight order is runtime */
+static ngx_uint_t ngx_autocert_sched_runtime; /* in-flight order is runtime */
 
 /*
- * A3.4: driver-local global rate cap on RUNTIME new-orders. The driver runs on a
- * single process (worker 0, interprocess-flock singleton), so a plain in-process
- * rolling window suffices — no shm. This guards Let's Encrypt account limits so a
- * hostile label flood (via the requests zone) cannot burn the ACME budget:
+ * A3.4: driver-local global rate cap on RUNTIME new-orders. The driver runs on
+ * a single process (worker 0, interprocess-flock singleton), so a plain
+ * in-process rolling window suffices — no shm. This guards Let's Encrypt
+ * account limits so a hostile label flood (via the requests zone) cannot burn
+ * the ACME budget:
  *   - a global rolling window of new runtime orders (default 300 / 3h), and
  *   - a per-host rolling window of runtime FAILURES (default 5 / 1h).
  * Config names are NOT counted (the operator's own set; the config sweep bounds
- * itself by name count + per-name backoff). Over either cap, the drained host is
- * released to REQUESTED with a hold until the window frees, so nothing is lost.
+ * itself by name count + per-name backoff). Over either cap, the drained host
+ * is released to REQUESTED with a hold until the window frees, so nothing is
+ * lost.
  *
- * The windows are simple ring buffers of unix timestamps; "count in window" is a
- * scan of the ring dropping entries older than the window. Sizes are the caps, so
- * a full ring == at cap. Cheap: the rings are tiny and only touched on the runtime
- * order path (already rate-limited by the one-in-flight singleton).
+ * The windows are simple ring buffers of unix timestamps; "count in window" is
+ * a scan of the ring dropping entries older than the window. Sizes are the
+ * caps, so a full ring == at cap. Cheap: the rings are tiny and only touched on
+ * the runtime order path (already rate-limited by the one-in-flight singleton).
  */
-#define NGX_AUTOCERT_RT_ORDER_MAX     300           /* new runtime orders / window */
-#define NGX_AUTOCERT_RT_ORDER_WINDOW  (3 * 60 * 60) /* 3h, seconds (LE new-order) */
-#define NGX_AUTOCERT_RT_FAIL_MAX      5             /* runtime fails / host / window */
+#define NGX_AUTOCERT_RT_ORDER_MAX 300 /* new runtime orders / window */
+#define NGX_AUTOCERT_RT_ORDER_WINDOW                                           \
+    ( 3 * 60 * 60 )                /* 3h, seconds (LE new-order) */
+#define NGX_AUTOCERT_RT_FAIL_MAX 5 /* runtime fails / host / window */
 #define NGX_AUTOCERT_RT_FAIL_WINDOW   (60 * 60)     /* 1h, seconds */
 
 static time_t   ngx_autocert_rt_order_ring[NGX_AUTOCERT_RT_ORDER_MAX];
-static ngx_uint_t ngx_autocert_rt_order_head;       /* next write slot (wraps) */
+static ngx_uint_t ngx_autocert_rt_order_head; /* next write slot (wraps) */
 
 typedef struct {
-    u_char   host[256];                             /* NUL-terminated drained host */
+    u_char     host[256]; /* NUL-terminated drained host */
     size_t   len;
     time_t   ring[NGX_AUTOCERT_RT_FAIL_MAX];
     ngx_uint_t head;
 } ngx_autocert_rt_fail_t;
 
-/* Per-host fail windows for the hosts currently or recently failing. Small fixed
- * table (LRU-evict the oldest on overflow); a runtime flood is bounded by the
- * order cap above, so this need only be large enough for the concurrent failing
- * set, not every host ever seen. */
+/* Per-host fail windows for the hosts currently or recently failing. Small
+ * fixed table (LRU-evict the oldest on overflow); a runtime flood is bounded by
+ * the order cap above, so this need only be large enough for the concurrent
+ * failing set, not every host ever seen. */
 #define NGX_AUTOCERT_RT_FAIL_HOSTS    64
 static ngx_autocert_rt_fail_t ngx_autocert_rt_fail[NGX_AUTOCERT_RT_FAIL_HOSTS];
 
@@ -919,7 +936,7 @@ ngx_autocert_sched_handler(ngx_event_t *ev)
     ngx_cycle_t  *cycle = ev->data;
 
     if (ngx_quit || ngx_terminate || ngx_exiting) {
-        return;                         /* retiring worker: don't start a sweep */
+        return; /* retiring worker: don't start a sweep */
     }
 
     if (ngx_autocert_order != NULL) {
@@ -992,12 +1009,11 @@ ngx_autocert_ca_backoff_ensure(ngx_cycle_t *cycle, ngx_autocert_conf_t *acf,
     return NGX_OK;
 }
 
-
 /*
- * Advance the (CA, name) cursor from (sched_ca, sched_index), launching an order
- * for the first due name under a live CA engine. One order in flight across all
- * CAs. If the whole CAs×names space is exhausted with nothing to do, rearm the
- * periodic timer.
+ * Advance the (CA, name) cursor from (sched_ca, sched_index), launching an
+ * order for the first due name under a live CA engine. One order in flight
+ * across all CAs. If the whole CAs×names space is exhausted with nothing to do,
+ * rearm the periodic timer.
  */
 static void
 ngx_autocert_sched_pump(ngx_cycle_t *cycle)
@@ -1010,9 +1026,10 @@ ngx_autocert_sched_pump(ngx_cycle_t *cycle)
 
     /* Don't launch new orders once the worker is retiring (Codex M5 MED): a
      * graceful QUIT must let the order in flight finish and then STOP — pumping
-     * the next due name here would keep issuing and pin the singleton lock open,
-     * blocking the next generation's worker 0 from taking over. The sched timer
-     * is cancelable, so simply not rearming lets the worker exit promptly. */
+     * the next due name here would keep issuing and pin the singleton lock
+     * open, blocking the next generation's worker 0 from taking over. The sched
+     * timer is cancelable, so simply not rearming lets the worker exit
+     * promptly. */
     if (ngx_quit || ngx_terminate || ngx_exiting) {
         ngx_log_debug0(NGX_LOG_DEBUG_CORE, cycle->log, 0,
                        "autocert: worker exiting; scheduler pump stops");
@@ -1048,7 +1065,8 @@ ngx_autocert_sched_pump(ngx_cycle_t *cycle)
 
         state = &ngx_autocert_ca_states[ngx_autocert_sched_ca];
 
-        /* A CA whose account never came up is skipped (its names can't issue). */
+        /* A CA whose account never came up is skipped (its names can't issue).
+         */
         if (!state->account_live || state->account == NULL) {
             continue;
         }
@@ -1073,11 +1091,13 @@ ngx_autocert_sched_pump(ngx_cycle_t *cycle)
                 ngx_uint_t  key_type = kts[k];
                 ngx_uint_t  slot = i * nkt + k;
 
-                /* Per-(name,keytype) failure backoff before any disk/clock check. */
+                /* Per-(name,keytype) failure backoff before any disk/clock
+                 * check. */
                 if (state->backoff[slot].next_eligible > ngx_time()) {
-                    ngx_log_debug2(NGX_LOG_DEBUG_CORE, cycle->log, 0,
-                                   "autocert: name \"%V\" held by backoff until %T",
-                                   name, state->backoff[slot].next_eligible);
+                    ngx_log_debug2(
+                        NGX_LOG_DEBUG_CORE, cycle->log, 0,
+                        "autocert: name \"%V\" held by backoff until %T", name,
+                        state->backoff[slot].next_eligible );
                     continue;
                 }
 
@@ -1088,7 +1108,8 @@ ngx_autocert_sched_pump(ngx_cycle_t *cycle)
                 }
 
                 ngx_autocert_sched_cur_ca = ngx_autocert_sched_ca;
-                ngx_autocert_sched_cur = slot;  /* (CA, name, keytype) in flight */
+                ngx_autocert_sched_cur =
+                    slot; /* (CA, name, keytype) in flight */
 
                 if (ngx_autocert_start_order_for(cycle, &acf, state, name,
                                                  key_type, 0) == NGX_OK)
@@ -1096,7 +1117,8 @@ ngx_autocert_sched_pump(ngx_cycle_t *cycle)
                     return;             /* order_complete will pump again */
                 }
                 /* Launch failed (transient: pool/OOM) — treat as a failure for
-                 * the backoff so we don't spin on it, then try the next variant. */
+                 * the backoff so we don't spin on it, then try the next
+                 * variant. */
                 ngx_autocert_backoff_record(state, slot, 0);
             }
 
@@ -1116,7 +1138,7 @@ ngx_autocert_sched_pump(ngx_cycle_t *cycle)
      */
     ngx_autocert_sched_pump_runtime(cycle, &acf);
     if (ngx_autocert_order != NULL) {
-        return;                         /* runtime order launched; complete re-pumps */
+        return; /* runtime order launched; complete re-pumps */
     }
 
 rearm:
@@ -1174,7 +1196,8 @@ rearm:
              * renew_before math above): soonest is CAP-bounded today so this
              * cannot wrap, but doing it in 64-bit is regression-proof if the
              * eligibility CAP ever grows. */
-            ngx_msec_t  until = (ngx_msec_t) ((uint64_t) (soonest - now) * 1000);
+            ngx_msec_t until =
+                (ngx_msec_t) ( (uint64_t) ( soonest - now ) * 1000 );
             if (until < interval) {
                 interval = until;
             }
@@ -1328,10 +1351,10 @@ ngx_autocert_name_due(ngx_cycle_t *cycle, ngx_autocert_conf_t *acf,
      */
     certbot = (acf->store == NGX_HTTP_AUTOCERT_STORE_CERTBOT);
 
-    /* D4: a wildcard name "*.rest" is stored under "_wildcard_.rest"; map to the
-     * same fs segment the store writer + serve path use so the freshness check
-     * stats the file that was actually written (else it would look perpetually
-     * un-issued and reorder every sweep). */
+    /* D4: a wildcard name "*.rest" is stored under "_wildcard_.rest"; map to
+     * the same fs segment the store writer + serve path use so the freshness
+     * check stats the file that was actually written (else it would look
+     * perpetually un-issued and reorder every sweep). */
     seg.data = seg_buf;
     seg.len = ngx_autocert_fs_segment(seg_buf, sizeof(seg_buf), name);
     if (seg.len == 0) {
@@ -1391,15 +1414,17 @@ ngx_autocert_name_due(ngx_cycle_t *cycle, ngx_autocert_conf_t *acf,
                                               &stored_id, verifyp);
 
         if (rc == NGX_DECLINED) {
-            ngx_log_debug1(NGX_LOG_DEBUG_CORE, cycle->log, 0,
-                           "autocert: name \"%V\" due because no cert is stored",
-                           name);
+            ngx_log_debug1(
+                NGX_LOG_DEBUG_CORE, cycle->log, 0,
+                "autocert: name \"%V\" due because no cert is stored", name );
             return 1;                   /* no cert yet -> issue */
         }
         if (rc == NGX_ABORT) {
-            ngx_log_error(NGX_LOG_NOTICE, cycle->log, 0,
-                          "autocert: \"%V\" stored cert does not cover this name "
-                          "(wrong-domain leaf); reissuing", name);
+            ngx_log_error(
+                NGX_LOG_NOTICE, cycle->log, 0,
+                "autocert: \"%V\" stored cert does not cover this name "
+                "(wrong-domain leaf); reissuing",
+                name );
             return 1;                   /* identity mismatch -> reissue */
         }
         if (rc != NGX_OK) {
@@ -1412,15 +1437,18 @@ ngx_autocert_name_due(ngx_cycle_t *cycle, ngx_autocert_conf_t *acf,
         /*
          * The fullchain filename selects the slot (EC = flat, RSA = .rsa.), but
          * its contents must match the slot's key family. A pre-dual-cert
-         * single-RSA deployment wrote its RSA leaf to the flat fullchain.pem; the
-         * EC slot would otherwise read it, see a valid notAfter, and skip EC
-         * issuance until expiry. Treat a family mismatch as due so the correct
-         * keytype gets issued (its commit seeds-from-live, preserving the other).
+         * single-RSA deployment wrote its RSA leaf to the flat fullchain.pem;
+         * the EC slot would otherwise read it, see a valid notAfter, and skip
+         * EC issuance until expiry. Treat a family mismatch as due so the
+         * correct keytype gets issued (its commit seeds-from-live, preserving
+         * the other).
          */
         if (stored_id != want_id) {
-            ngx_log_error(NGX_LOG_NOTICE, cycle->log, 0,
-                          "autocert: \"%V\" stored cert is the wrong key family "
-                          "for this keytype; reissuing", name);
+            ngx_log_error(
+                NGX_LOG_NOTICE, cycle->log, 0,
+                "autocert: \"%V\" stored cert is the wrong key family "
+                "for this keytype; reissuing",
+                name );
             return 1;
         }
     }
@@ -1471,10 +1499,11 @@ ngx_autocert_start_order_for(ngx_cycle_t *cycle, ngx_autocert_conf_t *acf,
     }
 
     /* Copy the domain into the order pool. A config name aliases the HTTP
-     * main-conf pool (outlives the order), but a runtime host (A3.3) aliases the
-     * caller's short-lived drain pool, freed the moment pump_runtime returns —
-     * before the order completes. Duplicating here makes order->domain valid for
-     * the whole order lifetime regardless of the caller's allocation. */
+     * main-conf pool (outlives the order), but a runtime host (A3.3) aliases
+     * the caller's short-lived drain pool, freed the moment pump_runtime
+     * returns — before the order completes. Duplicating here makes
+     * order->domain valid for the whole order lifetime regardless of the
+     * caller's allocation. */
     order->account = state->account;
     order->log = cycle->log;
     order->directory_url = state->entry->ca_conf.ca;
@@ -1497,27 +1526,30 @@ ngx_autocert_start_order_for(ngx_cycle_t *cycle, ngx_autocert_conf_t *acf,
      * always provisioned whenever acf->names is non-empty, independent of the
      * configured challenge mode, so it's always available as the fallback).
      */
-    order->challenge = (runtime && acf->challenge == NGX_AUTOCERT_CHALLENGE_DNS_01)
-                        ? NGX_AUTOCERT_CHALLENGE_HTTP_01
-                        : acf->challenge;            /* M10c/M16: http/alpn/dns */
+    order->challenge =
+        ( runtime && acf->challenge == NGX_AUTOCERT_CHALLENGE_DNS_01 )
+            ? NGX_AUTOCERT_CHALLENGE_HTTP_01
+            : acf->challenge;                   /* M10c/M16: http/alpn/dns */
     order->alpn_zone = acf->alpn_zone;          /* M10b store, used when alpn */
     order->dns_hook_add = acf->dns_hook_add;            /* M16 dns-01 */
     order->dns_hook_remove = acf->dns_hook_remove;
     order->dns_propagation_delay = acf->dns_propagation_delay;
     order->dns_hook_timeout = acf->dns_hook_timeout;
-    order->key_type = key_type;     /* dual-cert: this variant's leaf key type */
+    order->key_type = key_type; /* dual-cert: this variant's leaf key type */
     order->store = acf->store;
     order->store_path = acf->path;
     order->profile = acf->profile;
     order->handler = ngx_autocert_order_complete;
     order->data = cycle;
-    /* A3.4: only runtime orders count against the global new-order cap; the hook
-     * fires once, when the real newOrder POST is accepted (not here at launch). */
+    /* A3.4: only runtime orders count against the global new-order cap; the
+     * hook fires once, when the real newOrder POST is accepted (not here at
+     * launch). */
     order->on_new_order = runtime ? ngx_autocert_rt_order_accounted : NULL;
 
     ngx_autocert_order = order;
     ngx_autocert_order_pool = pool;
-    ngx_autocert_sched_runtime = runtime;   /* A3.3: which ledger completion writes */
+    ngx_autocert_sched_runtime =
+        runtime; /* A3.3: which ledger completion writes */
 
     ngx_log_error(NGX_LOG_NOTICE, cycle->log, 0,
                   "autocert: starting ACME order for \"%V\"%s", name,
@@ -1535,17 +1567,17 @@ ngx_autocert_start_order_for(ngx_cycle_t *cycle, ngx_autocert_conf_t *acf,
     return NGX_OK;
 }
 
-
 /*
  * A3.3: is `host` already a configured autocert name (under any CA)? Runtime
  * requests for names the operator already manages must NOT trigger a second
  * ACME order — the config sweep covers them. Case-insensitive: config names are
- * stored as written; drained runtime hosts are lowercased by the shm normalizer.
+ * stored as written; drained runtime hosts are lowercased by the shm
+ * normalizer.
  *
  * A3.4 MINOR (a): also matches a config WILDCARD covering the host, and — when
  * `covering` is non-NULL — outputs the matched CONFIG name (which may be the
- * wildcard "*.example.com", not the concrete host). The freshness check must run
- * against the config name so a wildcard's on-disk store key
+ * wildcard "*.example.com", not the concrete host). The freshness check must
+ * run against the config name so a wildcard's on-disk store key
  * ("_wildcard_.example.com") is found, not the concrete host's.
  */
 static ngx_uint_t
@@ -1568,8 +1600,9 @@ ngx_autocert_name_is_config(ngx_str_t *host, ngx_str_t **covering)
         for (i = 0; i < state->entry->names->nelts; i++) {
             /*
              * Exact match, or (A3.3 MINOR a) a config wildcard "*.example.com"
-             * covering a runtime host one label deeper. ngx_autocert_name_covers
-             * handles both and is unit-tested (ngx_autocert_ratecap.h).
+             * covering a runtime host one label deeper.
+             * ngx_autocert_name_covers handles both and is unit-tested
+             * (ngx_autocert_ratecap.h).
              */
             if (ngx_autocert_name_covers(names[i].data, names[i].len,
                                          host->data, host->len))
@@ -1603,11 +1636,11 @@ ngx_autocert_rt_order_record(time_t now)
         NGX_AUTOCERT_RT_ORDER_MAX, &ngx_autocert_rt_order_head, now);
 }
 
-
 /*
- * A3.4: order->on_new_order hook for runtime orders. Fires exactly once, from the
- * order flow, when the ACME newOrder POST has been accepted for sending — so the
- * global cap counts real CA orders, not launch attempts that die before newOrder.
+ * A3.4: order->on_new_order hook for runtime orders. Fires exactly once, from
+ * the order flow, when the ACME newOrder POST has been accepted for sending —
+ * so the global cap counts real CA orders, not launch attempts that die before
+ * newOrder.
  */
 static void
 ngx_autocert_rt_order_accounted(ngx_autocert_order_t *order)
@@ -1658,7 +1691,6 @@ ngx_autocert_rt_fail_at_cap(ngx_str_t *host, time_t now)
                now, NGX_AUTOCERT_RT_FAIL_WINDOW) >= NGX_AUTOCERT_RT_FAIL_MAX;
 }
 
-
 /*
  * A3.4: record one runtime FAILURE for `host`. Reuse its entry if present, else
  * claim a slot: a free one, else one whose failure window has fully EXPIRED
@@ -1667,8 +1699,8 @@ ngx_autocert_rt_fail_at_cap(ngx_str_t *host, time_t now)
  * anew inside the same window, bypassing the cap (Codex A3.4 MAJOR). If every
  * slot holds active (in-window) failures, we simply don't track this host: that
  * requires >= NGX_AUTOCERT_RT_FAIL_HOSTS distinct hosts each failing within the
- * window — a flood already bounded by the GLOBAL new-order cap (each failure was
- * preceded by a counted order). Silently no-ops on an over-long host (can't
+ * window — a flood already bounded by the GLOBAL new-order cap (each failure
+ * was preceded by a counted order). Silently no-ops on an over-long host (can't
  * happen for a valid drained name — the normalizer caps at 253).
  */
 static void
@@ -1699,7 +1731,7 @@ ngx_autocert_rt_fail_record(ngx_str_t *host, time_t now)
             }
         }
         if (slot == NULL) {
-            return;                         /* table full of active hosts; skip */
+            return; /* table full of active hosts; skip */
         }
         e = slot;
         ngx_memcpy(e->host, host->data, host->len);
@@ -1711,15 +1743,15 @@ ngx_autocert_rt_fail_record(ngx_str_t *host, time_t now)
     ngx_autocert_rt_ring_push(e->ring, NGX_AUTOCERT_RT_FAIL_MAX, &e->head, now);
 }
 
-
 /*
  * A3.3: service runtime certificate requests. Drains REQUESTED nodes from the
  * requests shm zone (each flipped to PENDING under the shm lock by the drain),
  * then for each drained host:
  *   - already a config name  => set_state(ISSUED): the config sweep owns it, no
- *     runtime order (dedupe). It is "issued" from the requester's point of view.
- *   - genuinely runtime       => launch ONE ACME order under ca_list[0]; the rest
- *     stay PENDING and are released back to REQUESTED so a later tick retries
+ *     runtime order (dedupe). It is "issued" from the requester's point of
+ * view.
+ *   - genuinely runtime       => launch ONE ACME order under ca_list[0]; the
+ * rest stay PENDING and are released back to REQUESTED so a later tick retries
  *     them (a PENDING node the caller never completes would wedge forever — the
  *     drain contract). order_complete records ISSUED/FAILED on the shm node.
  *
@@ -1751,7 +1783,8 @@ ngx_autocert_sched_pump_runtime(ngx_cycle_t *cycle, ngx_autocert_conf_t *acf)
     }
 
     /* runtime cert key type: the first configured variant (dual-cert runtime
-     * issuance is a later refinement — A3 issues one key type per runtime name). */
+     * issuance is a later refinement — A3 issues one key type per runtime
+     * name). */
     key_type = (acf->cert_key_types != NULL && acf->cert_key_types->nelts > 0)
              ? ((ngx_uint_t *) acf->cert_key_types->elts)[0]
              : NGX_HTTP_AUTOCERT_KEY_P256;
@@ -1766,10 +1799,10 @@ ngx_autocert_sched_pump_runtime(ngx_cycle_t *cycle, ngx_autocert_conf_t *acf)
      * Drain ONE host at a time (max=1) and dispose of it before claiming the
      * next. This avoids claiming the whole REQUESTED backlog and then releasing
      * most of it back — a distinct-host flood cannot make one pump churn the
-     * full set (Codex A3.3 MAJOR). Each iteration terminally disposes the claimed
-     * PENDING node (ISSUED / held-REQUESTED / FAILED / launched-order), so a
-     * re-drain never re-sees it and the loop converges. The GLOBAL new-order rate
-     * cap is A3.4; this only bounds per-pump work.
+     * full set (Codex A3.3 MAJOR). Each iteration terminally disposes the
+     * claimed PENDING node (ISSUED / held-REQUESTED / FAILED / launched-order),
+     * so a re-drain never re-sees it and the loop converges. The GLOBAL
+     * new-order rate cap is A3.4; this only bounds per-pump work.
      */
     for ( ;; ) {
         if (ngx_quit || ngx_terminate || ngx_exiting) {
@@ -1794,18 +1827,18 @@ ngx_autocert_sched_pump_runtime(ngx_cycle_t *cycle, ngx_autocert_conf_t *acf)
         if (ngx_autocert_name_is_config(h, &cover)) {
             /*
              * Operator already manages this name; the config sweep owns its
-             * issuance+renewal. Only report ISSUED if a valid cert is actually on
-             * disk — the config sweep may not have issued it yet (CA account not
-             * live, backoff, or a prior failure), so an unconditional ISSUED
-             * would lie to the requester (Codex A3.3 MAJOR). If no cert yet,
-             * release to REQUESTED with a short hold so we re-check after the
-             * config sweep has had a chance to run, without spinning.
+             * issuance+renewal. Only report ISSUED if a valid cert is actually
+             * on disk — the config sweep may not have issued it yet (CA account
+             * not live, backoff, or a prior failure), so an unconditional
+             * ISSUED would lie to the requester (Codex A3.3 MAJOR). If no cert
+             * yet, release to REQUESTED with a short hold so we re-check after
+             * the config sweep has had a chance to run, without spinning.
              *
              * A3.4 MINOR (a): freshness is checked against the COVERING config
-             * name (`cover`), not the concrete host — a wildcard "*.example.com"
-             * stores its cert under "_wildcard_.example.com", so name_due(host)
-             * would stat the wrong path and never see the cert, spinning the
-             * host on the 300s re-check forever.
+             * name (`cover`), not the concrete host — a wildcard
+             * "*.example.com" stores its cert under "_wildcard_.example.com",
+             * so name_due(host) would stat the wrong path and never see the
+             * cert, spinning the host on the 300s re-check forever.
              */
             if (!ngx_autocert_name_due(cycle, acf, cover, key_type)) {
                 (void) ngx_autocert_requests_set_state(acf->requests_zone, h,
@@ -1814,9 +1847,9 @@ ngx_autocert_sched_pump_runtime(ngx_cycle_t *cycle, ngx_autocert_conf_t *acf)
                                "autocert: runtime host \"%V\" covered by a "
                                "config cert already on disk", h);
             } else {
-                (void) ngx_autocert_requests_set_state(acf->requests_zone, h,
-                           NGX_AUTOCERT_REQ_REQUESTED,
-                           ngx_time() + 300 /* s: re-check after config sweep */);
+                (void) ngx_autocert_requests_set_state(
+                    acf->requests_zone, h, NGX_AUTOCERT_REQ_REQUESTED,
+                    ngx_time() + 300 /* s: re-check after config sweep */ );
                 ngx_log_debug1(NGX_LOG_DEBUG_CORE, cycle->log, 0,
                                "autocert: runtime host \"%V\" is a config name "
                                "not yet issued; deferring to config sweep", h);
@@ -1846,8 +1879,9 @@ ngx_autocert_sched_pump_runtime(ngx_cycle_t *cycle, ngx_autocert_conf_t *acf)
                     "deferring \"%V\"", NGX_AUTOCERT_RT_ORDER_MAX,
                     NGX_AUTOCERT_RT_ORDER_WINDOW, h);
                 /* hold only until the window actually frees: the oldest counted
-                 * order ages out at oldest+window; +1 clears the strict-`>` edge.
-                 * Fall back to a full window if oldest is somehow unset. */
+                 * order ages out at oldest+window; +1 clears the strict-`>`
+                 * edge. Fall back to a full window if oldest is somehow unset.
+                 */
                 (void) ngx_autocert_requests_set_state(acf->requests_zone, h,
                            NGX_AUTOCERT_REQ_REQUESTED,
                            oldest ? oldest + NGX_AUTOCERT_RT_ORDER_WINDOW + 1
@@ -1882,29 +1916,29 @@ ngx_autocert_sched_pump_runtime(ngx_cycle_t *cycle, ngx_autocert_conf_t *acf)
         if (ngx_autocert_start_order_for(cycle, acf, state, h, key_type, 1)
             == NGX_OK)
         {
-            break;                      /* singleton consumed; complete re-pumps */
+            break; /* singleton consumed; complete re-pumps */
         }
 
         /*
-         * Launch failed (transient pool/OOM, or a deterministic startup reject).
-         * Mark FAILED so the shm node's own backoff advances — releasing to
-         * REQUESTED,0 would retry it every sweep with no failure count and spin
-         * on a persistent failure (Codex A3.3 MAJOR). set_state(FAILED,0)
-         * computes the exponential backoff on the node.
+         * Launch failed (transient pool/OOM, or a deterministic startup
+         * reject). Mark FAILED so the shm node's own backoff advances —
+         * releasing to REQUESTED,0 would retry it every sweep with no failure
+         * count and spin on a persistent failure (Codex A3.3 MAJOR).
+         * set_state(FAILED,0) computes the exponential backoff on the node.
          */
         (void) ngx_autocert_requests_set_state(acf->requests_zone, h,
                                                NGX_AUTOCERT_REQ_FAILED, 0);
     }
 
     /*
-     * A3.5 renewal scan: a runtime cert already ISSUED must be re-ordered before
-     * it expires. The drain loop above only ever sees REQUESTED nodes, so an
-     * ISSUED node would sit forever. Walk the ISSUED nodes (read-only), and for
-     * any whose on-disk cert is inside its renew_before window, flip it back to
-     * REQUESTED so the NEXT pump's drain re-orders it — through the same A3.4
-     * global rate cap and per-name backoff as a fresh request. We do not launch
-     * the order here: routing renewals back through REQUESTED keeps a single
-     * order-launch path and one rate-cap gate.
+     * A3.5 renewal scan: a runtime cert already ISSUED must be re-ordered
+     * before it expires. The drain loop above only ever sees REQUESTED nodes,
+     * so an ISSUED node would sit forever. Walk the ISSUED nodes (read-only),
+     * and for any whose on-disk cert is inside its renew_before window, flip it
+     * back to REQUESTED so the NEXT pump's drain re-orders it — through the
+     * same A3.4 global rate cap and per-name backoff as a fresh request. We do
+     * not launch the order here: routing renewals back through REQUESTED keeps
+     * a single order-launch path and one rate-cap gate.
      *
      * Config-covered names are skipped: the config sweep owns their renewal, so
      * re-requesting here would only bounce the node back to a 300s defer.
@@ -1923,7 +1957,7 @@ ngx_autocert_sched_pump_runtime(ngx_cycle_t *cycle, ngx_autocert_conf_t *acf)
 
             for (j = 0; m > 0 && j < (ngx_uint_t) m; j++) {
                 if (ngx_autocert_name_is_config(&iv[j], NULL)) {
-                    continue;           /* config sweep owns this name's renewal */
+                    continue; /* config sweep owns this name's renewal */
                 }
 
                 /* Runtime certs are stored under the concrete host (no wildcard
@@ -2000,7 +2034,8 @@ ngx_autocert_order_complete(ngx_autocert_order_t *order, ngx_int_t rc)
          * A3.3: this order was a runtime host drained from the requests shm
          * zone, not a config name. Its backoff lives on the shm node, so record
          * the outcome there via set_state (which computes next_eligible on
-         * FAILED), NOT in a CA's per-config-name backoff array (no slot for it).
+         * FAILED), NOT in a CA's per-config-name backoff array (no slot for
+         * it).
          */
         ngx_autocert_conf_t  acf;
 
@@ -2010,8 +2045,8 @@ ngx_autocert_order_complete(ngx_autocert_order_t *order, ngx_int_t rc)
             time_t  hold = (rc != NGX_OK && order->retry_after > 0)
                          ? order->retry_after : 0;
 
-            /* A3.4: count a runtime failure against this host's fail window so a
-             * host that keeps failing is deferred once it trips the cap. */
+            /* A3.4: count a runtime failure against this host's fail window so
+             * a host that keeps failing is deferred once it trips the cap. */
             if (rc != NGX_OK) {
                 ngx_autocert_rt_fail_record(&order->domain, ngx_time());
             }
@@ -2044,15 +2079,17 @@ ngx_autocert_order_complete(ngx_autocert_order_t *order, ngx_int_t rc)
         }
 
     } else {
-        /* The in-flight (CA, name) was recorded at launch. Record the outcome into
-         * THAT CA's per-name backoff: success clears it, failure grows the per-name
-         * retry delay (don't hammer a failing name). */
+        /* The in-flight (CA, name) was recorded at launch. Record the outcome
+         * into THAT CA's per-name backoff: success clears it, failure grows the
+         * per-name retry delay (don't hammer a failing name). */
         state = &ngx_autocert_ca_states[ngx_autocert_sched_cur_ca];
 
-        ngx_autocert_backoff_record(state, ngx_autocert_sched_cur, rc == NGX_OK);
+        ngx_autocert_backoff_record( state, ngx_autocert_sched_cur,
+                                     rc == NGX_OK );
 
-        /* If the CA rate-limited us (429), honour its Retry-After: hold this name
-         * at least until then, on top of the exponential backoff just recorded. */
+        /* If the CA rate-limited us (429), honour its Retry-After: hold this
+         * name at least until then, on top of the exponential backoff just
+         * recorded. */
         if (rc != NGX_OK && order->retry_after > 0) {
             ngx_autocert_backoff_hold(state, ngx_autocert_sched_cur,
                                       order->retry_after);
@@ -2072,12 +2109,12 @@ ngx_autocert_order_complete(ngx_autocert_order_t *order, ngx_int_t rc)
     ngx_autocert_sched_pump(cycle);
 }
 
-
 /*
- * A6: build "<container>/<seg>" (the same directory the store writer / freshness
- * check / serve path already agree on) into `buf`, NUL-terminated. `container`
- * is store_path, or store_path "/live" in certbot mode (order.c convention).
- * Returns the length written, or 0 if it would not fit / the segment is invalid.
+ * A6: build "<container>/<seg>" (the same directory the store writer /
+ * freshness check / serve path already agree on) into `buf`, NUL-terminated.
+ * `container` is store_path, or store_path "/live" in certbot mode (order.c
+ * convention). Returns the length written, or 0 if it would not fit / the
+ * segment is invalid.
  */
 static size_t
 ngx_autocert_runtime_dir(ngx_autocert_conf_t *acf, ngx_str_t *host,
@@ -2161,17 +2198,18 @@ ngx_autocert_runtime_marker_write(ngx_cycle_t *cycle, ngx_autocert_conf_t *acf,
     /*
      * O_NONBLOCK is REQUIRED, and O_TRUNC must NOT be set here.
      *
-     * O_NOFOLLOW rejects a symlink at the leaf, but it does NOT stop us opening a
-     * FIFO that was planted there directly. Opening a FIFO O_WRONLY blocks in
+     * O_NOFOLLOW rejects a symlink at the leaf, but it does NOT stop us opening
+     * a FIFO that was planted there directly. Opening a FIFO O_WRONLY blocks in
      * openat() until a reader appears (POSIX), so the S_ISREG check below would
-     * never be reached: the sole ACME driver event loop — and this nginx worker —
-     * would wedge indefinitely after a successful runtime issuance. O_NONBLOCK
-     * makes that open fail fast with ENXIO instead (and is harmless on a regular
-     * file, where it has no effect on the write path).
+     * never be reached: the sole ACME driver event loop — and this nginx worker
+     * — would wedge indefinitely after a successful runtime issuance.
+     * O_NONBLOCK makes that open fail fast with ENXIO instead (and is harmless
+     * on a regular file, where it has no effect on the write path).
      *
      * O_TRUNC is likewise deferred: it acts BEFORE we can fstat the fd, so it
-     * would let a hostile leaf be truncated before we established it is a regular
-     * file. We open, verify the type, and only then ftruncate the pinned fd.
+     * would let a hostile leaf be truncated before we established it is a
+     * regular file. We open, verify the type, and only then ftruncate the
+     * pinned fd.
      */
     fd = ngx_autocert_openat_mode(dfd, NGX_AUTOCERT_RUNTIME_MARKER,
                 O_WRONLY | O_CREAT | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC, 0644);
@@ -2184,7 +2222,8 @@ ngx_autocert_runtime_marker_write(ngx_cycle_t *cycle, ngx_autocert_conf_t *acf,
     }
 
     /* Only ever write into a regular file, and only one with a single link — a
-     * hard link to someone else's file must not be truncated through this fd. */
+     * hard link to someone else's file must not be truncated through this fd.
+     */
     if (ngx_autocert_fstat(fd, &st) == -1 || !S_ISREG(st.st_mode)
         || st.st_nlink != 1)
     {
@@ -2198,9 +2237,9 @@ ngx_autocert_runtime_marker_write(ngx_cycle_t *cycle, ngx_autocert_conf_t *acf,
     /* now that the fd is known to be a plain, single-linked regular file */
     if (ngx_autocert_ftruncate(fd, 0) == -1) {
         (void) ngx_autocert_close(fd);
-        ngx_log_error(NGX_LOG_ERR, cycle->log, ngx_errno,
-                      "autocert: A6 failed to truncate runtime marker for \"%V\"",
-                      host);
+        ngx_log_error(
+            NGX_LOG_ERR, cycle->log, ngx_errno,
+            "autocert: A6 failed to truncate runtime marker for \"%V\"", host );
         return;
     }
 
@@ -2334,7 +2373,8 @@ ngx_autocert_runtime_seed(ngx_cycle_t *cycle)
         }
 
         /* O_NOFOLLOW: a symlinked entry can't be used to read a marker from
-         * outside the pinned store dir. Non-directory entries fail harmlessly. */
+         * outside the pinned store dir. Non-directory entries fail harmlessly.
+         */
         dfd = ngx_autocert_openat(cfd, de->d_name,
                      O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
         if (dfd == -1) {
@@ -2354,7 +2394,7 @@ ngx_autocert_runtime_seed(ngx_cycle_t *cycle)
                      O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
         if (mfd == -1) {
             (void) ngx_autocert_close(dfd);
-            continue;                    /* not a runtime dir (or config-only) */
+            continue; /* not a runtime dir (or config-only) */
         }
 
         if (ngx_autocert_fstat(mfd, &mst) == -1 || !S_ISREG(mst.st_mode)
@@ -2371,7 +2411,7 @@ ngx_autocert_runtime_seed(ngx_cycle_t *cycle)
         (void) ngx_autocert_close(dfd);
 
         if (n <= 0 || (size_t) n != (size_t) mst.st_size) {
-            continue;                    /* short read / raced truncate: ignore */
+            continue; /* short read / raced truncate: ignore */
         }
 
         host.data = hostbuf;
@@ -2487,8 +2527,8 @@ ngx_autocert_win32_driver_trylock(int dfd, ngx_log_t *log)
     }
 
     if (verdict == NGX_ERROR) {
-        DWORD  err = GetLastError();     /* save BEFORE CloseHandle, which can
-                                           * overwrite the thread's last-error */
+        DWORD err = GetLastError(); /* save BEFORE CloseHandle, which can
+                                     * overwrite the thread's last-error */
 
         CloseHandle(h);
         ngx_log_error(NGX_LOG_ERR, log, 0,
@@ -2531,8 +2571,9 @@ ngx_autocert_win32_driver_trylock(int dfd, ngx_log_t *log)
 /*
  * W9 — release + close the win32 singleton mutex and NULL the static. The
  * ONE place this happens; every caller (both the post-gate hard-error paths
- * in ngx_autocert_driver_trylock() below and ngx_autocert_driver_exit_process())
- * shares this so the release logic cannot drift between them.
+ * in ngx_autocert_driver_trylock() below and
+ * ngx_autocert_driver_exit_process()) shares this so the release logic cannot
+ * drift between them.
  *
  * ReleaseMutex is EXPECTED to fail here with ERROR_NOT_OWNER when called from
  * ngx_autocert_driver_exit_process(): a win32 mutex is thread-affine (only
@@ -2594,7 +2635,6 @@ ngx_autocert_win32_driver_unlock(ngx_log_t *log)
 }
 #endif /* NGX_WIN32 */
 
-
 /*
  * Try to acquire the interprocess singleton lock: open (creating) the lock file
  * in the store dir and take a non-blocking exclusive flock. Returns NGX_OK if
@@ -2603,9 +2643,10 @@ ngx_autocert_win32_driver_unlock(ngx_log_t *log)
  * failed for a reason other than contention).
  *
  * The fd is kept open for the driver's lifetime (the lock lives as long as an
- * open fd holding it); exit_process / a crash closes it and the kernel releases.
- * win32: the named-mutex gate above (ngx_autocert_win32_driver_trylock) is
- * acquired FIRST, in front of this flock-based serializer — see its comment.
+ * open fd holding it); exit_process / a crash closes it and the kernel
+ * releases. win32: the named-mutex gate above
+ * (ngx_autocert_win32_driver_trylock) is acquired FIRST, in front of this
+ * flock-based serializer — see its comment.
  */
 static ngx_int_t
 ngx_autocert_driver_trylock(ngx_cycle_t *cycle)
@@ -2619,7 +2660,7 @@ ngx_autocert_driver_trylock(ngx_cycle_t *cycle)
     }
 
     if (ngx_autocert_get_conf(cycle, &acf) != NGX_OK || !acf.configured) {
-        return NGX_ERROR;                   /* nothing configured; nothing to do */
+        return NGX_ERROR; /* nothing configured; nothing to do */
     }
 
     if (acf.path.len >= NGX_MAX_PATH) {
@@ -2630,7 +2671,8 @@ ngx_autocert_driver_trylock(ngx_cycle_t *cycle)
 
     /* Create every missing store-path component relative to its already-pinned
      * parent. A path-based mkdir/open would follow an attacker-planted ancestor
-     * symlink before the later fd-pinned store operations get a chance to help. */
+     * symlink before the later fd-pinned store operations get a chance to help.
+     */
     ngx_memcpy(path, acf.path.data, acf.path.len);
     path[acf.path.len] = '\0';
 
@@ -2724,7 +2766,8 @@ ngx_autocert_driver_arm(ngx_cycle_t *cycle)
     ngx_autocert_kick_timer.handler = ngx_autocert_kick_handler;
     ngx_autocert_kick_timer.data = cycle;
     ngx_autocert_kick_timer.log = cycle->log;
-    ngx_autocert_kick_timer.cancelable = 1;     /* don't pin a shutting-down worker */
+    ngx_autocert_kick_timer.cancelable =
+        1; /* don't pin a shutting-down worker */
     ngx_add_timer(&ngx_autocert_kick_timer, NGX_AUTOCERT_KICK);
 
     ngx_log_error(NGX_LOG_NOTICE, cycle->log, 0,
@@ -2766,16 +2809,15 @@ ngx_autocert_relock_handler(ngx_event_t *ev)
     }
 }
 
-
 /*
  * Worker-0 entry point. Called from the http module's init_process, already
  * gated to worker 0 (or single-process mode), inside the worker's running event
  * loop. Take the interprocess singleton lock; if held by a retiring prior-
- * generation worker, retry on a timer. Once held, arm the kick timer; everything
- * else (client build, account bootstrap, renewal scheduler) chains from there.
- * The worker already installed signal handlers, set up the event engine, and
- * kept its listening sockets (it serves the :80 / tls-alpn challenge), so no
- * helper-style process init is needed here.
+ * generation worker, retry on a timer. Once held, arm the kick timer;
+ * everything else (client build, account bootstrap, renewal scheduler) chains
+ * from there. The worker already installed signal handlers, set up the event
+ * engine, and kept its listening sockets (it serves the :80 / tls-alpn
+ * challenge), so no helper-style process init is needed here.
  */
 void
 ngx_autocert_driver_init_process(ngx_cycle_t *cycle)
@@ -2787,7 +2829,8 @@ ngx_autocert_driver_init_process(ngx_cycle_t *cycle)
          * arming. Idempotent (ensure()+set_state() only fill/confirm gaps), so
          * running it on every init_process — true boot AND a master+workers
          * reload that spawned this worker — is safe and cheap (skipped by
-         * ngx_autocert_name_is_config/name_due for anything already settled). */
+         * ngx_autocert_name_is_config/name_due for anything already settled).
+         */
         ngx_autocert_runtime_seed(cycle);
         ngx_autocert_driver_arm(cycle);
         break;
@@ -2800,7 +2843,8 @@ ngx_autocert_driver_init_process(ngx_cycle_t *cycle)
         ngx_autocert_relock_timer.handler = ngx_autocert_relock_handler;
         ngx_autocert_relock_timer.data = cycle;
         ngx_autocert_relock_timer.log = cycle->log;
-        ngx_autocert_relock_timer.cancelable = 1;   /* don't pin a shutting-down worker */
+        ngx_autocert_relock_timer.cancelable =
+            1; /* don't pin a shutting-down worker */
         ngx_add_timer(&ngx_autocert_relock_timer, NGX_AUTOCERT_RELOCK);
         break;
 
@@ -2839,11 +2883,12 @@ ngx_autocert_driver_drop_order(void)
         /*
          * A3.3 BLOCKER: if the order in flight is for a RUNTIME host, its shm
          * node was flipped to PENDING by the drain and its completion callback
-         * will now never run (we free the order here on exit / master_process-off
-         * reload). Left PENDING, the node wedges forever — future drains skip it.
-         * Release it back to REQUESTED so the next-generation worker 0 (or this
-         * process after a reload re-arm) re-drains and retries it. Best-effort:
-         * if the zone is gone the module is being torn down and nothing reads it.
+         * will now never run (we free the order here on exit /
+         * master_process-off reload). Left PENDING, the node wedges forever —
+         * future drains skip it. Release it back to REQUESTED so the
+         * next-generation worker 0 (or this process after a reload re-arm)
+         * re-drains and retries it. Best-effort: if the zone is gone the module
+         * is being torn down and nothing reads it.
          */
         if (ngx_autocert_sched_runtime && ngx_cycle != NULL) {
             ngx_autocert_conf_t  acf;
@@ -2936,21 +2981,21 @@ ngx_autocert_driver_exit_process(ngx_cycle_t *cycle)
 #endif
 }
 
-
 /*
  * `master_process off` reload. In single-process mode the same process survives
- * a SIGHUP: ngx_single_process_cycle() runs ngx_init_cycle() (which re-reads the
- * config and re-runs every module's init_module) but never calls exit_process /
- * init_process again. Without this, the driver keeps timers, per-CA engines, the
- * in-flight order, and the test-seed latches all bound to the dead cycle and its
- * pool, so a reload silently ignores new autocert config and can touch freed
- * cycle memory. init_module calls this on the single-process path to tear the
- * engine state down and re-arm it against the NEW cycle. The interprocess lock
- * is intentionally kept open: this process is still the sole driver, so there is
- * no peer to hand it to and re-flock'ing would only add a failure mode.
+ * a SIGHUP: ngx_single_process_cycle() runs ngx_init_cycle() (which re-reads
+ * the config and re-runs every module's init_module) but never calls
+ * exit_process / init_process again. Without this, the driver keeps timers,
+ * per-CA engines, the in-flight order, and the test-seed latches all bound to
+ * the dead cycle and its pool, so a reload silently ignores new autocert config
+ * and can touch freed cycle memory. init_module calls this on the
+ * single-process path to tear the engine state down and re-arm it against the
+ * NEW cycle. The interprocess lock is intentionally kept open: this process is
+ * still the sole driver, so there is no peer to hand it to and re-flock'ing
+ * would only add a failure mode.
  *
- * Must run inside the worker event loop (true on reload — init_module fires from
- * ngx_init_cycle() while the loop is live), since it re-arms a timer.
+ * Must run inside the worker event loop (true on reload — init_module fires
+ * from ngx_init_cycle() while the loop is live), since it re-arms a timer.
  */
 void
 ngx_autocert_driver_reload(ngx_cycle_t *cycle)
@@ -2959,10 +3004,10 @@ ngx_autocert_driver_reload(ngx_cycle_t *cycle)
      * old cycle in ev->data, so they must not fire after the cycle is gone. */
     ngx_autocert_driver_cancel_timers();
 
-    /* Detach any pending ACME resolver/socket event BEFORE freeing the pools its
-     * request lives in: the process keeps running across this reload, so a live
-     * event would otherwise fire on freed memory (and its handler would touch the
-     * dead-cycle driver state we are about to drop). */
+    /* Detach any pending ACME resolver/socket event BEFORE freeing the pools
+     * its request lives in: the process keeps running across this reload, so a
+     * live event would otherwise fire on freed memory (and its handler would
+     * touch the dead-cycle driver state we are about to drop). */
     ngx_autocert_acme_cancel_inflight();
 
     /* Drop the in-flight order (pool is cycle-independent) and every per-CA
@@ -2988,12 +3033,13 @@ ngx_autocert_driver_reload(ngx_cycle_t *cycle)
 
     /*
      * Release the old lock and re-acquire from scratch. The lock file lives in
-     * the store dir, so a reload that changes autocert_path (or disables autocert
-     * entirely) would otherwise leave us holding the OLD store's lock while the
-     * new store runs unlocked. Closing here + going back through init_process
-     * makes trylock() derive the lock path from the NEW cycle's config: it
-     * re-locks the same path when unchanged, moves to the new path when changed,
-     * and stays unlocked (idle) when the new config has no issuable names. */
+     * the store dir, so a reload that changes autocert_path (or disables
+     * autocert entirely) would otherwise leave us holding the OLD store's lock
+     * while the new store runs unlocked. Closing here + going back through
+     * init_process makes trylock() derive the lock path from the NEW cycle's
+     * config: it re-locks the same path when unchanged, moves to the new path
+     * when changed, and stays unlocked (idle) when the new config has no
+     * issuable names. */
     if (ngx_autocert_lock_fd != -1) {
         (void) ngx_autocert_close(ngx_autocert_lock_fd);
         ngx_autocert_lock_fd = -1;
