@@ -45,13 +45,14 @@ typedef struct {
     /*
      * Origin pin (SSRF-shaped hardening). Parsed once from the configured ACME
      * directory URL: every subsequent resource URL the CA hands back (newOrder,
-     * finalize, authorizations, challenge, certificate, ...) MUST resolve to the
-     * same scheme(https)/host/port, so a malicious or compromised directory
-     * cannot redirect the account-signed JWS client at an arbitrary HTTPS origin
-     * that merely happens to be in the trust store. host is a NUL-terminated
-     * pool copy; host.len == 0 means "not pinned" (pin disabled). Match is
-     * case-insensitive on host and exact on port; host_is_ipv6 distinguishes a
-     * bracketed IPv6 authority. Set with ngx_autocert_acme_client_set_origin().
+     * finalize, authorizations, challenge, certificate, ...) MUST resolve to
+     * the same scheme(https)/host/port, so a malicious or compromised directory
+     * cannot redirect the account-signed JWS client at an arbitrary HTTPS
+     * origin that merely happens to be in the trust store. host is a
+     * NUL-terminated pool copy; host.len == 0 means "not pinned" (pin
+     * disabled). Match is case-insensitive on host and exact on port;
+     * host_is_ipv6 distinguishes a bracketed IPv6 authority. Set with
+     * ngx_autocert_acme_client_set_origin().
      */
     ngx_str_t        origin_host;
     in_port_t        origin_port;
@@ -105,16 +106,17 @@ struct ngx_autocert_acme_request_s {
     /* parsed from url */
     ngx_str_t                     host;     /* bare DNS name or IP literal */
     ngx_uint_t                    host_is_ip;   /* skip SNI; verify IP SAN */
-    ngx_uint_t                    host_is_ipv6; /* URL authority used [brackets] */
+    ngx_uint_t host_is_ipv6; /* URL authority used [brackets] */
     in_port_t                     port;
     ngx_str_t                     uri;      /* path[?query], at least "/" */
 
     /* response outputs (valid when handler rc == NGX_OK) */
     ngx_uint_t                    status;   /* HTTP status code */
     ngx_str_t                     body_out; /* response body (pool-allocated) */
-    ngx_array_t                  *headers;  /* ngx_autocert_acme_header_t, the
+    ngx_array_t                  *headers;  /* ngx_autocert_acme_header_t,
                                              * response headers in order; query
-                                             * with ngx_autocert_acme_header() */
+                                             * see ngx_autocert_acme_header().
+                                             */
 
     ngx_autocert_acme_handler_pt  handler;
     void                         *data;     /* caller context */
@@ -128,16 +130,16 @@ struct ngx_autocert_acme_request_s {
 
     /* response parse state */
     ngx_uint_t                    headers_done;
-    ngx_uint_t                    chunked;         /* Transfer-Encoding: chunked */
+    ngx_uint_t                    chunked; /* Transfer-Encoding: chunked */
     off_t                         content_length;  /* -1 if unknown */
     size_t                        body_offset;     /* start of body in recv */
 
     /* Incremental chunked-decode validation cursor (avoids re-walking the whole
-     * accumulated body on every read — that would be O(N^2)). dechunk_pos is the
-     * offset into recv (from b->start) up to which framing is already validated;
-     * dechunk_total is the decoded byte count accumulated so far. Both advance
-     * only over fully-received chunks, so a partial tail is re-examined next
-     * read but already-validated chunks are not. */
+     * accumulated body on every read — that would be O(N^2)). dechunk_pos is
+     * the offset into recv (from b->start) up to which framing is already
+     * validated; dechunk_total is the decoded byte count accumulated so far.
+     * Both advance only over fully-received chunks, so a partial tail is
+     * re-examined next read but already-validated chunks are not. */
     size_t                        dechunk_pos;
     size_t                        dechunk_total;
 
@@ -170,25 +172,26 @@ void ngx_autocert_acme_client_destroy(ngx_autocert_acme_client_t *client);
  * this is optional: a client with no origin set accepts any https:// URL (the
  * pre-pin behavior), which is what an explicit multi-origin opt-out selects.
  */
-ngx_int_t ngx_autocert_acme_client_set_origin(ngx_autocert_acme_client_t *client,
-    ngx_pool_t *pool, ngx_str_t *dir_url);
+ngx_int_t
+ngx_autocert_acme_client_set_origin( ngx_autocert_acme_client_t *client,
+                                     ngx_pool_t *pool, ngx_str_t *dir_url );
 
 /*
  * Cancel the single in-flight request (if any) WITHOUT calling its handler:
- * detach its pending resolver/socket event so it can't fire on memory the caller
- * is about to free. For the `master_process off` reload teardown. No-op if idle.
+ * detach its pending resolver/socket event so it can't fire on memory the
+ * caller is about to free. For the `master_process off` reload teardown. No-op
+ * if idle.
  */
 void ngx_autocert_acme_cancel_inflight(void);
-
 
 /*
  * Start an async request. r must have client, pool, log, method (or "" => GET),
  * url, handler set; body/content_type for POST. Returns NGX_OK when setup
- * started or completed inline, or NGX_ERROR if it could not even start (bad URL,
- * no resolver) — in the NGX_ERROR case the handler is NOT called. A literal-IP
- * loopback peer can complete the TLS/read path synchronously, so callers MUST
- * treat the handler as the completion signal and must not touch `r` after an
- * NGX_OK return unless their handler retains it safely.
+ * started or completed inline, or NGX_ERROR if it could not even start (bad
+ * URL, no resolver) — in the NGX_ERROR case the handler is NOT called. A
+ * literal-IP loopback peer can complete the TLS/read path synchronously, so
+ * callers MUST treat the handler as the completion signal and must not touch
+ * `r` after an NGX_OK return unless their handler retains it safely.
  */
 ngx_int_t ngx_autocert_acme_request(ngx_autocert_acme_request_t *r);
 

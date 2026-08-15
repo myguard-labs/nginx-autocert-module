@@ -24,7 +24,7 @@
 #include <signal.h>
 
 #if !(NGX_WIN32)
-#include <sys/wait.h>          /* waitpid(2) — dns-01 hook reap (W8 ports this) */
+#include <sys/wait.h> /* waitpid(2) — dns-01 hook reap (W8 ports this) */
 #include <unistd.h>
 #endif
 
@@ -52,15 +52,15 @@
 #endif
 #endif
 
-
 /*
  * TOCTOU hardening: every store mutation is performed through a directory fd
- * pinned with O_DIRECTORY|O_NOFOLLOW (ngx_autocert_open_dir_path) and *at() syscalls
- * relative to it. Pinning the container inode means an attacker who can swap a
- * path *component* (e.g. replace <store>/live with a symlink between two path
- * lookups) cannot redirect a subsequent mkdir/rename/open: the kernel resolves
- * the leaf against the already-opened inode, not the swapped name. Leaf
- * components are single names (no '/'), so they cannot themselves traverse.
+ * pinned with O_DIRECTORY|O_NOFOLLOW (ngx_autocert_open_dir_path) and *at()
+ * syscalls relative to it. Pinning the container inode means an attacker who
+ * can swap a path *component* (e.g. replace <store>/live with a symlink between
+ * two path lookups) cannot redirect a subsequent mkdir/rename/open: the kernel
+ * resolves the leaf against the already-opened inode, not the swapped name.
+ * Leaf components are single names (no '/'), so they cannot themselves
+ * traverse.
  */
 
 /* ngx_autocert_renameat2() is shared via ngx_autocert_shared.h — the same
@@ -240,7 +240,8 @@ ngx_autocert_order_note_retry_after(ngx_autocert_order_t *order,
         }
     }
 
-    /* 429 with no usable hint: hold off 60s rather than retrying immediately. */
+    /* 429 with no usable hint: hold off 60s rather than retrying immediately.
+     */
     order->retry_after = ngx_time() + 60;
     ngx_log_debug1(NGX_LOG_DEBUG_CORE, order->log, 0,
                    "autocert: 429 with no usable Retry-After for \"%V\"",
@@ -455,10 +456,10 @@ ngx_autocert_order_new_order(ngx_autocert_order_t *order)
                                    &payload,
                                    ngx_autocert_order_new_order_done, order);
 
-    /* A3.4: the newOrder POST is now accepted for sending — a real order against
-     * the CA budget. Count it exactly once (runtime orders only; on_new_order is
-     * NULL for config orders). A later per-name/backoff failure does not
-     * un-count it: the CA saw the request. */
+    /* A3.4: the newOrder POST is now accepted for sending — a real order
+     * against the CA budget. Count it exactly once (runtime orders only;
+     * on_new_order is NULL for config orders). A later per-name/backoff failure
+     * does not un-count it: the CA saw the request. */
     if (rc == NGX_OK && order->on_new_order != NULL) {
         order->on_new_order(order);
     }
@@ -512,17 +513,15 @@ ngx_autocert_order_new_order_done(ngx_autocert_acme_request_t *req,
                 && ngx_autocert_json_array_count(authzs) >= 1)
             {
                 a0 = ngx_autocert_json_array_item(authzs, 0);
-                if (a0 != NULL
-                    && a0->type == NGX_AUTOCERT_JSON_STRING
-                    && (az = a0->u.string, az.len > 0)   /* reject "" authz URL */
-                    && fin.len > 0
-                    && ngx_autocert_order_dup(order, &order->order_url, loc)
-                       == NGX_OK
-                    && ngx_autocert_order_dup(order, &order->finalize_url,
-                                              &fin) == NGX_OK
-                    && ngx_autocert_order_dup(order, &order->authz_url, &az)
-                       == NGX_OK)
-                {
+                if ( a0 != NULL && a0->type == NGX_AUTOCERT_JSON_STRING &&
+                     ( az = a0->u.string, az.len > 0 ) /* reject "" authz URL */
+                     && fin.len > 0 &&
+                     ngx_autocert_order_dup( order, &order->order_url, loc ) ==
+                         NGX_OK &&
+                     ngx_autocert_order_dup( order, &order->finalize_url,
+                                             &fin ) == NGX_OK &&
+                     ngx_autocert_order_dup( order, &order->authz_url, &az ) ==
+                         NGX_OK ) {
                     ok = NGX_OK;
                 }
             }
@@ -609,7 +608,8 @@ ngx_autocert_order_authz_done(ngx_autocert_acme_request_t *req, ngx_int_t rc)
             return;
         }
 
-        /* The challenge type to answer, per the autocert_challenge directive. */
+        /* The challenge type to answer, per the autocert_challenge directive.
+         */
         ngx_str_t  want;
 
         if (order->challenge == NGX_AUTOCERT_CHALLENGE_TLS_ALPN_01) {
@@ -665,7 +665,8 @@ ngx_autocert_order_authz_done(ngx_autocert_acme_request_t *req, ngx_int_t rc)
                     break;          /* complete usable http-01 challenge */
                 }
                 /* malformed/unsafe challenge entry — keep scanning for a usable
-                 * one (a hostile token never reaches the keyauth/store/cert). */
+                 * one (a hostile token never reaches the keyauth/store/cert).
+                 */
             }
         }
     }
@@ -711,8 +712,8 @@ ngx_autocert_order_authz_done(ngx_autocert_acme_request_t *req, ngx_int_t rc)
 
     /*
      * Publish the challenge answer where the worker can serve it:
-     *  - tls-alpn-01: a self-signed challenge cert (SAN + acmeIdentifier) in the
-     *    ALPN store, served at the handshake on ALPN "acme-tls/1" (M10b);
+     *  - tls-alpn-01: a self-signed challenge cert (SAN + acmeIdentifier) in
+     * the ALPN store, served at the handshake on ALPN "acme-tls/1" (M10b);
      *  - http-01: token->keyauth in the token store, served by the :80 handler.
      */
     if (order->challenge == NGX_AUTOCERT_CHALLENGE_TLS_ALPN_01) {
@@ -753,12 +754,11 @@ ngx_autocert_order_authz_done(ngx_autocert_acme_request_t *req, ngx_int_t rc)
     }
 }
 
-
 /*
  * M10c: build the tls-alpn-01 challenge certificate for this order's domain and
  * key authorization (RFC 8737) and publish it into the shared ALPN store, where
- * the worker handshake serves it on ALPN "acme-tls/1" (M10b). The challenge cert
- * uses a throwaway key independent of the issuance cert key; both PEMs are
+ * the worker handshake serves it on ALPN "acme-tls/1" (M10b). The challenge
+ * cert uses a throwaway key independent of the issuance cert key; both PEMs are
  * copied into the slab store and the local OpenSSL objects freed here.
  */
 static ngx_int_t
@@ -794,7 +794,8 @@ ngx_autocert_order_publish_alpn(ngx_autocert_order_t *order)
         goto done;
     }
 
-    cert = ngx_http_autocert_acme_tls_cert(key, &order->domain, &order->keyauth);
+    cert =
+        ngx_http_autocert_acme_tls_cert( key, &order->domain, &order->keyauth );
     if (cert == NULL) {
         ngx_log_error(NGX_LOG_ERR, order->log, 0,
                       "autocert: tls-alpn-01 challenge cert build failed");
@@ -831,7 +832,6 @@ done:
     return rc;
 }
 
-
 /*
  * M16 (D3): run a dns-01 operator hook (publish or remove the TXT record) by
  * fork+execve, argv = { hook, "_acme-challenge.<name>", <txt>, NULL }.
@@ -849,7 +849,8 @@ done:
  * closes every inherited descriptor above stderr (the worker's epoll/listen fds
  * are not guaranteed FD_CLOEXEC) and _exit()s — never exit() — on execve
  * failure so no nginx atexit/cleanup handler runs in the half-forked child. The
- * domain and base64url TXT value are validated before they reach the child argv.
+ * domain and base64url TXT value are validated before they reach the child
+ * argv.
  */
 
 #if (NGX_WIN32)
@@ -908,7 +909,7 @@ ngx_autocert_dns_hook_spawn_win32(ngx_autocert_order_t *order, ngx_str_t *hook,
 {
     ngx_int_t                          rc;
     ngx_int_t                          off;
-    char                                cmdline[NGX_AUTOCERT_DNS_HOOK_CMDLINE_MAX];
+    char cmdline[NGX_AUTOCERT_DNS_HOOK_CMDLINE_MAX];
     HANDLE                              job, proc, thr, nul;
     JOBOBJECT_EXTENDED_LIMIT_INFORMATION  jeli;
     NGX_AUTOCERT_STARTUPINFOEXW        six;
@@ -918,7 +919,7 @@ ngx_autocert_dns_hook_spawn_win32(ngx_autocert_order_t *order, ngx_str_t *hook,
     SIZE_T                             attrlist_size;
     HANDLE                             handles[1];
     wchar_t                             hook_w[NGX_MAX_PATH];
-    wchar_t                             cmdline_w[NGX_AUTOCERT_DNS_HOOK_CMDLINE_MAX];
+    wchar_t cmdline_w[NGX_AUTOCERT_DNS_HOOK_CMDLINE_MAX];
 
     job = NULL;
     proc = NULL;
@@ -1115,7 +1116,8 @@ ngx_autocert_dns_hook_spawn_win32(ngx_autocert_order_t *order, ngx_str_t *hook,
     order->dns_hook_timer.data = order;
     order->dns_hook_timer.log = order->log;
     order->dns_hook_timer.cancelable = 1;
-    order->dns_hook_deadline_timer.handler = ngx_autocert_order_dns_hook_deadline;
+    order->dns_hook_deadline_timer.handler =
+        ngx_autocert_order_dns_hook_deadline;
     order->dns_hook_deadline_timer.data = order;
     order->dns_hook_deadline_timer.log = order->log;
     order->dns_hook_deadline_timer.cancelable = 1;
@@ -1196,7 +1198,9 @@ ngx_autocert_dns_hook_spawn(ngx_autocert_order_t *order, ngx_str_t *hook,
         {
             maxfd = sysconf(_SC_OPEN_MAX);
             if (maxfd < 0) { maxfd = 1024; }
-            for (fd = 3; fd < maxfd; fd++) { (void) ngx_autocert_close((int) fd); }
+            for ( fd = 3; fd < maxfd; fd++ ) {
+                (void) ngx_autocert_close( (int) fd );
+            }
         }
         (void) execve(argv[0], argv, environ);
         _exit(127);
@@ -1210,7 +1214,8 @@ ngx_autocert_dns_hook_spawn(ngx_autocert_order_t *order, ngx_str_t *hook,
     order->dns_hook_timer.data = order;
     order->dns_hook_timer.log = order->log;
     order->dns_hook_timer.cancelable = 1;
-    order->dns_hook_deadline_timer.handler = ngx_autocert_order_dns_hook_deadline;
+    order->dns_hook_deadline_timer.handler =
+        ngx_autocert_order_dns_hook_deadline;
     order->dns_hook_deadline_timer.data = order;
     order->dns_hook_deadline_timer.log = order->log;
     order->dns_hook_deadline_timer.cancelable = 1;
@@ -1319,11 +1324,12 @@ ngx_autocert_order_dns_hook_timer(ngx_event_t *ev)
         return;
     }
     if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
-        ngx_log_error(NGX_LOG_ERR, order->log, 0,
-                      "autocert: dns-01 hook failed (%s %d) for \"%V\"",
-                      WIFEXITED(status) ? "exit" : "signal",
-                      WIFEXITED(status) ? WEXITSTATUS(status) : WTERMSIG(status),
-                      &order->domain);
+        ngx_log_error( NGX_LOG_ERR, order->log, 0,
+                       "autocert: dns-01 hook failed (%s %d) for \"%V\"",
+                       WIFEXITED( status ) ? "exit" : "signal",
+                       WIFEXITED( status ) ? WEXITSTATUS( status )
+                                           : WTERMSIG( status ),
+                       &order->domain );
         ngx_autocert_order_dns_hook_done(order, NGX_ERROR);
         return;
     }
@@ -1346,7 +1352,9 @@ ngx_autocert_order_dns_hook_deadline(ngx_event_t *ev)
             (void) kill(order->dns_hook_pid, SIGKILL);
         }
         order->dns_hook_timed_out = 1;
-        if (!order->dns_hook_timer.timer_set) { ngx_add_timer(&order->dns_hook_timer, 20); }
+        if ( !order->dns_hook_timer.timer_set ) {
+            ngx_add_timer( &order->dns_hook_timer, 20 );
+        }
     }
 #else
     if (order->dns_hook_process != NULL) {
@@ -1359,7 +1367,9 @@ ngx_autocert_order_dns_hook_deadline(ngx_event_t *ev)
             (void) TerminateProcess(order->dns_hook_process, 1);
         }
         order->dns_hook_timed_out = 1;
-        if (!order->dns_hook_timer.timer_set) { ngx_add_timer(&order->dns_hook_timer, 20); }
+        if ( !order->dns_hook_timer.timer_set ) {
+            ngx_add_timer( &order->dns_hook_timer, 20 );
+        }
     }
 #endif
 }
@@ -1396,9 +1406,10 @@ ngx_autocert_order_dns_hook(ngx_autocert_order_t *order, ngx_str_t *hook,
      * anything else before it becomes a child argv. */
     if (is_add) {
         if (order->dns_txt_value.len != 43) {
-            ngx_log_error(NGX_LOG_ERR, order->log, 0,
-                          "autocert: dns-01 TXT value has bad length for \"%V\"",
-                          &order->domain);
+            ngx_log_error(
+                NGX_LOG_ERR, order->log, 0,
+                "autocert: dns-01 TXT value has bad length for \"%V\"",
+                &order->domain );
             return NGX_ERROR;
         }
         for (i = 0; i < order->dns_txt_value.len; i++) {
@@ -1541,8 +1552,8 @@ ngx_autocert_order_dns_delay_start(ngx_autocert_order_t *order)
     order->dns_delay_timer.log = order->log;
     /* cancelable: a pending ACME timer must not pin a gracefully-exiting worker
      * 0 open (which would retain .driver.lock and block driver hand-off on
-     * reload). The in-flight order is abandoned on exit — ACME is idempotent, it
-     * re-orders next sweep. */
+     * reload). The in-flight order is abandoned on exit — ACME is idempotent,
+     * it re-orders next sweep. */
     order->dns_delay_timer.cancelable = 1;
     ngx_add_timer(&order->dns_delay_timer, delay);
 
@@ -1597,7 +1608,8 @@ ngx_autocert_order_respond_done(ngx_autocert_acme_request_t *req, ngx_int_t rc)
                    "autocert: challenge response done rc:%i status:%ui", rc,
                    req->status);
 
-    /* The CA accepts the challenge with 200 and status "pending"/"processing". */
+    /* The CA accepts the challenge with 200 and status "pending"/"processing".
+     */
     if (rc != NGX_OK || (req->status != 200 && req->status != 202)) {
         /*
          * A 400 here is recoverable: on a reorder (a renewal sweep, or just
@@ -1782,7 +1794,8 @@ ngx_autocert_order_finalize(ngx_autocert_order_t *order)
     curve = (ngx_uint_t) order->key_type;
 
     /* A ready->re-finalize cycle (finalize-400 recovery) re-enters here; free
-     * the prior key handle first so it does not leak in the long-lived worker. */
+     * the prior key handle first so it does not leak in the long-lived worker.
+     */
     if (order->cert_key != NULL) {
         ngx_http_autocert_key_free(order->cert_key);
         order->cert_key = NULL;
@@ -1880,17 +1893,18 @@ ngx_autocert_order_finalize_done(ngx_autocert_acme_request_t *req, ngx_int_t rc)
         if (rc == NGX_OK && (req->status == 400 || req->status == 403)
             && !order->finalize_retried)
         {
-            ngx_log_error(NGX_LOG_WARN, order->log, 0,
-                          "autocert: finalize got %ui for \"%V\"; polling order "
-                          "until ready, then retrying", req->status,
-                          &order->domain);
+            ngx_log_error(
+                NGX_LOG_WARN, order->log, 0,
+                "autocert: finalize got %ui for \"%V\"; polling order "
+                "until ready, then retrying",
+                req->status, &order->domain );
             ngx_destroy_pool(req->pool);
 
             ngx_memzero(&order->order_timer, sizeof(ngx_event_t));
             order->order_timer.handler = ngx_autocert_order_poll_order_timer;
             order->order_timer.data = order;
             order->order_timer.log = order->log;
-            order->order_timer.cancelable = 1;   /* don't pin exiting worker 0 */
+            order->order_timer.cancelable = 1; /* don't pin exiting worker 0 */
             ngx_add_timer(&order->order_timer, NGX_AUTOCERT_ORDER_FIN_DELAY);
             return;
         }
@@ -1916,8 +1930,8 @@ ngx_autocert_order_finalize_done(ngx_autocert_acme_request_t *req, ngx_int_t rc)
                    (ngx_msec_t) NGX_AUTOCERT_ORDER_FIN_DELAY);
 }
 
-
-/* M6b step 8: POST-as-GET the order URL, look for status=valid + certificate. */
+/* M6b step 8: POST-as-GET the order URL, look for status=valid + certificate.
+ */
 static void
 ngx_autocert_order_poll_order_timer(ngx_event_t *ev)
 {
@@ -2028,9 +2042,11 @@ ngx_autocert_order_poll_order_done(ngx_autocert_acme_request_t *req,
          * Re-finalize exactly once (the flag also gates finalize_done's
          * recovery, so a second rejection is terminal -- no infinite loop). */
         if (order->finalize_retried) {
-            ngx_log_error(NGX_LOG_ERR, order->log, 0,
-                          "autocert: order \"%V\" still 'ready' after a finalize "
-                          "retry", &order->domain);
+            ngx_log_error(
+                NGX_LOG_ERR, order->log, 0,
+                "autocert: order \"%V\" still 'ready' after a finalize "
+                "retry",
+                &order->domain );
             ngx_autocert_order_finish(order, NGX_ERROR);
             return;
         }
@@ -2209,9 +2225,10 @@ ngx_autocert_order_validate_cert(ngx_autocert_order_t *order)
     if (X509_cmp_current_time(X509_get0_notBefore(leaf)) > 0
         || X509_cmp_current_time(X509_get0_notAfter(leaf)) < 0)
     {
-        ngx_log_error(NGX_LOG_ERR, order->log, 0,
-                      "autocert: downloaded leaf for \"%V\" is not currently valid",
-                      &order->domain);
+        ngx_log_error(
+            NGX_LOG_ERR, order->log, 0,
+            "autocert: downloaded leaf for \"%V\" is not currently valid",
+            &order->domain );
         goto done;
     }
 
@@ -2230,8 +2247,8 @@ ngx_autocert_order_validate_cert(ngx_autocert_order_t *order)
             goto done;
         }
 
-        /* NUL-terminated by ngx_conf_full_name/str_slot; X509_STORE_load_locations
-         * takes a C string. */
+        /* NUL-terminated by ngx_conf_full_name/str_slot;
+         * X509_STORE_load_locations takes a C string. */
         if (X509_STORE_load_locations(store,
                                       (char *) order->issuance_certificate.data,
                                       NULL) != 1)
@@ -2318,11 +2335,12 @@ ngx_autocert_order_download_done(ngx_autocert_acme_request_t *req, ngx_int_t rc)
          * A transient download failure is recoverable: the cert URL stays valid
          * (the order is already "valid"), so a single nonce hiccup -- e.g. a
          * second badNonce landing on the account layer's one-shot retry, which
-         * surfaces here as a terminal 4xx -- or a brief CA blip should not throw
-         * away a fully issued order. Re-poll the order once: poll_order_done sees
-         * "valid" and re-drives the download with a fresh nonce. A 200 with an
-         * empty/garbage body, or a second failure, stays terminal (the flag also
-         * gates against a CA that keeps failing the download forever).
+         * surfaces here as a terminal 4xx -- or a brief CA blip should not
+         * throw away a fully issued order. Re-poll the order once:
+         * poll_order_done sees "valid" and re-drives the download with a fresh
+         * nonce. A 200 with an empty/garbage body, or a second failure, stays
+         * terminal (the flag also gates against a CA that keeps failing the
+         * download forever).
          */
         if (!order->download_retried
             && (rc != NGX_OK || (req->status >= 400 && req->status != 404)))
@@ -2344,7 +2362,7 @@ ngx_autocert_order_download_done(ngx_autocert_acme_request_t *req, ngx_int_t rc)
             order->order_timer.handler = ngx_autocert_order_poll_order_timer;
             order->order_timer.data = order;
             order->order_timer.log = order->log;
-            order->order_timer.cancelable = 1;   /* don't pin exiting worker 0 */
+            order->order_timer.cancelable = 1; /* don't pin exiting worker 0 */
             ngx_add_timer(&order->order_timer, NGX_AUTOCERT_ORDER_FIN_DELAY);
             return;
         }
@@ -2377,10 +2395,11 @@ ngx_autocert_order_download_done(ngx_autocert_acme_request_t *req, ngx_int_t rc)
      * restart. Reject here instead: the live cert stays, renewal retries.
      */
     if (ngx_autocert_order_validate_cert(order) != NGX_OK) {
-        ngx_log_error(NGX_LOG_ERR, order->log, 0,
-                      "autocert: downloaded certificate for \"%V\" is not usable; "
-                      "keeping the existing cert and deferring renewal",
-                      &order->domain);
+        ngx_log_error(
+            NGX_LOG_ERR, order->log, 0,
+            "autocert: downloaded certificate for \"%V\" is not usable; "
+            "keeping the existing cert and deferring renewal",
+            &order->domain );
         ngx_autocert_order_finish(order, NGX_ERROR);
         return;
     }
@@ -2416,11 +2435,12 @@ ngx_autocert_order_domain_identifier_safe(ngx_str_t *domain)
 
     /*
      * An IP-address identifier (RFC 8738) is a legal ACME identifier but is not
-     * a DNS name — the DNS charset check below rejects ':' (IPv6) and would also
-     * reject an uppercase form. A validated IP literal can never escape the
-     * store: an IPv4 literal is digits and dots only (no '/', no "."/".." path
-     * segment — it is a real dotted-quad), and an IPv6 literal is mapped to the
-     * safe "_ip6_..." segment by ngx_autocert_fs_segment before it reaches disk.
+     * a DNS name — the DNS charset check below rejects ':' (IPv6) and would
+     * also reject an uppercase form. A validated IP literal can never escape
+     * the store: an IPv4 literal is digits and dots only (no '/', no "."/".."
+     * path segment — it is a real dotted-quad), and an IPv6 literal is mapped
+     * to the safe "_ip6_..." segment by ngx_autocert_fs_segment before it
+     * reaches disk.
      */
     if (ngx_autocert_str_is_ip(domain, NULL) != 0) {
         return NGX_OK;
@@ -2481,16 +2501,15 @@ ngx_autocert_order_domain_safe(ngx_str_t *domain)
     return NGX_OK;
 }
 
-
 /*
  * M6b step 10: store the cert key + fullchain under store_path/<domain>/.
  * Secure layout: the per-domain directory is 0700, privkey.pem 0600,
  * fullchain.pem 0644.
  *
- * The key and chain are a matched PAIR: a reader (the serve path) that ever sees
- * a NEW key beside an OLD chain (or vice versa) gets a key/cert mismatch. To
- * keep the pair consistent across a crash, both PEMs are written + fsync'd into
- * a sibling staging dir "<domain>.tmp/", then committed atomically:
+ * The key and chain are a matched PAIR: a reader (the serve path) that ever
+ * sees a NEW key beside an OLD chain (or vice versa) gets a key/cert mismatch.
+ * To keep the pair consistent across a crash, both PEMs are written + fsync'd
+ * into a sibling staging dir "<domain>.tmp/", then committed atomically:
  *   - first issuance (no live dir): rename(2) the staging dir into place;
  *   - renewal (live dir exists): renameat2(RENAME_EXCHANGE) swaps the staging
  *     and live dirs in a single syscall, so the whole pair flips at once.
@@ -2506,8 +2525,9 @@ ngx_autocert_order_domain_safe(ngx_str_t *domain)
  * boundary is found. A single-cert fullchain yields an empty chain (valid:
  * certbot's chain.pem can be empty for a self-issued/0-intermediate leaf).
  */
-static ngx_int_t
-ngx_autocert_order_split_chain(ngx_str_t *full, ngx_str_t *leaf, ngx_str_t *rest)
+static ngx_int_t ngx_autocert_order_split_chain( ngx_str_t *full,
+                                                 ngx_str_t *leaf,
+                                                 ngx_str_t *rest )
 {
     static const u_char  marker[] = "-----END CERTIFICATE-----";
     size_t               mlen = sizeof(marker) - 1;
@@ -2664,12 +2684,13 @@ ngx_autocert_order_store(ngx_autocert_order_t *order)
 
     /*
      * Pin the container inode. O_NOFOLLOW rejects a planted symlink at the
-     * final component; O_DIRECTORY rejects a non-directory. Every store mutation
-     * below is *at()-relative to this fd.
+     * final component; O_DIRECTORY rejects a non-directory. Every store
+     * mutation below is *at()-relative to this fd.
      *
-     * certbot: <store_path>/live is created (0755) and pinned via mkdirat/openat
-     * relative to a freshly-pinned <store_path> fd — never path-based, so a
-     * swapped <store_path> component cannot redirect the live/ creation either.
+     * certbot: <store_path>/live is created (0755) and pinned via
+     * mkdirat/openat relative to a freshly-pinned <store_path> fd — never
+     * path-based, so a swapped <store_path> component cannot redirect the live/
+     * creation either.
      */
     if (certbot) {
         int      bfd;
@@ -2690,7 +2711,8 @@ ngx_autocert_order_store(ngx_autocert_order_t *order)
                           &order->store_path);
             return NGX_ERROR;
         }
-        if (ngx_autocert_mkdirat(bfd, "live", 0755) == -1 && ngx_errno != NGX_EEXIST) {
+        if ( ngx_autocert_mkdirat( bfd, "live", 0755 ) == -1 &&
+             ngx_errno != NGX_EEXIST ) {
             ngx_log_error(NGX_LOG_ERR, order->log, ngx_errno,
                           "autocert: mkdir(\"%s\") failed", cdir);
             (void) ngx_autocert_close(bfd);
@@ -2759,13 +2781,13 @@ ngx_autocert_order_store(ngx_autocert_order_t *order)
         return NGX_ERROR;
     }
 
-#define NGX_AUTOCERT_STORE_FAIL()                                            \
-    do {                                                                     \
-        (void) ngx_autocert_close(sfd);                                                   \
-        ngx_autocert_order_rm_staging_at(cfd, (char *) staging);            \
-        (void) ngx_autocert_close(cfd);                                                   \
-        return NGX_ERROR;                                                    \
-    } while (0)
+#define NGX_AUTOCERT_STORE_FAIL()                                              \
+    do {                                                                       \
+        (void) ngx_autocert_close( sfd );                                      \
+        ngx_autocert_order_rm_staging_at( cfd, (char *) staging );             \
+        (void) ngx_autocert_close( cfd );                                      \
+        return NGX_ERROR;                                                      \
+    } while ( 0 )
 
     /*
      * Dual-cert: seed staging from the live dir (hardlink) so the OTHER
@@ -2782,7 +2804,8 @@ ngx_autocert_order_store(ngx_autocert_order_t *order)
     ngx_autocert_keytype_pem_names(order->key_type, &priv_name, &chain_name,
                                    &leaf_name, &rest_name);
 
-    /* Write + fsync both PEMs into the staging dir (openat O_NOFOLLOW leaves). */
+    /* Write + fsync both PEMs into the staging dir (openat O_NOFOLLOW leaves).
+     */
     if (ngx_autocert_order_write_tmp_at(order, sfd, priv_name,
                                         &order->cert_key_pem, 0600) != NGX_OK)
     {
@@ -2822,7 +2845,8 @@ ngx_autocert_order_store(ngx_autocert_order_t *order)
     }
 
     /* fsync the staging dir so its new entries are durable before the swap. */
-    if (ngx_autocert_order_fsync_dirfd(order, sfd, (char *) staging) != NGX_OK) {
+    if ( ngx_autocert_order_fsync_dirfd( order, sfd, (char *) staging ) !=
+         NGX_OK ) {
         NGX_AUTOCERT_STORE_FAIL();
     }
     (void) ngx_autocert_close(sfd);
@@ -2831,7 +2855,8 @@ ngx_autocert_order_store(ngx_autocert_order_t *order)
 
     /* Commit, relative to the pinned container. fstatat NOFOLLOW so a planted
      * symlink at "<seg>" is detected, not followed. */
-    if (ngx_autocert_fstatat(cfd, (char *) dir, &st, AT_SYMLINK_NOFOLLOW) == -1) {
+    if ( ngx_autocert_fstatat( cfd, (char *) dir, &st, AT_SYMLINK_NOFOLLOW ) ==
+         -1 ) {
 
         if (ngx_errno != NGX_ENOENT) {
             ngx_log_error(NGX_LOG_ERR, order->log, ngx_errno,
@@ -2903,11 +2928,12 @@ ngx_autocert_order_store(ngx_autocert_order_t *order)
     /*
      * swap == NGX_DECLINED: this filesystem has no RENAME_EXCHANGE, so the
      * live pair cannot be replaced atomically. Rather than do a sequential
-     * two-file rename that could leave a mismatched key/chain on a crash, defer:
-     * the live cert is left untouched and renewal retries (backoff). First
-     * issuance is unaffected -- it has no live dir and commits with a single
-     * atomic rename above. This only blocks renewal on exotic stores (network /
-     * fuse / overlay fs); a local cert store always supports RENAME_EXCHANGE.
+     * two-file rename that could leave a mismatched key/chain on a crash,
+     * defer: the live cert is left untouched and renewal retries (backoff).
+     * First issuance is unaffected -- it has no live dir and commits with a
+     * single atomic rename above. This only blocks renewal on exotic stores
+     * (network / fuse / overlay fs); a local cert store always supports
+     * RENAME_EXCHANGE.
      */
     ngx_log_error(NGX_LOG_ERR, order->log, 0,
                   "autocert: cannot atomically replace \"%s\" (filesystem "
@@ -2945,7 +2971,8 @@ ngx_autocert_order_rm_staging_at(int cfd, const char *leaf)
 {
     int  fd;
 
-    fd = ngx_autocert_openat(cfd, leaf, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    fd = ngx_autocert_openat( cfd, leaf,
+                              O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC );
     if (fd == -1) {
         if (ngx_errno == NGX_ENOENT) {
             return;                     /* nothing there */
@@ -2970,7 +2997,6 @@ ngx_autocert_order_rm_staging_at(int cfd, const char *leaf)
     (void) ngx_autocert_close(fd);
     (void) ngx_autocert_unlinkat(cfd, leaf, AT_REMOVEDIR);
 }
-
 
 /*
  * Dual-cert seed-from-live: hardlink every existing file in the live <dir> into
@@ -3001,11 +3027,11 @@ ngx_autocert_order_rm_staging_at(int cfd, const char *leaf)
  * NOT best-effort on a PRESENT file. If an existing regular other-keytype file
  * cannot be linked into staging (cross-device, ENOSPC, permission, …), seeding
  * MUST fail: the subsequent whole-<seg> RENAME_EXCHANGE would otherwise publish
- * a live dir missing that file and the cleanup of the old dir would then destroy
- * the only copy — i.e. the other keytype's live cert is lost. So this is a
- * commit precondition; the caller aborts the store on NGX_ERROR (the existing
- * live dir is left untouched). Returns NGX_OK when staging holds a faithful copy
- * of every present other-keytype file.
+ * a live dir missing that file and the cleanup of the old dir would then
+ * destroy the only copy — i.e. the other keytype's live cert is lost. So this
+ * is a commit precondition; the caller aborts the store on NGX_ERROR (the
+ * existing live dir is left untouched). Returns NGX_OK when staging holds a
+ * faithful copy of every present other-keytype file.
  */
 static ngx_int_t
 ngx_autocert_order_seed_staging_at(ngx_autocert_order_t *order, int cfd,
@@ -3019,14 +3045,16 @@ ngx_autocert_order_seed_staging_at(ngx_autocert_order_t *order, int cfd,
     /* This keytype's own names — excluded from seeding (see CRITICAL above). */
     ngx_autocert_keytype_pem_names(skip_kt, &sp, &sc, &sl, &sr);
 
-    lfd = ngx_autocert_openat(cfd, dir, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    lfd = ngx_autocert_openat(
+        cfd, dir, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC );
     if (lfd == -1) {
         /* No live dir yet (first issuance) or it is not a real dir — nothing to
          * carry forward; the commit handles a non-dir live entry. ONLY ENOENT/
-         * ENOTDIR mean "absent". Any other errno (EACCES, EMFILE, EINTR, …) is a
-         * real failure: swallowing it would seed nothing, then the whole-<seg>
-         * swap would publish a dir missing the OTHER keytype and cleanup would
-         * destroy its only copy. Fail the seed so the caller aborts the store. */
+         * ENOTDIR mean "absent". Any other errno (EACCES, EMFILE, EINTR, …) is
+         * a real failure: swallowing it would seed nothing, then the
+         * whole-<seg> swap would publish a dir missing the OTHER keytype and
+         * cleanup would destroy its only copy. Fail the seed so the caller
+         * aborts the store. */
         if (ngx_errno == NGX_ENOENT || ngx_errno == NGX_ENOTDIR) {
             return NGX_OK;
         }
@@ -3041,7 +3069,7 @@ ngx_autocert_order_seed_staging_at(ngx_autocert_order_t *order, int cfd,
         if (ngx_strcmp(name, sp) == 0 || ngx_strcmp(name, sc) == 0
             || ngx_strcmp(name, sl) == 0 || ngx_strcmp(name, sr) == 0)
         {
-            continue;                   /* this keytype overwrites it; never seed */
+            continue; /* this keytype overwrites it; never seed */
         }
 
         /* Only hardlink real, regular files; skip symlinks/dirs/specials so a
@@ -3158,7 +3186,8 @@ ngx_autocert_order_write_tmp_at(ngx_autocert_order_t *order, int sfd,
             return NGX_ERROR;
         }
         if (n == 0) {
-            /* zero progress on a non-empty remainder — fail rather than spin. */
+            /* zero progress on a non-empty remainder — fail rather than spin.
+             */
             ngx_log_error(NGX_LOG_ERR, order->log, 0,
                           "autocert: write(\"%s\") made no progress", leaf);
             (void) ngx_autocert_close(fd);

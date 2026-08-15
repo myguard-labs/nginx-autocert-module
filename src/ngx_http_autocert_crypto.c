@@ -5,9 +5,9 @@
 
 #include <ngx_config.h>
 
-#include "ngx_http_autocert_crypto.h"
+#include "ngx_autocert_ident.h" /* ngx_autocert_str_is_ip, _cert_covers */
 #include "ngx_autocert_shared.h"
-#include "ngx_autocert_ident.h"         /* ngx_autocert_str_is_ip, _cert_covers */
+#include "ngx_http_autocert_crypto.h"
 
 #include <limits.h>
 #include <errno.h>
@@ -30,7 +30,8 @@
 #include <openssl/core_names.h>
 
 #if (OPENSSL_VERSION_NUMBER < 0x30000000L)
-// cppcheck-suppress preprocessorErrorDirective -- intentional OpenSSL 3.0 floor guard
+// cppcheck-suppress preprocessorErrorDirective -- intentional OpenSSL 3.0 floor
+// guard
 #error "nginx-autocert-module requires OpenSSL 3.0.0 or newer"
 #endif
 
@@ -43,7 +44,7 @@ ngx_uint_t  ngx_http_autocert_test_fail_md_ctx_new;
 /* Per-curve facts: OpenSSL group NID, coordinate width, JOSE crv/alg names. */
 typedef struct {
     int          nid;
-    size_t       coord_len;   /* ceil(field_bits/8): 32 for P-256, 48 for P-384 */
+    size_t       coord_len; /* ceil(field_bits/8): 32 for P-256, 48 for P-384 */
     const char  *jwk_crv;     /* "P-256" / "P-384" */
     const char  *jws_alg;     /* "ES256" / "ES384" */
     const EVP_MD *(*md)(void);
@@ -713,7 +714,8 @@ ngx_http_autocert_jws_sign(ngx_pool_t *pool, EVP_PKEY *pkey,
                                "\"signature\":\"\"}") - 1;
 
         /* prot_b64.len + pay_b64.len is already bounded (signing_input guard);
-         * fold in the fixed overhead and the signature length with wrap checks. */
+         * fold in the fixed overhead and the signature length with wrap checks.
+         */
         if (sig_b64.len > NGX_MAX_SIZE_T_VALUE - fixed
             || prot_b64.len + pay_b64.len
                > NGX_MAX_SIZE_T_VALUE - fixed - sig_b64.len)
@@ -1015,7 +1017,7 @@ ngx_http_autocert_acme_tls_cert(EVP_PKEY *pkey, ngx_str_t *domain,
     if (x == NULL) {
         return NULL;
     }
-    if (X509_set_version(x, 2) != 1) {                /* X.509 v3 (extensions) */
+    if ( X509_set_version( x, 2 ) != 1 ) { /* X.509 v3 (extensions) */
         goto failed;
     }
 
@@ -1044,7 +1046,8 @@ ngx_http_autocert_acme_tls_cert(EVP_PKEY *pkey, ngx_str_t *domain,
 
     /* subjectAltName, length-bounded (no NUL assumed). An IP identifier gets an
      * iPAddress SAN with the packed address (RFC 8738/8737); a name gets
-     * DNS:<domain>. The validated identity must match the ordered identifier. */
+     * DNS:<domain>. The validated identity must match the ordered identifier.
+     */
     gns = GENERAL_NAMES_new();
     gn = GENERAL_NAME_new();
     if (gns == NULL || gn == NULL) {
@@ -1251,15 +1254,16 @@ ngx_http_autocert_cert_not_after(const char *path, time_t *out, int *key_id,
 
     /*
      * Identity check (M2): the freshness path selects the file by name+keytype,
-     * but a wrong-domain leaf with the right key family and an unexpired notAfter
-     * would otherwise read as fresh while serve.c's X509_check_host rejects it —
-     * wedging the vhost with no working cert until expiry. When the caller passes
-     * a verify_name, require the stored leaf to actually cover it; a mismatch is
-     * reported as NGX_ABORT so the caller reissues (distinct from "no cert" so it
-     * can be logged accurately). For a wildcard name the caller passes a concrete
-     * probe label under the wildcard, so default X509_check_host wildcard
-     * matching answers "does this leaf cover the wildcard". An IP verify_name
-     * is checked against the leaf's iPAddress SAN via ngx_autocert_cert_covers.
+     * but a wrong-domain leaf with the right key family and an unexpired
+     * notAfter would otherwise read as fresh while serve.c's X509_check_host
+     * rejects it — wedging the vhost with no working cert until expiry. When
+     * the caller passes a verify_name, require the stored leaf to actually
+     * cover it; a mismatch is reported as NGX_ABORT so the caller reissues
+     * (distinct from "no cert" so it can be logged accurately). For a wildcard
+     * name the caller passes a concrete probe label under the wildcard, so
+     * default X509_check_host wildcard matching answers "does this leaf cover
+     * the wildcard". An IP verify_name is checked against the leaf's iPAddress
+     * SAN via ngx_autocert_cert_covers.
      */
     if (verify_name != NULL && verify_name->len != 0
         && !ngx_autocert_cert_covers(leaf, verify_name))

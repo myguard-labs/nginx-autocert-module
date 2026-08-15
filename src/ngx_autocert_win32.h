@@ -50,17 +50,15 @@
 #error "ngx_autocert: unsupported win32 toolchain (expected MSVC or MinGW-w64)"
 #endif
 
-
-#include <windows.h>
-#include <winioctl.h>          /* IO_REPARSE_TAG_*; needs windows.h first */
-#include <aclapi.h>            /* GetSecurityInfo/SetSecurityInfo/SetEntriesInAclW — W11 */
-#include <io.h>                /* _open_osfhandle, _get_osfhandle, _close */
-#include <fcntl.h>             /* _O_RDONLY and friends for _open_osfhandle */
+#include <aclapi.h> /* GetSecurityInfo/SetSecurityInfo/SetEntriesInAclW — W11 */
 #include <errno.h>
-#include <stdlib.h>            /* malloc/free — ngx_autocert_dir_t (W12) */
-#include <stddef.h>            /* offsetof — ngx_autocert_readdir (W12) */
-#include <limits.h>            /* INT_MAX — W9 canon-path WideCharToMultiByte clamp */
-
+#include <fcntl.h>  /* _O_RDONLY and friends for _open_osfhandle */
+#include <io.h>     /* _open_osfhandle, _get_osfhandle, _close */
+#include <limits.h> /* INT_MAX — W9 canon-path WideCharToMultiByte clamp */
+#include <stddef.h> /* offsetof — ngx_autocert_readdir (W12) */
+#include <stdlib.h> /* malloc/free — ngx_autocert_dir_t (W12) */
+#include <windows.h>
+#include <winioctl.h> /* IO_REPARSE_TAG_*; needs windows.h first */
 
 /*
  * Share mode used for every open in the shim.
@@ -302,8 +300,9 @@ WINBASEAPI ULONGLONG WINAPI GetTickCount64(void);
  * branch on (EEXIST, ENOENT, EAGAIN, ENOTEMPTY, ELOOP...).
  *
  * Deliberately not _doserrno / _get_errno: the CRT's mapping is narrower and
- * collapses distinctions the callers depend on — notably ERROR_SHARING_VIOLATION,
- * which must surface as EAGAIN so the lock path retries rather than failing hard.
+ * collapses distinctions the callers depend on — notably
+ * ERROR_SHARING_VIOLATION, which must surface as EAGAIN so the lock path
+ * retries rather than failing hard.
  *
  * Declared here, ahead of the first body that calls it; defined below with the
  * other shim bodies. static ngx_inline, like every other body in this header: a
@@ -324,7 +323,6 @@ static ngx_inline int ngx_autocert_win32_errno(DWORD err);
 static ngx_inline ngx_autocert_mode_t
 ngx_autocert_win32_dacl_mode(const ngx_int_t *is_owner,
     const ngx_int_t *is_allow, const ngx_int_t *is_tolerated, ngx_uint_t n);
-
 
 /*
  * W13 — flock(fd, LOCK_EX | LOCK_NB) -> LockFileEx.
@@ -349,9 +347,9 @@ ngx_autocert_win32_dacl_mode(const ngx_int_t *is_owner,
  * caller may read either.
  *
  * ngx_autocert_win32_errno() is forward-declared just above rather than left to
- * its declaration further down: this body CALLS it, and a call that precedes any
- * declaration is an implicit-declaration error under MinGW's C99 (and then a
- * "static declaration follows non-static declaration" error when the real
+ * its declaration further down: this body CALLS it, and a call that precedes
+ * any declaration is an implicit-declaration error under MinGW's C99 (and then
+ * a "static declaration follows non-static declaration" error when the real
  * declaration is reached). MSVC does not diagnose it, so the ordering must be
  * kept correct here rather than trusted to one compiler.
  */
@@ -576,31 +574,29 @@ ngx_autocert_fchmod(int fd, ngx_autocert_mode_t mode)
     return 0;
 }
 
-
 /*
  * NGX_EINTR retry predicate.
  *
- * nginx core does not define NGX_EINTR on win32 at all (src/os/win32/ngx_errno.h
- * has no entry for it) — a bare `ngx_errno == NGX_EINTR` is therefore a hard
- * compile error on win32, not merely a wrong answer. The retry loops that test
- * it (e.g. the flock() spin at driver.c) exist because a POSIX blocking syscall
- * can be interrupted by a caught signal mid-wait and must be retried. Win32 has
- * no analogous "signal arrived during this syscall" outcome for these calls, so
- * the predicate is a compile-time-constant false here: the branch it guards is
- * simply unreachable on win32, which is the correct behaviour, not a gap being
- * papered over.
+ * nginx core does not define NGX_EINTR on win32 at all
+ * (src/os/win32/ngx_errno.h has no entry for it) — a bare `ngx_errno ==
+ * NGX_EINTR` is therefore a hard compile error on win32, not merely a wrong
+ * answer. The retry loops that test it (e.g. the flock() spin at driver.c)
+ * exist because a POSIX blocking syscall can be interrupted by a caught signal
+ * mid-wait and must be retried. Win32 has no analogous "signal arrived during
+ * this syscall" outcome for these calls, so the predicate is a
+ * compile-time-constant false here: the branch it guards is simply unreachable
+ * on win32, which is the correct behaviour, not a gap being papered over.
  */
 #define ngx_autocert_err_is_intr(err)   0
 
-
 /*
  * AT_SYMLINK_NOFOLLOW / AT_REMOVEDIR — the flag words ngx_autocert_fstatat()
- * and ngx_autocert_unlinkat() call sites pass explicitly (DESIGN-win32-store-io.md
- * says these stay call-site params rather than being folded into a helper, on
- * both platforms). Neither exists in any win32 header; the shim bodies below
- * interpret the bits themselves, so the exact numeric value only has to be
- * distinct from the other bit in this pair. Bit 0/1 keep them out of the O_*
- * shim range (0x01000000+) with room to spare.
+ * and ngx_autocert_unlinkat() call sites pass explicitly
+ * (DESIGN-win32-store-io.md says these stay call-site params rather than being
+ * folded into a helper, on both platforms). Neither exists in any win32 header;
+ * the shim bodies below interpret the bits themselves, so the exact numeric
+ * value only has to be distinct from the other bit in this pair. Bit 0/1 keep
+ * them out of the O_* shim range (0x01000000+) with room to spare.
  */
 #ifndef AT_SYMLINK_NOFOLLOW
 #define AT_SYMLINK_NOFOLLOW  0x0001
@@ -692,10 +688,11 @@ typedef LONG  NTSTATUS;
 /*
  * STATUS_NO_MORE_FILES — NtQueryDirectoryFile's clean-end-of-enumeration
  * status (W12). A warning-severity code (top two bits 10), so NT_SUCCESS()
- * on it is false; it is not routed through ngx_autocert_win32_errno_from_ntstatus
- * below because it is not an error — ngx_autocert_readdir() checks for it
- * explicitly and maps it to POSIX readdir()'s "NULL, errno left alone"
- * end-of-directory contract, never to a mapped ERROR_* code.
+ * on it is false; it is not routed through
+ * ngx_autocert_win32_errno_from_ntstatus below because it is not an error —
+ * ngx_autocert_readdir() checks for it explicitly and maps it to POSIX
+ * readdir()'s "NULL, errno left alone" end-of-directory contract, never to a
+ * mapped ERROR_* code.
  */
 #ifndef STATUS_NO_MORE_FILES
 #define STATUS_NO_MORE_FILES             ((NTSTATUS) 0x80000006L)
@@ -849,15 +846,16 @@ typedef NTSTATUS (NTAPI *ngx_autocert_pfn_NtQueryDirectoryFile_t)(
  * publication order is load-bearing, not benign: it is stored LAST, after a
  * MemoryBarrier(), specifically so that a second thread observing it non-NULL
  * through the gate is guaranteed to also observe
- * ngx_autocert_pfn_NtSetInformationFile, ngx_autocert_pfn_NtQueryInformationFile
- * and ngx_autocert_pfn_NtQueryDirectoryFile already published. Any writer
- * racing to resolve stores the same values (GetProcAddress is idempotent for
- * a given (module, symbol)), so the only thing that needs ordering is which
- * pointer becomes visible first — publish the three non-gate pointers, THEN
- * the gate pointer, never the other way round. Getting this backwards (or
- * reasoning about each pointer as independently benign) is exactly the bug
- * this comment used to describe as safe: a torn read on any one pointer is
- * impossible, but a reader is not limited to reading only the gate.
+ * ngx_autocert_pfn_NtSetInformationFile,
+ * ngx_autocert_pfn_NtQueryInformationFile and
+ * ngx_autocert_pfn_NtQueryDirectoryFile already published. Any writer racing to
+ * resolve stores the same values (GetProcAddress is idempotent for a given
+ * (module, symbol)), so the only thing that needs ordering is which pointer
+ * becomes visible first — publish the three non-gate pointers, THEN the gate
+ * pointer, never the other way round. Getting this backwards (or reasoning
+ * about each pointer as independently benign) is exactly the bug this comment
+ * used to describe as safe: a torn read on any one pointer is impossible, but a
+ * reader is not limited to reading only the gate.
  */
 static ngx_autocert_pfn_NtCreateFile_t
     ngx_autocert_pfn_NtCreateFile = NULL;
@@ -1242,8 +1240,8 @@ ngx_autocert_openat_mode(int dfd, const char *name, int flags,
                   ? NGX_AUTOCERT_FILE_CREATE
                   : NGX_AUTOCERT_FILE_OPEN_IF;
 
-    fd = ngx_autocert_win32_ntopen(dfd, name, desired_access, disposition, options,
-                                    crt_flags);
+    fd = ngx_autocert_win32_ntopen( dfd, name, desired_access, disposition,
+                                    options, crt_flags );
     if (fd == -1) {
         return -1;
     }
@@ -1324,8 +1322,8 @@ ngx_autocert_unlinkat(int dfd, const char *name, int flags)
         options |= NGX_AUTOCERT_FILE_NON_DIRECTORY_FILE;
     }
 
-    fd = ngx_autocert_win32_ntopen(dfd, name, desired_access, NGX_AUTOCERT_FILE_OPEN,
-                                    options, _O_RDONLY);
+    fd = ngx_autocert_win32_ntopen(
+        dfd, name, desired_access, NGX_AUTOCERT_FILE_OPEN, options, _O_RDONLY );
     if (fd == -1) {
         return -1;
     }
@@ -1553,8 +1551,8 @@ ngx_autocert_win32_mode_from_dacl(HANDLE h, ngx_autocert_mode_t *mode_bits)
  * function's O_NOFOLLOW handling identical on both opens without touching the
  * shared open helper's contract for every other caller.
  */
-static ngx_inline int
-ngx_autocert_fstatat(int dfd, const char *name, ngx_autocert_stat_t *st, int flags)
+static ngx_inline int ngx_autocert_fstatat( int dfd, const char *name,
+                                            ngx_autocert_stat_t *st, int flags )
 {
     BY_HANDLE_FILE_INFORMATION  info;
     HANDLE                      h;
@@ -1745,7 +1743,7 @@ ngx_autocert_fdopendir(int fd)
 {
     ngx_autocert_dir_t  *dh;
 
-    dh = malloc(sizeof(ngx_autocert_dir_t));
+    dh = malloc(sizeof(ngx_autocert_dir_t)); /* NOLINT-nginx */
     if (dh == NULL) {
         SetLastError(ERROR_NOT_ENOUGH_MEMORY);
         errno = ngx_autocert_win32_errno(ERROR_NOT_ENOUGH_MEMORY);
@@ -1944,7 +1942,7 @@ ngx_autocert_closedir(ngx_autocert_dir_t *dh)
     int  fd;
 
     fd = dh->fd;
-    free(dh);
+    free(dh); /* NOLINT-nginx */
 
     return _close(fd);
 }
@@ -2274,9 +2272,9 @@ ngx_autocert_win32_canon_store_path(int dfd, char *out, size_t out_cap)
         return -1;
     }
 
-    wlen = GetFinalPathNameByHandleW(h, wpath,
-                                      (DWORD) (sizeof(wpath) / sizeof(wpath[0])),
-                                      FILE_NAME_NORMALIZED);
+    wlen = GetFinalPathNameByHandleW(
+        h, wpath, (DWORD) ( sizeof( wpath ) / sizeof( wpath[0] ) ),
+        FILE_NAME_NORMALIZED );
     if (wlen == 0 || wlen >= sizeof(wpath) / sizeof(wpath[0])) {
         mapped = (wlen == 0) ? GetLastError() : ERROR_BUFFER_OVERFLOW;
         SetLastError(mapped);

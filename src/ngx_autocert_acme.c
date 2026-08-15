@@ -39,7 +39,8 @@ static ngx_int_t ngx_autocert_acme_connect(ngx_autocert_acme_request_t *r,
 static void ngx_autocert_acme_connect_handler(ngx_event_t *ev);
 static ngx_int_t ngx_autocert_acme_ssl_init(ngx_autocert_acme_request_t *r);
 static void ngx_autocert_acme_ssl_handshake_handler(ngx_connection_t *c);
-static ngx_int_t ngx_autocert_acme_build_request(ngx_autocert_acme_request_t *r);
+static ngx_int_t
+ngx_autocert_acme_build_request( ngx_autocert_acme_request_t *r );
 static void ngx_autocert_acme_write_handler(ngx_event_t *ev);
 static void ngx_autocert_acme_read_handler(ngx_event_t *ev);
 static ngx_int_t ngx_autocert_acme_parse_response(
@@ -48,18 +49,17 @@ static ngx_int_t ngx_autocert_acme_dechunk(ngx_autocert_acme_request_t *r);
 static void ngx_autocert_acme_finalize(ngx_autocert_acme_request_t *r,
     ngx_int_t rc);
 
-
 /*
  * The single in-flight ACME request, if any. The driver runs exactly one ACME
  * flow at a time (one order, sequential account bootstrap), so at most one
  * request is ever pending — once ngx_autocert_acme_request() returns NGX_OK an
- * async resolver/connect/read/write event is armed and owns *r, which lives in a
- * pool the driver will destroy. On a `master_process off` reload the driver
- * tears that pool down while the process keeps running, so a pending event would
- * fire on freed memory. We track the pending request here so reload can cancel
- * it (close its connection / stop its resolve) BEFORE the pool dies. Set on each
- * NGX_OK (event-armed) return, cleared in finalize (the one completion choke
- * point every request passes through exactly once).
+ * async resolver/connect/read/write event is armed and owns *r, which lives in
+ * a pool the driver will destroy. On a `master_process off` reload the driver
+ * tears that pool down while the process keeps running, so a pending event
+ * would fire on freed memory. We track the pending request here so reload can
+ * cancel it (close its connection / stop its resolve) BEFORE the pool dies. Set
+ * on each NGX_OK (event-armed) return, cleared in finalize (the one completion
+ * choke point every request passes through exactly once).
  */
 static ngx_autocert_acme_request_t  *ngx_autocert_acme_inflight;
 
@@ -88,21 +88,23 @@ ngx_autocert_acme_client_create(ngx_autocert_acme_client_t *client,
      * CI passes Pebble's self-signed CA bundle here.
      *
      * Load the custom trust bundle directly with OpenSSL rather than
-     * ngx_ssl_trusted_certificate(): that nginx helper is a CONFIG-TIME API that
-     * resolves the path through the SSL object cache via cf->cycle->old_cycle,
-     * which is a dangling/uninitialised pointer in a worker process and faults.
-     * The driver now runs on worker 0, so we must avoid config-time SSL APIs.
-     * The path is already made absolute at config time (init_main_conf), and is
-     * NUL-terminated (it came from a config directive argument).
+     * ngx_ssl_trusted_certificate(): that nginx helper is a CONFIG-TIME API
+     * that resolves the path through the SSL object cache via
+     * cf->cycle->old_cycle, which is a dangling/uninitialised pointer in a
+     * worker process and faults. The driver now runs on worker 0, so we must
+     * avoid config-time SSL APIs. The path is already made absolute at config
+     * time (init_main_conf), and is NUL-terminated (it came from a config
+     * directive argument).
      */
     if (trusted_cert->len != 0) {
         if (SSL_CTX_load_verify_locations(client->ssl.ctx,
                                           (char *) trusted_cert->data, NULL)
             == 0)
         {
-            ngx_ssl_error(NGX_LOG_EMERG, cycle->log, 0,
-                          "autocert: SSL_CTX_load_verify_locations(\"%V\") failed",
-                          trusted_cert);
+            ngx_ssl_error(
+                NGX_LOG_EMERG, cycle->log, 0,
+                "autocert: SSL_CTX_load_verify_locations(\"%V\") failed",
+                trusted_cert );
             ngx_ssl_cleanup_ctx(&client->ssl);
             return NGX_ERROR;
         }
@@ -113,25 +115,27 @@ ngx_autocert_acme_client_create(ngx_autocert_acme_client_t *client,
      * MODE untouched (it starts as SSL_VERIFY_NONE). Without this the handshake
      * would succeed against ANY peer and SSL_get_verify_result() would return
      * X509_V_OK -- a self-signed impostor with a matching name would pass. Turn
-     * on peer verification explicitly. When no custom CA was supplied, also load
-     * the system default trust store (ngx_ssl_trusted_certificate with an empty
-     * path does not), so verification has roots to chain to (Let's Encrypt prod).
+     * on peer verification explicitly. When no custom CA was supplied, also
+     * load the system default trust store (ngx_ssl_trusted_certificate with an
+     * empty path does not), so verification has roots to chain to (Let's
+     * Encrypt prod).
      */
     SSL_CTX_set_verify(client->ssl.ctx, SSL_VERIFY_PEER, NULL);
     /*
      * Generous chain depth. The chain length an ACME CA presents is outside our
      * control and changes without notice (cross-signed roots, extra
-     * intermediates); a tight cap (was 2) would reject a perfectly valid CA with
-     * a confusing "verify failed". Depth only bounds pathological chains — peer
-     * identity is still enforced by SSL_VERIFY_PEER + the trust store + the host
-     * check below — so a high value does not weaken security.
+     * intermediates); a tight cap (was 2) would reject a perfectly valid CA
+     * with a confusing "verify failed". Depth only bounds pathological chains —
+     * peer identity is still enforced by SSL_VERIFY_PEER + the trust store +
+     * the host check below — so a high value does not weaken security.
      */
     SSL_CTX_set_verify_depth(client->ssl.ctx, 100);
 
     if (trusted_cert->len == 0) {
         if (SSL_CTX_set_default_verify_paths(client->ssl.ctx) == 0) {
-            ngx_log_error(NGX_LOG_EMERG, cycle->log, 0,
-                          "autocert: SSL_CTX_set_default_verify_paths() failed");
+            ngx_log_error(
+                NGX_LOG_EMERG, cycle->log, 0,
+                "autocert: SSL_CTX_set_default_verify_paths() failed" );
             ngx_ssl_cleanup_ctx(&client->ssl);
             return NGX_ERROR;
         }
@@ -290,9 +294,11 @@ ngx_autocert_acme_request(ngx_autocert_acme_request_t *r)
     }
 
     if (r->client->resolver == NULL) {
-        ngx_log_error(NGX_LOG_ERR, r->log, 0,
-                      "autocert: no resolver configured (set autocert_resolver) "
-                      "- cannot reach the ACME server \"%V\"", &r->host);
+        ngx_log_error(
+            NGX_LOG_ERR, r->log, 0,
+            "autocert: no resolver configured (set autocert_resolver) "
+            "- cannot reach the ACME server \"%V\"",
+            &r->host );
         return NGX_ERROR;
     }
 
@@ -325,15 +331,16 @@ ngx_autocert_acme_request(ngx_autocert_acme_request_t *r)
     /*
      * Publish the inflight pointer NOW, before ngx_resolve_name(), for the same
      * reason the connect path publishes before ssl_init (see the long comment
-     * at the ngx_autocert_acme_inflight assignment in ngx_autocert_acme_connect):
-     * nginx's resolver can invoke ctx->handler SYNCHRONOUSLY (cached/quick name)
-     * and still return NGX_OK, so resolve_handler -> connect -> ssl_init ->
-     * finalize can run inline on this stack and the *_done handler may destroy
-     * r->pool before ngx_resolve_name() returns. Writing `r` into the global
-     * AFTER the call (the old code did this below the call) was therefore a
-     * use-after-free: it republished a pointer into an already-freed pool.
-     * finalize clears the pointer on completion; the sync-start-failure path
-     * just below clears it explicitly before the caller frees the pool.
+     * at the ngx_autocert_acme_inflight assignment in
+     * ngx_autocert_acme_connect): nginx's resolver can invoke ctx->handler
+     * SYNCHRONOUSLY (cached/quick name) and still return NGX_OK, so
+     * resolve_handler -> connect -> ssl_init -> finalize can run inline on this
+     * stack and the *_done handler may destroy r->pool before
+     * ngx_resolve_name() returns. Writing `r` into the global AFTER the call
+     * (the old code did this below the call) was therefore a use-after-free: it
+     * republished a pointer into an already-freed pool. finalize clears the
+     * pointer on completion; the sync-start-failure path just below clears it
+     * explicitly before the caller frees the pool.
      */
     ngx_autocert_acme_inflight = r;     /* armed; cancelable on reload */
 
@@ -398,7 +405,8 @@ ngx_autocert_acme_parse_url(ngx_autocert_acme_request_t *r)
     r->host_is_ipv6 = 0;
 
     if (*p == '[') {
-        /* IPv6 literal: host is everything up to and including ']' minus brackets */
+        /* IPv6 literal: host is everything up to and including ']' minus
+         * brackets */
         r->host_is_ipv6 = 1;
         host_start = p + 1;
         host_end = ngx_strlchr(p, last, ']');
@@ -480,16 +488,16 @@ ngx_autocert_acme_parse_url(ngx_autocert_acme_request_t *r)
     return NGX_OK;
 }
 
-
 /*
  * Origin pin (SSRF-shaped hardening). Once the client has recorded the
- * configured directory origin, refuse any resource URL that leaves it (different
- * host/port, or an IPv4-vs-IPv6 authority mismatch). The scheme is already
- * forced to https by parse_url. A compromised or malicious directory document
- * cannot then point the account-signed JWS client at another trusted HTTPS
- * origin. A client with no pin (origin opt-out / probe) accepts any https:// URL.
- * Kept out of parse_url so the fuzz harness can lift the pure URL splitter
- * without the client type. Assumes parse_url has already populated host/port.
+ * configured directory origin, refuse any resource URL that leaves it
+ * (different host/port, or an IPv4-vs-IPv6 authority mismatch). The scheme is
+ * already forced to https by parse_url. A compromised or malicious directory
+ * document cannot then point the account-signed JWS client at another trusted
+ * HTTPS origin. A client with no pin (origin opt-out / probe) accepts any
+ * https:// URL. Kept out of parse_url so the fuzz harness can lift the pure URL
+ * splitter without the client type. Assumes parse_url has already populated
+ * host/port.
  */
 static ngx_int_t
 ngx_autocert_acme_check_origin(ngx_autocert_acme_request_t *r)
@@ -538,8 +546,9 @@ ngx_autocert_acme_resolve_handler(ngx_resolver_ctx_t *ctx)
     /* state==0 means success, for which the resolver guarantees naddrs>=1;
      * guard defensively so a contract violation can't read addrs[0] OOB. */
     if (ctx->naddrs == 0) {
-        ngx_log_error(NGX_LOG_ERR, r->log, 0,
-                      "autocert: resolve \"%V\" returned no addresses", &r->host);
+        ngx_log_error( NGX_LOG_ERR, r->log, 0,
+                       "autocert: resolve \"%V\" returned no addresses",
+                       &r->host );
         ngx_resolve_name_done(ctx);
         r->resolve = NULL;
         ngx_autocert_acme_finalize(r, NGX_ERROR);
@@ -617,8 +626,8 @@ ngx_autocert_acme_connect(ngx_autocert_acme_request_t *r,
     /*
      * Publish the inflight pointer NOW, before any call chain that can complete
      * the request. On the fully-synchronous connect+handshake path
-     * ngx_autocert_acme_ssl_init() may drive the handshake (and, on a loopback /
-     * same-host CA, even the write + first read) inline, reaching
+     * ngx_autocert_acme_ssl_init() may drive the handshake (and, on a loopback
+     * / same-host CA, even the write + first read) inline, reaching
      * ngx_autocert_acme_finalize() on this very stack; finalize clears the
      * inflight pointer and the caller's handler may then destroy r->pool. So we
      * must NOT write `r` into the global pointer AFTER such a chain returns
@@ -658,8 +667,8 @@ ngx_autocert_acme_connect(ngx_autocert_acme_request_t *r,
     }
 
     /* ssl_init returned NGX_OK: either the handshake is pending (inflight stays
-     * set, handler fires later) or it finalized inline (finalize already cleared
-     * inflight). Either way do NOT touch the pointer here. */
+     * set, handler fires later) or it finalized inline (finalize already
+     * cleared inflight). Either way do NOT touch the pointer here. */
     return NGX_OK;
 }
 
@@ -687,7 +696,8 @@ ngx_autocert_acme_connect_handler(ngx_event_t *ev)
         int        err = 0;
         socklen_t  len = sizeof(int);
 
-        if (getsockopt(c->fd, SOL_SOCKET, SO_ERROR, (void *) &err, &len) == -1) {
+        if ( getsockopt( c->fd, SOL_SOCKET, SO_ERROR, (void *) &err, &len ) ==
+             -1 ) {
             err = ngx_socket_errno;
         }
         if (err) {
@@ -789,9 +799,10 @@ ngx_autocert_acme_ssl_handshake_handler(ngx_connection_t *c)
     /* Enforce certificate verification: reject an untrusted ACME server. */
     rc = SSL_get_verify_result(c->ssl->connection);
     if (rc != X509_V_OK) {
-        ngx_log_error(NGX_LOG_ERR, r->log, 0,
-                      "autocert: ACME server \"%V\" certificate verify failed "
-                      "(%l: %s)", &r->host, rc, X509_verify_cert_error_string(rc));
+        ngx_log_error( NGX_LOG_ERR, r->log, 0,
+                       "autocert: ACME server \"%V\" certificate verify failed "
+                       "(%l: %s)",
+                       &r->host, rc, X509_verify_cert_error_string( rc ) );
         ngx_autocert_acme_finalize(r, NGX_ERROR);
         return;
     }
@@ -806,9 +817,10 @@ ngx_autocert_acme_ssl_handshake_handler(ngx_connection_t *c)
             if (cert != NULL) {
                 X509_free(cert);
             }
-            ngx_log_error(NGX_LOG_ERR, r->log, 0,
-                          "autocert: ACME server \"%V\" certificate name mismatch",
-                          &r->host);
+            ngx_log_error(
+                NGX_LOG_ERR, r->log, 0,
+                "autocert: ACME server \"%V\" certificate name mismatch",
+                &r->host );
             ngx_autocert_acme_finalize(r, NGX_ERROR);
             return;
         }
@@ -982,7 +994,8 @@ ngx_autocert_acme_write_handler(ngx_event_t *ev)
 
     /* Start the total-read deadline now (the response read begins here). Arm
      * the first read timer at the smaller of the per-IO timeout and the total
-     * budget so a tiny (test) budget is honoured even if no byte ever arrives. */
+     * budget so a tiny (test) budget is honoured even if no byte ever arrives.
+     */
     r->read_deadline = ngx_current_msec + NGX_AUTOCERT_READ_TOTAL;
 
     ngx_add_timer(c->read,
@@ -1249,8 +1262,9 @@ ngx_autocert_acme_parse_response(ngx_autocert_acme_request_t *r)
             ngx_int_t  code = ngx_atoi(b->start + 9, 3);
 
             if (code == NGX_ERROR || code < 100 || code > 599) {
-                ngx_log_error(NGX_LOG_ERR, r->log, 0,
-                              "autocert: bad status code from \"%V\"", &r->host);
+                ngx_log_error( NGX_LOG_ERR, r->log, 0,
+                               "autocert: bad status code from \"%V\"",
+                               &r->host );
                 return NGX_ERROR;
             }
             r->status = (ngx_uint_t) code;
@@ -1281,7 +1295,8 @@ ngx_autocert_acme_parse_response(ngx_autocert_acme_request_t *r)
                 u_char                      *v = colon + 1, *vend = eol;
 
                 while (v < vend && (*v == ' ' || *v == '\t')) v++;
-                while (vend > v && (vend[-1] == ' ' || vend[-1] == '\t')) vend--;
+                while ( vend > v && ( vend[-1] == ' ' || vend[-1] == '\t' ) )
+                    vend--;
 
                 h = ngx_array_push(r->headers);
                 if (h == NULL) {
@@ -1316,18 +1331,20 @@ ngx_autocert_acme_parse_response(ngx_autocert_acme_request_t *r)
                 if (cl == NGX_ERROR || cl < 0
                     || (r->content_length >= 0 && r->content_length != cl))
                 {
-                    ngx_log_error(NGX_LOG_ERR, r->log, 0,
-                                  "autocert: invalid/conflicting Content-Length "
-                                  "from \"%V\"", &r->host);
+                    ngx_log_error(
+                        NGX_LOG_ERR, r->log, 0,
+                        "autocert: invalid/conflicting Content-Length "
+                        "from \"%V\"",
+                        &r->host );
                     return NGX_ERROR;
                 }
                 r->content_length = cl;
 
-            } else if ((size_t) (eol - line) > sizeof("Transfer-Encoding:") - 1
-                       && ngx_strncasecmp(line,
-                                          (u_char *) "Transfer-Encoding:",
-                                          sizeof("Transfer-Encoding:") - 1) == 0)
-            {
+            } else if ( (size_t) ( eol - line ) >
+                            sizeof( "Transfer-Encoding:" ) - 1 &&
+                        ngx_strncasecmp( line, (u_char *) "Transfer-Encoding:",
+                                         sizeof( "Transfer-Encoding:" ) - 1 ) ==
+                            0 ) {
                 u_char  *v = line + sizeof("Transfer-Encoding:") - 1;
 
                 while (v < eol && (*v == ' ' || *v == '\t')) v++;
@@ -1342,9 +1359,11 @@ ngx_autocert_acme_parse_response(ngx_autocert_acme_request_t *r)
                     r->chunked = 1;
 
                 } else {
-                    ngx_log_error(NGX_LOG_ERR, r->log, 0,
-                                  "autocert: unsupported Transfer-Encoding from "
-                                  "\"%V\"", &r->host);
+                    ngx_log_error(
+                        NGX_LOG_ERR, r->log, 0,
+                        "autocert: unsupported Transfer-Encoding from "
+                        "\"%V\"",
+                        &r->host );
                     return NGX_ERROR;
                 }
             }
@@ -1565,7 +1584,8 @@ ngx_autocert_acme_finalize(ngx_autocert_acme_request_t *r, ngx_int_t rc)
         if (c->ssl) {
             /* immediate teardown: don't wait for the peer's close_notify and
              * don't block sending ours, so ngx_ssl_shutdown can't return
-             * NGX_AGAIN and leave the SSL object alive past pool destruction. */
+             * NGX_AGAIN and leave the SSL object alive past pool destruction.
+             */
             c->ssl->no_wait_shutdown = 1;
             c->ssl->no_send_shutdown = 1;
             (void) ngx_ssl_shutdown(c);

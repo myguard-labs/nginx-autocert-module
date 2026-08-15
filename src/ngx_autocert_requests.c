@@ -1,9 +1,10 @@
 /*
- * ngx_autocert_requests — shared-memory runtime cert-request registry (autolabel A1).
- * See the header for the cross-module contract. An rbtree of host->state in a slab
- * zone, keyed by crc32(host) with the full host compared on collision. Compiled
- * into both the autocert modules AND (verbatim, via the shared header) the consumer,
- * all operating on the same slab addressed through the named zone.
+ * ngx_autocert_requests — shared-memory runtime cert-request registry
+ * (autolabel A1). See the header for the cross-module contract. An rbtree of
+ * host->state in a slab zone, keyed by crc32(host) with the full host compared
+ * on collision. Compiled into both the autocert modules AND (verbatim, via the
+ * shared header) the consumer, all operating on the same slab addressed through
+ * the named zone.
  */
 
 #include <ngx_config.h>
@@ -20,7 +21,6 @@
 static ngx_autocert_request_t *ngx_autocert_requests_lookup(
     ngx_autocert_requests_sh_t *sh, ngx_str_t *host, uint32_t hash);
 
-
 /*
  * Is `buf`/`len` a dotted-quad IPv4 literal (a.b.c.d, each octet 0-255)?
  *
@@ -29,11 +29,13 @@ static ngx_autocert_request_t *ngx_autocert_requests_lookup(
  * a label producer must not be able to enqueue one. This is a deliberately
  * dependency-light parser rather than ngx_autocert_str_is_ip(): this TU is
  * vendored verbatim into consumer modules and includes nothing beyond
- * ngx_core.h, while str_is_ip lives in a header that drags in <openssl/x509v3.h>.
+ * ngx_core.h, while str_is_ip lives in a header that drags in
+ * <openssl/x509v3.h>.
  *
  * IPv6 literals cannot reach here at all — the LDH gate below rejects ':' — but
  * this stays correct if that charset is ever loosened, because a v6 literal has
- * no dotted-quad shape either. Runs AFTER normalization, on the lowercased copy.
+ * no dotted-quad shape either. Runs AFTER normalization, on the lowercased
+ * copy.
  */
 static ngx_int_t
 ngx_autocert_requests_is_ipv4(const u_char *buf, size_t len)
@@ -117,7 +119,7 @@ ngx_autocert_requests_normalize(ngx_str_t *host, u_char *buf)
                      || (c >= '0' && c <= '9')
                      || c == '-'))
         {
-            return 0;                        /* not LDH (rejects '*', '_', etc.) */
+            return 0; /* not LDH (rejects '*', '_', etc.) */
         }
 
         /* a label cannot start with a hyphen */
@@ -143,9 +145,9 @@ ngx_autocert_requests_normalize(ngx_str_t *host, u_char *buf)
         return 0;
     }
 
-    /* An IP literal is LDH-clean (127.0.0.1 is all digits and dots), so the loop
-     * above happily accepts one. The runtime API is DNS-name-only — reject it,
-     * or a label producer could spend the bounded ledger/CA budget on an IP
+    /* An IP literal is LDH-clean (127.0.0.1 is all digits and dots), so the
+     * loop above happily accepts one. The runtime API is DNS-name-only — reject
+     * it, or a label producer could spend the bounded ledger/CA budget on an IP
      * order that policy says must be config-driven. */
     if (ngx_autocert_requests_is_ipv4(buf, host->len)) {
         return 0;
@@ -191,38 +193,37 @@ ngx_autocert_requests_insert_value(ngx_rbtree_node_t *temp,
     ngx_rbt_red(node);
 }
 
-
 /*
  * Shared init body. The OWNER uses the exact current version; a consumer-only
  * cycle uses the inactive-current stamp. That preserves layout identity while
  * making every helper inert when no autocert driver exists. Owner/consumer is
- * decided by WHICH init callback runs (the two thin wrappers below), never by the
- * `data` argument.
+ * decided by WHICH init callback runs (the two thin wrappers below), never by
+ * the `data` argument.
  *
- * RELOAD HANDOFF. nginx's zone-reuse path (ngx_cycle.c) copies the old mapping's
- * shm.addr onto the new zone and calls init(new_zone, old_zone->data) WITHOUT
- * setting shm.exists — that flag only covers the platform/named-shm case. So
- * `shpool->data` is the reliable reuse signal, and shm.exists alone is not: relying
- * on it re-allocated a fresh header on every reload and orphaned the whole request
- * tree. Adopt that header, but change only the activity bit of a layout proven to
- * be current. Never relabel an unknown layout: retiring workers can still
- * access the same mapping during a graceful reload, so in-place migration or reset
- * is unsafe.
+ * RELOAD HANDOFF. nginx's zone-reuse path (ngx_cycle.c) copies the old
+ * mapping's shm.addr onto the new zone and calls init(new_zone, old_zone->data)
+ * WITHOUT setting shm.exists — that flag only covers the platform/named-shm
+ * case. So `shpool->data` is the reliable reuse signal, and shm.exists alone is
+ * not: relying on it re-allocated a fresh header on every reload and orphaned
+ * the whole request tree. Adopt that header, but change only the activity bit
+ * of a layout proven to be current. Never relabel an unknown layout: retiring
+ * workers can still access the same mapping during a graceful reload, so
+ * in-place migration or reset is unsafe.
  */
 static ngx_int_t
 ngx_autocert_requests_init_body(ngx_shm_zone_t *shm_zone, ngx_uint_t owner)
 {
     ngx_slab_pool_t             *shpool;
     ngx_autocert_requests_sh_t  *sh;
-    ngx_uint_t                   api_version, inherited, legacy_empty, log_level;
+    ngx_uint_t api_version, inherited, legacy_empty, log_level;
 
     shpool = (ngx_slab_pool_t *) shm_zone->shm.addr;
 
     /* Reuse across reload: adopt the existing header, never re-allocate. The
      * header lives at shpool->data, i.e. INSIDE the arena that the reuse path
-     * carries over untouched — so a non-NULL shpool->data is itself the reliable
-     * reuse signal, and a fresh arena (mmap'd zero-filled) gives NULL. This is
-     * the same test the alpn and challenge zones use. */
+     * carries over untouched — so a non-NULL shpool->data is itself the
+     * reliable reuse signal, and a fresh arena (mmap'd zero-filled) gives NULL.
+     * This is the same test the alpn and challenge zones use. */
     sh = shpool->data;
 
     if (sh != NULL) {
@@ -232,8 +233,8 @@ ngx_autocert_requests_init_body(ngx_shm_zone_t *shm_zone, ngx_uint_t owner)
 
         /* Version 0 was the pre-fix consumer-only marker. It carried no layout
          * identity, so it is safe to promote only while the known legacy header
-         * proves that no nodes exist. Do not inspect any fields beyond the stamp
-         * for other foreign versions. */
+         * proves that no nodes exist. Do not inspect any fields beyond the
+         * stamp for other foreign versions. */
         legacy_empty = inherited == 0
                        && sh->count == 0
                        && sh->rbtree.root == &sh->sentinel
@@ -254,18 +255,20 @@ ngx_autocert_requests_init_body(ngx_shm_zone_t *shm_zone, ngx_uint_t owner)
 
         if (shm_zone->shm.log != NULL) {
             log_level = owner ? NGX_LOG_EMERG : NGX_LOG_WARN;
-            ngx_log_error(log_level, shm_zone->shm.log, 0,
-                          "autocert: requests zone has incompatible or "
-                          "ambiguous layout stamp %ui (compiled layout %ui); %s",
-                          inherited, (ngx_uint_t) NGX_AUTOCERT_API_VERSION,
-                          owner ? "stop nginx completely before enabling this "
-                                  "autocert module version"
-                                : "runtime certificate requests remain disabled");
+            ngx_log_error(
+                log_level, shm_zone->shm.log, 0,
+                "autocert: requests zone has incompatible or "
+                "ambiguous layout stamp %ui (compiled layout %ui); %s",
+                inherited, (ngx_uint_t) NGX_AUTOCERT_API_VERSION,
+                owner ? "stop nginx completely before enabling this "
+                        "autocert module version"
+                      : "runtime certificate requests remain disabled" );
         }
 
         /* A consumer remains safely inert because its helpers require the exact
-         * current active stamp. An owner must abort this reload: stamping current
-         * here would make it parse foreign nodes while old workers share them. */
+         * current active stamp. An owner must abort this reload: stamping
+         * current here would make it parse foreign nodes while old workers
+         * share them. */
         return owner ? NGX_ERROR : NGX_OK;
     }
 
@@ -294,9 +297,9 @@ ngx_autocert_requests_init_body(ngx_shm_zone_t *shm_zone, ngx_uint_t owner)
 ngx_int_t
 ngx_autocert_requests_init_zone(ngx_shm_zone_t *shm_zone, void *data)
 {
-    /* `data` (the old cycle's shm_zone->data) is deliberately unused: the header
-     * we inherit lives in the ARENA, at shpool->data, which the reuse path carries
-     * over untouched. See ngx_autocert_requests_init_body. */
+    /* `data` (the old cycle's shm_zone->data) is deliberately unused: the
+     * header we inherit lives in the ARENA, at shpool->data, which the reuse
+     * path carries over untouched. See ngx_autocert_requests_init_body. */
     (void) data;
     return ngx_autocert_requests_init_body(shm_zone, 1);
 }
@@ -521,12 +524,13 @@ ngx_autocert_requests_drain(ngx_shm_zone_t *shm_zone, ngx_pool_t *pool,
 
         rn = (ngx_autocert_request_t *) node;
 
-        /* Claim a node the driver should (re)order now: a fresh REQUESTED enqueue,
-         * or a FAILED node whose backoff has elapsed. set_state(FAILED,...) stamps
-         * next_eligible via the exponential backoff, so a runtime order that fails
-         * transiently (fresh request OR an A3.5 renewal re-queue) is retried once
-         * the window passes instead of being stranded FAILED forever. Both gate on
-         * next_eligible (0 = eligible immediately). */
+        /* Claim a node the driver should (re)order now: a fresh REQUESTED
+         * enqueue, or a FAILED node whose backoff has elapsed.
+         * set_state(FAILED,...) stamps next_eligible via the exponential
+         * backoff, so a runtime order that fails transiently (fresh request OR
+         * an A3.5 renewal re-queue) is retried once the window passes instead
+         * of being stranded FAILED forever. Both gate on next_eligible (0 =
+         * eligible immediately). */
         if ((rn->state != NGX_AUTOCERT_REQ_REQUESTED
              && rn->state != NGX_AUTOCERT_REQ_FAILED)
             || (rn->next_eligible != 0 && now < rn->next_eligible))
@@ -615,8 +619,9 @@ ngx_autocert_requests_list_issued(ngx_shm_zone_t *shm_zone, ngx_pool_t *pool,
             continue;
         }
 
-        /* Read-only: copy the host out, never touch node state. On alloc failure
-         * return what we have; the node is unchanged and re-listed next scan. */
+        /* Read-only: copy the host out, never touch node state. On alloc
+         * failure return what we have; the node is unchanged and re-listed next
+         * scan. */
         host = ngx_array_push(out);
         if (host == NULL) {
             ngx_shmtx_unlock(&shpool->mutex);

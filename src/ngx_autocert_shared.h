@@ -121,32 +121,33 @@ typedef struct stat  ngx_autocert_stat_t;
 typedef struct {
     ngx_uint_t       configured;     /* 0 => autocert not present in http{} */
     ngx_str_t        email;          /* account contact email, "" if none */
-    ngx_resolver_t  *resolver;       /* may be NULL if autocert_resolver unset */
+    ngx_resolver_t  *resolver; /* may be NULL if autocert_resolver unset */
     time_t           resolver_timeout;
     /*
      * M5: the CA-identifying knobs (directory URL, trust bundle, EAB) are no
-     * longer flat — they live per-CA in each ca_list entry's ca_conf. The driver
-     * iterates ca_list and reads entry->ca_conf directly (see driver.c). The flat
-     * `ca`/`ca_certificate`/`eab_*` fields the M4 bridge populated from ca_list[0]
-     * are gone.
+     * longer flat — they live per-CA in each ca_list entry's ca_conf. The
+     * driver iterates ca_list and reads entry->ca_conf directly (see driver.c).
+     * The flat `ca`/`ca_certificate`/`eab_*` fields the M4 bridge populated
+     * from ca_list[0] are gone.
      */
     ngx_str_t        dns_hook_add;     /* M16 dns-01 publish-TXT exec, "" */
     ngx_str_t        dns_hook_remove;  /* M16 dns-01 remove-TXT exec, "" */
     time_t           dns_propagation_delay;  /* M16 seconds after publish */
-    time_t           dns_hook_timeout;  /* M16 seconds to wait for a hook exec */
-    ngx_uint_t       key_type;       /* ngx_http_autocert_key_type_e; == cert_key_types[0],
-                                        kept for not-yet-array-aware consumers */
-    ngx_array_t     *cert_key_types; /* dual-cert (Phase B): ngx_uint_t list of leaf
-                                        key types to issue per name. 1 or 2 entries:
-                                        at most one EC and at most one RSA (the parser
-                                        rejects a duplicate family). The ACME
-                                        account/challenge keys stay EC regardless. */
-    ngx_uint_t       store;          /* ngx_http_autocert_store_e (disk layout) */
-    ngx_str_t        path;           /* cert store dir (holds the account key) */
+    time_t           dns_hook_timeout; /* M16 seconds to wait for a hook exec */
+    ngx_uint_t key_type; /* ngx_http_autocert_key_type_e; == cert_key_types[0],
+                            kept for not-yet-array-aware consumers */
+    ngx_array_t
+        *cert_key_types;    /* dual-cert (Phase B): ngx_uint_t list of leaf
+                               key types to issue per name. 1 or 2 entries:
+                               at most one EC and at most one RSA (the parser
+                               rejects a duplicate family). The ACME
+                               account/challenge keys stay EC regardless. */
+    ngx_uint_t       store; /* ngx_http_autocert_store_e (disk layout) */
+    ngx_str_t        path;  /* cert store dir (holds the account key) */
     time_t           renew_before;   /* M8: seconds before notAfter to renew */
     ngx_uint_t       challenge;      /* M10c: ngx_http_autocert_challenge_e */
-    ngx_str_t        profile;        /* ACME Profiles: newOrder profile, "" = omit
-                                        ("shortlived" for LE IP certs) */
+    ngx_str_t        profile; /* ACME Profiles: newOrder profile, "" = omit
+                                 ("shortlived" for LE IP certs) */
 
     /* M5: the challenge token store the helper writes (NULL if not set up). */
     ngx_shm_zone_t  *challenge_zone;
@@ -156,7 +157,8 @@ typedef struct {
      * outlives the helper run. */
     ngx_array_t     *names;
     /* M2: names grouped by CA (ngx_autocert_ca_entry_t array). One entry until
-     * M4 adds per-vhost CAs; the driver (M5) iterates this. NULL/empty = none. */
+     * M4 adds per-vhost CAs; the driver (M5) iterates this. NULL/empty = none.
+     */
     ngx_array_t     *ca_list;
     /* M5 test seed (token.len == 0 when unset). */
     ngx_str_t        test_token;
@@ -268,14 +270,14 @@ ngx_int_t ngx_autocert_get_conf(ngx_cycle_t *cycle, ngx_autocert_conf_t *out);
 #define ngx_autocert_fsync_dir(fd)      fsync(fd)
 #endif
 
-
 /*
- * renameat2(2) wrapper, shared by the store commit (order.c) and the account-key
- * migration (driver.c) — both fd-pinned, security-sensitive renames that must
- * not drift. Called via syscall() so the build needs no glibc renameat2 wrapper.
- * Returns NGX_OK on success; NGX_DECLINED when the syscall/flag is unsupported
- * (caller falls back or defers); NGX_ERROR otherwise with ngx_errno set (incl.
- * EEXIST for RENAME_NOREPLACE against an existing destination — caller inspects).
+ * renameat2(2) wrapper, shared by the store commit (order.c) and the
+ * account-key migration (driver.c) — both fd-pinned, security-sensitive renames
+ * that must not drift. Called via syscall() so the build needs no glibc
+ * renameat2 wrapper. Returns NGX_OK on success; NGX_DECLINED when the
+ * syscall/flag is unsupported (caller falls back or defers); NGX_ERROR
+ * otherwise with ngx_errno set (incl. EEXIST for RENAME_NOREPLACE against an
+ * existing destination — caller inspects).
  */
 #if defined(__linux__)
 #include <sys/syscall.h>
@@ -340,9 +342,8 @@ ngx_autocert_unlinkat(int dfd, const char *name, int flags)
     return unlinkat(dfd, name, flags);
 }
 
-
-static ngx_inline int
-ngx_autocert_fstatat(int dfd, const char *name, ngx_autocert_stat_t *st, int flags)
+static ngx_inline int ngx_autocert_fstatat( int dfd, const char *name,
+                                            ngx_autocert_stat_t *st, int flags )
 {
     return fstatat(dfd, name, st, flags);
 }
@@ -362,12 +363,12 @@ ngx_autocert_linkat(int oldfd, const char *oldpath, int newfd,
     return linkat(oldfd, oldpath, newfd, newpath, flags);
 }
 
-
 /*
- * fstat(2) on an already-open int fd from this family (ngx_autocert_open_file_path,
- * ngx_autocert_openat_mode, ...). Kept distinct from ngx_autocert_fstatat above:
- * that one stats a NAME relative to a pinned dir fd, this one stats the fd
- * itself once it is already open — the two call sites never overlap.
+ * fstat(2) on an already-open int fd from this family
+ * (ngx_autocert_open_file_path, ngx_autocert_openat_mode, ...). Kept distinct
+ * from ngx_autocert_fstatat above: that one stats a NAME relative to a pinned
+ * dir fd, this one stats the fd itself once it is already open — the two call
+ * sites never overlap.
  */
 static ngx_inline int
 ngx_autocert_fstat(int fd, ngx_autocert_stat_t *st)
@@ -921,11 +922,13 @@ ngx_autocert_split_root(const char *path, char *norm, size_t norm_cap,
         return -1;
     }
 
-    return ngx_autocert_win32_ntopen(NGX_AUTOCERT_INVALID_DIRFD, root,
+    return ngx_autocert_win32_ntopen(
+        NGX_AUTOCERT_INVALID_DIRFD, root,
         FILE_LIST_DIRECTORY | FILE_TRAVERSE | SYNCHRONIZE,
         NGX_AUTOCERT_FILE_OPEN,
-        NGX_AUTOCERT_FILE_DIRECTORY_FILE | NGX_AUTOCERT_FILE_OPEN_FOR_BACKUP_INTENT,
-        _O_RDONLY);
+        NGX_AUTOCERT_FILE_DIRECTORY_FILE |
+            NGX_AUTOCERT_FILE_OPEN_FOR_BACKUP_INTENT,
+        _O_RDONLY );
 }
 
 #endif /* NGX_WIN32 */
@@ -983,7 +986,8 @@ ngx_autocert_open_dir_path(const char *path, ngx_uint_t create,
         nfd = ngx_autocert_openat(dfd, name,
                      O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
         if (nfd == -1 && create && errno == ENOENT) {
-            if (ngx_autocert_mkdirat(dfd, name, mode) == -1 && errno != EEXIST) {
+            if ( ngx_autocert_mkdirat( dfd, name, mode ) == -1 &&
+                 errno != EEXIST ) {
                 err = errno;
                 (void) ngx_autocert_close(dfd);
                 errno = err;

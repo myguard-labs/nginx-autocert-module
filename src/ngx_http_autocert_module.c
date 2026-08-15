@@ -18,7 +18,7 @@
 #include <ngx_http.h>
 
 #include <ngx_http_ssl_module.h>
-#include <openssl/sha.h>           /* SHA256() for the per-CA account-dir hash */
+#include <openssl/sha.h> /* SHA256() for the per-CA account-dir hash */
 
 #include "ngx_http_autocert_conf.h"
 #include "ngx_autocert_challenge.h"
@@ -47,8 +47,9 @@
 /* Default zone size: enough for a few thousand names; admin-tunable later. */
 #define NGX_HTTP_AUTOCERT_ZONE_SIZE  (256 * 1024)
 
-/* autolabel A1 runtime-request registry: capped at NGX_AUTOCERT_REQUESTS_MAX (64)
- * short host strings + rbtree nodes; a small zone with slab headroom is plenty. */
+/* autolabel A1 runtime-request registry: capped at NGX_AUTOCERT_REQUESTS_MAX
+ * (64) short host strings + rbtree nodes; a small zone with slab headroom is
+ * plenty. */
 #define NGX_HTTP_AUTOCERT_REQUESTS_ZONE_SIZE  NGX_AUTOCERT_REQUESTS_ZONE_SIZE
 
 
@@ -103,8 +104,7 @@ static ngx_int_t ngx_http_autocert_add_name(ngx_conf_t *cf,
     ngx_http_autocert_main_conf_t *amcf, ngx_autocert_ca_conf_t *cac,
     ngx_http_autocert_srv_conf_t *ascf, ngx_str_t name);
 
-
-static ngx_command_t  ngx_http_autocert_commands[] = {
+static ngx_command_t ngx_http_autocert_commands[] = {
 
     /*
      * Valid in http{} and server{}. gzip-style: a single SRV-level conf with
@@ -112,23 +112,17 @@ static ngx_command_t  ngx_http_autocert_commands[] = {
      * slot, which ngx_http_merge_servers() then folds into every server,
      * giving a global default plus per-vhost override.
      */
-    { ngx_string("autocert"),
-      NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_CONF_TAKE1,
-      ngx_http_autocert,
-      NGX_HTTP_SRV_CONF_OFFSET,
-      0,
-      NULL },
+    { ngx_string( "autocert" ),
+      NGX_HTTP_MAIN_CONF | NGX_HTTP_SRV_CONF | NGX_CONF_TAKE1,
+      ngx_http_autocert, NGX_HTTP_SRV_CONF_OFFSET, 0, NULL },
 
     /* ACME account contact email (was the optional 2nd arg of `autocert on`;
      * split out for clarity so `autocert on|off` is a plain switch). MAIN+SRV,
      * per-CA: the first non-empty contact in a CA group supplies that CA's
      * newAccount email (same resolution as before). */
-    { ngx_string("autocert_contact"),
-      NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_CONF_TAKE1,
-      ngx_http_autocert_contact,
-      NGX_HTTP_SRV_CONF_OFFSET,
-      0,
-      NULL },
+    { ngx_string( "autocert_contact" ),
+      NGX_HTTP_MAIN_CONF | NGX_HTTP_SRV_CONF | NGX_CONF_TAKE1,
+      ngx_http_autocert_contact, NGX_HTTP_SRV_CONF_OFFSET, 0, NULL },
 
     /*
      * M4 (per-vhost multi-CA, #15): the CA-identifying knobs are MAIN+SRV
@@ -140,22 +134,18 @@ static ngx_command_t  ngx_http_autocert_commands[] = {
      * one ACME policy.)
      */
 
-    { ngx_string("autocert_ca"),
-      NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_CONF_TAKE1,
-      ngx_conf_set_str_slot,
-      NGX_HTTP_SRV_CONF_OFFSET,
-      offsetof(ngx_http_autocert_srv_conf_t, ca_conf.ca),
-      NULL },
+    { ngx_string( "autocert_ca" ),
+      NGX_HTTP_MAIN_CONF | NGX_HTTP_SRV_CONF | NGX_CONF_TAKE1,
+      ngx_conf_set_str_slot, NGX_HTTP_SRV_CONF_OFFSET,
+      offsetof( ngx_http_autocert_srv_conf_t, ca_conf.ca ), NULL },
 
     /* Shorthand for the LE staging directory URL; mutually exclusive with
      * autocert_ca. Use in CI/CD to exercise the full issuance flow without
      * consuming production rate limits. */
-    { ngx_string("autocert_staging"),
-      NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_CONF_FLAG,
-      ngx_conf_set_flag_slot,
-      NGX_HTTP_SRV_CONF_OFFSET,
-      offsetof(ngx_http_autocert_srv_conf_t, ca_conf.staging),
-      NULL },
+    { ngx_string( "autocert_staging" ),
+      NGX_HTTP_MAIN_CONF | NGX_HTTP_SRV_CONF | NGX_CONF_FLAG,
+      ngx_conf_set_flag_slot, NGX_HTTP_SRV_CONF_OFFSET,
+      offsetof( ngx_http_autocert_srv_conf_t, ca_conf.staging ), NULL },
 
     /*
      * D5 (#16): declare wildcard SAN(s) for this scope without putting a
@@ -163,89 +153,57 @@ static ngx_command_t  ngx_http_autocert_commands[] = {
      * catch-all). MAIN+SRV: http{} sets an instance-wide wildcard inherited by
      * every vhost; a server{} occurrence appends its own. Repeatable / 1+ args.
      * dns-01 only (enforced at postconfig). A concrete server_name covered by a
-     * declared wildcard is served from the wildcard cert, not issued separately.
+     * declared wildcard is served from the wildcard cert, not issued
+     * separately.
      */
-    { ngx_string("autocert_wildcard"),
-      NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_CONF_1MORE,
-      ngx_http_autocert_wildcard,
-      NGX_HTTP_SRV_CONF_OFFSET,
-      0,
-      NULL },
+    { ngx_string( "autocert_wildcard" ),
+      NGX_HTTP_MAIN_CONF | NGX_HTTP_SRV_CONF | NGX_CONF_1MORE,
+      ngx_http_autocert_wildcard, NGX_HTTP_SRV_CONF_OFFSET, 0, NULL },
 
-    { ngx_string("autocert_renew_before"),
-      NGX_HTTP_MAIN_CONF|NGX_CONF_TAKE1,
-      ngx_conf_set_sec_slot,
+    { ngx_string( "autocert_renew_before" ),
+      NGX_HTTP_MAIN_CONF | NGX_CONF_TAKE1, ngx_conf_set_sec_slot,
       NGX_HTTP_MAIN_CONF_OFFSET,
-      offsetof(ngx_http_autocert_main_conf_t, renew_before),
-      NULL },
+      offsetof( ngx_http_autocert_main_conf_t, renew_before ), NULL },
 
     /* autolabel GC: evict runtime registry nodes idle longer than this (the
      * consumer's ensure() and the driver's set_state() both refresh a node's
      * last_seen). 0 disables eviction. Default 7d (init_main_conf). */
-    { ngx_string("autocert_runtime_ttl"),
-      NGX_HTTP_MAIN_CONF|NGX_CONF_TAKE1,
-      ngx_conf_set_sec_slot,
-      NGX_HTTP_MAIN_CONF_OFFSET,
-      offsetof(ngx_http_autocert_main_conf_t, runtime_ttl),
-      NULL },
+    { ngx_string( "autocert_runtime_ttl" ), NGX_HTTP_MAIN_CONF | NGX_CONF_TAKE1,
+      ngx_conf_set_sec_slot, NGX_HTTP_MAIN_CONF_OFFSET,
+      offsetof( ngx_http_autocert_main_conf_t, runtime_ttl ), NULL },
 
-    { ngx_string("autocert_key_type"),
-      NGX_HTTP_MAIN_CONF|NGX_CONF_1MORE,
-      ngx_http_autocert_key_type,
-      NGX_HTTP_MAIN_CONF_OFFSET,
-      0,
-      NULL },
+    { ngx_string( "autocert_key_type" ), NGX_HTTP_MAIN_CONF | NGX_CONF_1MORE,
+      ngx_http_autocert_key_type, NGX_HTTP_MAIN_CONF_OFFSET, 0, NULL },
 
-    { ngx_string("autocert_store_layout"),
-      NGX_HTTP_MAIN_CONF|NGX_CONF_TAKE1,
-      ngx_http_autocert_store,
-      NGX_HTTP_MAIN_CONF_OFFSET,
-      0,
-      NULL },
+    { ngx_string( "autocert_store_layout" ),
+      NGX_HTTP_MAIN_CONF | NGX_CONF_TAKE1, ngx_http_autocert_store,
+      NGX_HTTP_MAIN_CONF_OFFSET, 0, NULL },
 
-    { ngx_string("autocert_store_path"),
-      NGX_HTTP_MAIN_CONF|NGX_CONF_TAKE1,
-      ngx_conf_set_str_slot,
-      NGX_HTTP_MAIN_CONF_OFFSET,
-      offsetof(ngx_http_autocert_main_conf_t, path),
-      NULL },
+    { ngx_string( "autocert_store_path" ), NGX_HTTP_MAIN_CONF | NGX_CONF_TAKE1,
+      ngx_conf_set_str_slot, NGX_HTTP_MAIN_CONF_OFFSET,
+      offsetof( ngx_http_autocert_main_conf_t, path ), NULL },
 
-    { ngx_string("autocert_challenge"),
-      NGX_HTTP_MAIN_CONF|NGX_CONF_TAKE1,
-      ngx_http_autocert_challenge,
-      NGX_HTTP_MAIN_CONF_OFFSET,
-      0,
-      NULL },
+    { ngx_string( "autocert_challenge" ), NGX_HTTP_MAIN_CONF | NGX_CONF_TAKE1,
+      ngx_http_autocert_challenge, NGX_HTTP_MAIN_CONF_OFFSET, 0, NULL },
 
-    { ngx_string("autocert_profile"),
-      NGX_HTTP_MAIN_CONF|NGX_CONF_TAKE1,
-      ngx_conf_set_str_slot,
-      NGX_HTTP_MAIN_CONF_OFFSET,
-      offsetof(ngx_http_autocert_main_conf_t, profile),
-      NULL },
+    { ngx_string( "autocert_profile" ), NGX_HTTP_MAIN_CONF | NGX_CONF_TAKE1,
+      ngx_conf_set_str_slot, NGX_HTTP_MAIN_CONF_OFFSET,
+      offsetof( ngx_http_autocert_main_conf_t, profile ), NULL },
 
     /* M4b: outbound ACME client transport knobs (http{}-global). */
 
-    { ngx_string("autocert_resolver"),
-      NGX_HTTP_MAIN_CONF|NGX_CONF_1MORE,
-      ngx_http_autocert_resolver,
-      NGX_HTTP_MAIN_CONF_OFFSET,
-      0,
-      NULL },
+    { ngx_string( "autocert_resolver" ), NGX_HTTP_MAIN_CONF | NGX_CONF_1MORE,
+      ngx_http_autocert_resolver, NGX_HTTP_MAIN_CONF_OFFSET, 0, NULL },
 
-    { ngx_string("autocert_resolver_timeout"),
-      NGX_HTTP_MAIN_CONF|NGX_CONF_TAKE1,
-      ngx_conf_set_sec_slot,
+    { ngx_string( "autocert_resolver_timeout" ),
+      NGX_HTTP_MAIN_CONF | NGX_CONF_TAKE1, ngx_conf_set_sec_slot,
       NGX_HTTP_MAIN_CONF_OFFSET,
-      offsetof(ngx_http_autocert_main_conf_t, resolver_timeout),
-      NULL },
+      offsetof( ngx_http_autocert_main_conf_t, resolver_timeout ), NULL },
 
-    { ngx_string("autocert_ca_trusted_certificate"),
-      NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_CONF_TAKE1,
-      ngx_conf_set_str_slot,
-      NGX_HTTP_SRV_CONF_OFFSET,
-      offsetof(ngx_http_autocert_srv_conf_t, ca_conf.ca_certificate),
-      NULL },
+    { ngx_string( "autocert_ca_trusted_certificate" ),
+      NGX_HTTP_MAIN_CONF | NGX_HTTP_SRV_CONF | NGX_CONF_TAKE1,
+      ngx_conf_set_str_slot, NGX_HTTP_SRV_CONF_OFFSET,
+      offsetof( ngx_http_autocert_srv_conf_t, ca_conf.ca_certificate ), NULL },
 
     /* Trust anchor for the ISSUED chain, checked in order_validate_cert().
      * Deliberately separate from autocert_ca_trusted_certificate: that one
@@ -253,121 +211,100 @@ static ngx_command_t  ngx_http_autocert_commands[] = {
      * different root than it signs certificates with. Unset = chain
      * verification is skipped, preserving pre-1.3.0 behaviour. */
 
-    { ngx_string("autocert_ca_issuance_certificate"),
-      NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_CONF_TAKE1,
-      ngx_conf_set_str_slot,
-      NGX_HTTP_SRV_CONF_OFFSET,
-      offsetof(ngx_http_autocert_srv_conf_t, ca_conf.issuance_certificate),
+    { ngx_string( "autocert_ca_issuance_certificate" ),
+      NGX_HTTP_MAIN_CONF | NGX_HTTP_SRV_CONF | NGX_CONF_TAKE1,
+      ngx_conf_set_str_slot, NGX_HTTP_SRV_CONF_OFFSET,
+      offsetof( ngx_http_autocert_srv_conf_t, ca_conf.issuance_certificate ),
       NULL },
 
     /* M15: External Account Binding (RFC 8555 §7.3.4) for commercial CAs
      * (ZeroSSL, Sectigo, Google) that gate newAccount behind a CA-issued
      * key-id + HMAC key. Both-or-neither — enforced in init_main_conf. */
 
-    { ngx_string("autocert_eab_kid"),
-      NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_CONF_TAKE1,
-      ngx_conf_set_str_slot,
-      NGX_HTTP_SRV_CONF_OFFSET,
-      offsetof(ngx_http_autocert_srv_conf_t, ca_conf.eab_kid),
-      NULL },
+    { ngx_string( "autocert_eab_kid" ),
+      NGX_HTTP_MAIN_CONF | NGX_HTTP_SRV_CONF | NGX_CONF_TAKE1,
+      ngx_conf_set_str_slot, NGX_HTTP_SRV_CONF_OFFSET,
+      offsetof( ngx_http_autocert_srv_conf_t, ca_conf.eab_kid ), NULL },
 
-    { ngx_string("autocert_eab_hmac_key"),
-      NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_CONF_TAKE1,
-      ngx_conf_set_str_slot,
-      NGX_HTTP_SRV_CONF_OFFSET,
-      offsetof(ngx_http_autocert_srv_conf_t, ca_conf.eab_hmac_key),
-      NULL },
+    { ngx_string( "autocert_eab_hmac_key" ),
+      NGX_HTTP_MAIN_CONF | NGX_HTTP_SRV_CONF | NGX_CONF_TAKE1,
+      ngx_conf_set_str_slot, NGX_HTTP_SRV_CONF_OFFSET,
+      offsetof( ngx_http_autocert_srv_conf_t, ca_conf.eab_hmac_key ), NULL },
 
     /* M16: dns-01 operator exec hooks (D3). Both required when
      * autocert_challenge dns-01 (enforced in init_main_conf). Each is run
      * fork+execve with argv {hook, _acme-challenge.<domain>, <txt>} to publish
      * (add) / remove the TXT record. Paths must be absolute. http{}-global. */
 
-    { ngx_string("autocert_dns_hook_add"),
-      NGX_HTTP_MAIN_CONF|NGX_CONF_TAKE1,
-      ngx_conf_set_str_slot,
+    { ngx_string( "autocert_dns_hook_add" ),
+      NGX_HTTP_MAIN_CONF | NGX_CONF_TAKE1, ngx_conf_set_str_slot,
       NGX_HTTP_MAIN_CONF_OFFSET,
-      offsetof(ngx_http_autocert_main_conf_t, dns_hook_add),
-      NULL },
+      offsetof( ngx_http_autocert_main_conf_t, dns_hook_add ), NULL },
 
-    { ngx_string("autocert_dns_hook_remove"),
-      NGX_HTTP_MAIN_CONF|NGX_CONF_TAKE1,
-      ngx_conf_set_str_slot,
+    { ngx_string( "autocert_dns_hook_remove" ),
+      NGX_HTTP_MAIN_CONF | NGX_CONF_TAKE1, ngx_conf_set_str_slot,
       NGX_HTTP_MAIN_CONF_OFFSET,
-      offsetof(ngx_http_autocert_main_conf_t, dns_hook_remove),
-      NULL },
+      offsetof( ngx_http_autocert_main_conf_t, dns_hook_remove ), NULL },
 
-    { ngx_string("autocert_dns_propagation_delay"),
-      NGX_HTTP_MAIN_CONF|NGX_CONF_TAKE1,
-      ngx_conf_set_sec_slot,
+    { ngx_string( "autocert_dns_propagation_delay" ),
+      NGX_HTTP_MAIN_CONF | NGX_CONF_TAKE1, ngx_conf_set_sec_slot,
       NGX_HTTP_MAIN_CONF_OFFSET,
-      offsetof(ngx_http_autocert_main_conf_t, dns_propagation_delay),
-      NULL },
+      offsetof( ngx_http_autocert_main_conf_t, dns_propagation_delay ), NULL },
 
-    { ngx_string("autocert_dns_hook_timeout"),
-      NGX_HTTP_MAIN_CONF|NGX_CONF_TAKE1,
-      ngx_conf_set_sec_slot,
+    { ngx_string( "autocert_dns_hook_timeout" ),
+      NGX_HTTP_MAIN_CONF | NGX_CONF_TAKE1, ngx_conf_set_sec_slot,
       NGX_HTTP_MAIN_CONF_OFFSET,
-      offsetof(ngx_http_autocert_main_conf_t, dns_hook_timeout),
-      NULL },
+      offsetof( ngx_http_autocert_main_conf_t, dns_hook_timeout ), NULL },
 
 #if (NGX_AUTOCERT_TEST)
     /* TEST-ONLY: seed one token->keyauth into the challenge store at startup so
      * the HTTP-01 serve path can be tested before the order flow (M6) exists.
      * Compiled in ONLY under -DNGX_AUTOCERT_TEST (CI); never in a production
      * build, so a stray directive cannot seed a forged key authorization. */
-    { ngx_string("autocert_test_challenge"),
-      NGX_HTTP_MAIN_CONF|NGX_CONF_TAKE2,
-      ngx_http_autocert_test_challenge,
-      NGX_HTTP_MAIN_CONF_OFFSET,
-      0,
-      NULL },
+    { ngx_string( "autocert_test_challenge" ),
+      NGX_HTTP_MAIN_CONF | NGX_CONF_TAKE2, ngx_http_autocert_test_challenge,
+      NGX_HTTP_MAIN_CONF_OFFSET, 0, NULL },
 
     /* TEST-ONLY: seed one domain's tls-alpn-01 challenge cert into the ALPN
      * store at startup (M10b) so the ALPN serve path can be tested before the
-     * order wiring (M10c) exists. Compiled in ONLY under -DNGX_AUTOCERT_TEST. */
-    { ngx_string("autocert_test_alpn"),
-      NGX_HTTP_MAIN_CONF|NGX_CONF_TAKE2,
-      ngx_http_autocert_test_alpn,
-      NGX_HTTP_MAIN_CONF_OFFSET,
-      0,
-      NULL },
+     * order wiring (M10c) exists. Compiled in ONLY under -DNGX_AUTOCERT_TEST.
+     */
+    { ngx_string( "autocert_test_alpn" ), NGX_HTTP_MAIN_CONF | NGX_CONF_TAKE2,
+      ngx_http_autocert_test_alpn, NGX_HTTP_MAIN_CONF_OFFSET, 0, NULL },
 
     /* TEST-ONLY (autolabel C): seed a single host into the requests_zone as
      * REQUESTED at startup, exercising the SAME insertion path a real
      * consumer module (label-autoconf) would use, so the Pebble e2e can drive
      * the full runtime-issuance lifecycle (A3 drain/order -> A4 serve ->
      * A6 persist) end to end. Compiled in ONLY under -DNGX_AUTOCERT_TEST. */
-    { ngx_string("autocert_test_runtime_request"),
-      NGX_HTTP_MAIN_CONF|NGX_CONF_TAKE1,
-      ngx_http_autocert_test_runtime_request,
-      NGX_HTTP_MAIN_CONF_OFFSET,
-      0,
+    { ngx_string( "autocert_test_runtime_request" ),
+      NGX_HTTP_MAIN_CONF | NGX_CONF_TAKE1,
+      ngx_http_autocert_test_runtime_request, NGX_HTTP_MAIN_CONF_OFFSET, 0,
       NULL },
 #endif
 
-      ngx_null_command
-};
-
+    ngx_null_command };
 
 /*
  * Worker-0 ACME driver gate. The ACME engine must run in exactly ONE process,
  * so arm it only on worker 0 of a normal (master+workers) run, or in the single
  * process of `master_process off`. ngx_worker is the 0-based worker index; the
  * NGX_PROCESS_SINGLE case (single-process mode) has ngx_worker == 0 too, so the
- * single gate covers both. Other workers (and the master / cache procs / signaller)
- * return without arming — they only serve challenges from the shared zone.
+ * single gate covers both. Other workers (and the master / cache procs /
+ * signaller) return without arming — they only serve challenges from the shared
+ * zone.
  */
 /*
  * Single-process (`master_process off`) reload tracker. In single-process mode
  * the process survives a SIGHUP and nginx re-runs every module's init_module
  * (with the new cycle) but NEVER calls exit_process/init_process again. We use
  * init_module as the reload hook there: the FIRST init_module is the initial
- * boot (init_process still does the arming), every later one is a reload and must
- * rebind the driver + serve state to the new cycle. The flag is set in
+ * boot (init_process still does the arming), every later one is a reload and
+ * must rebind the driver + serve state to the new cycle. The flag is set in
  * init_process so init_module can tell boot from reload. Irrelevant in
- * master+workers mode (init_module runs in the master, which holds no per-worker
- * driver/serve state; fresh workers re-init via fork each generation).
+ * master+workers mode (init_module runs in the master, which holds no
+ * per-worker driver/serve state; fresh workers re-init via fork each
+ * generation).
  */
 static ngx_uint_t  ngx_http_autocert_single_started;
 
@@ -431,22 +368,20 @@ static ngx_http_module_t  ngx_http_autocert_module_ctx = {
     NULL                                   /* merge location configuration */
 };
 
-
-ngx_module_t  ngx_http_autocert_module = {
+ngx_module_t ngx_http_autocert_module = {
     NGX_MODULE_V1,
-    &ngx_http_autocert_module_ctx,     /* module context */
-    ngx_http_autocert_commands,        /* module directives */
-    NGX_HTTP_MODULE,                   /* module type */
-    NULL,                              /* init master */
-    ngx_http_autocert_init_module,     /* init module (single-process reload hook) */
-    ngx_http_autocert_init_process,    /* init process (arms ACME on worker 0) */
-    NULL,                              /* init thread */
-    NULL,                              /* exit thread */
-    ngx_http_autocert_exit_process,    /* exit process (tears ACME down) */
-    NULL,                              /* exit master */
-    NGX_MODULE_V1_PADDING
-};
-
+    &ngx_http_autocert_module_ctx,  /* module context */
+    ngx_http_autocert_commands,     /* module directives */
+    NGX_HTTP_MODULE,                /* module type */
+    NULL,                           /* init master */
+    ngx_http_autocert_init_module,  /* init module (single-process reload hook)
+                                     */
+    ngx_http_autocert_init_process, /* init process (arms ACME on worker 0) */
+    NULL,                           /* init thread */
+    NULL,                           /* exit thread */
+    ngx_http_autocert_exit_process, /* exit process (tears ACME down) */
+    NULL,                           /* exit master */
+    NGX_MODULE_V1_PADDING };
 
 static void *
 ngx_http_autocert_create_main_conf(ngx_conf_t *cf)
@@ -470,7 +405,8 @@ ngx_http_autocert_create_main_conf(ngx_conf_t *cf)
     /* resolver pointer + ca_certificate zeroed by pcalloc */
     amcf->resolver_timeout = NGX_CONF_UNSET;
 
-    /* dns_hook_add/remove zeroed by pcalloc; delay+timeout defaulted in init. */
+    /* dns_hook_add/remove zeroed by pcalloc; delay+timeout defaulted in init.
+     */
     amcf->dns_propagation_delay = NGX_CONF_UNSET;
     amcf->dns_hook_timeout = NGX_CONF_UNSET;
 
@@ -499,11 +435,12 @@ ngx_http_autocert_init_main_conf(ngx_conf_t *cf, void *conf)
 
     /*
      * Clamp renew_before to a sane upper bound. It is subtracted from a cert's
-     * notAfter to decide the renew instant (driver: now >= notAfter - renew_before);
-     * a value at/above the cert lifetime makes that always-true, so every sweep
-     * reissues — hammering the CA and tripping ACME rate limits (self-DoS). No
-     * real deployment renews more than ~89d ahead (Let's Encrypt certs live 90d).
-     * Reject rather than silently clamp so a fat-fingered value is obvious.
+     * notAfter to decide the renew instant (driver: now >= notAfter -
+     * renew_before); a value at/above the cert lifetime makes that always-true,
+     * so every sweep reissues — hammering the CA and tripping ACME rate limits
+     * (self-DoS). No real deployment renews more than ~89d ahead (Let's Encrypt
+     * certs live 90d). Reject rather than silently clamp so a fat-fingered
+     * value is obvious.
      */
     if (amcf->renew_before <= 0 || amcf->renew_before > 89 * 24 * 60 * 60) {
         ngx_log_error(NGX_LOG_EMERG, cf->log, 0,
@@ -581,9 +518,9 @@ ngx_http_autocert_init_main_conf(ngx_conf_t *cf, void *conf)
      * M7: make the store path absolute relative to the nginx prefix, NOT the
      * process CWD. The helper (account.key) and the serve path (cert store)
      * both read it; the helper's CWD is undefined, so a relative path would
-     * resolve differently between config-time and the helper. ngx_conf_full_name
-     * prepends the prefix when the path is not already absolute. (Folds the M6b
-     * residual.)
+     * resolve differently between config-time and the helper.
+     * ngx_conf_full_name prepends the prefix when the path is not already
+     * absolute. (Folds the M6b residual.)
      */
     if (ngx_conf_full_name(cf->cycle, &amcf->path, 1) != NGX_OK) {
         return NGX_CONF_ERROR;
@@ -596,9 +533,9 @@ ngx_http_autocert_init_main_conf(ngx_conf_t *cf, void *conf)
     /*
      * A non-positive dns_hook_timeout reaches the driver as 0, which makes the
      * wait loop SIGKILL the hook on the first poll tick — silently breaking ALL
-     * dns-01 issuance. Reject it at config time rather than fail mysteriously at
-     * runtime. (resolver_timeout / dns_propagation_delay tolerate 0 = "no wait",
-     * but a 0 hook timeout is never meaningful.)
+     * dns-01 issuance. Reject it at config time rather than fail mysteriously
+     * at runtime. (resolver_timeout / dns_propagation_delay tolerate 0 = "no
+     * wait", but a 0 hook timeout is never meaningful.)
      */
     if (amcf->dns_hook_timeout <= 0) {
         ngx_log_error(NGX_LOG_EMERG, cf->log, 0,
@@ -665,7 +602,8 @@ ngx_http_autocert_create_srv_conf(ngx_conf_t *cf)
      * needs an explicit UNSET so a future merge_value can detect "not set". */
     ascf->ca_conf.staging = NGX_CONF_UNSET;
 
-    /* D5: UNSET_PTR so merge can tell "no autocert_wildcard here" from "empty". */
+    /* D5: UNSET_PTR so merge can tell "no autocert_wildcard here" from "empty".
+     */
     ascf->wildcards = NGX_CONF_UNSET_PTR;
 
     return ascf;
@@ -695,13 +633,13 @@ ngx_http_autocert_merge_srv_conf(ngx_conf_t *cf, void *parent, void *child)
      *
      * Rule 2 (don't leak CA-bound creds across CAs): the trust bundle + EAB
      * credentials inherit from the global ONLY when the server did NOT switch
-     * CAs. A server that overrides the CA but leaves EAB/trust unset gets none —
-     * inheriting CA-A's EAB key or pinned root for CA-B would send the wrong
+     * CAs. A server that overrides the CA but leaves EAB/trust unset gets none
+     * — inheriting CA-A's EAB key or pinned root for CA-B would send the wrong
      * credentials / pin the wrong root (Codex M4 #2). Such a server must set
      * them explicitly.
      *
-     * Strings use a raw data==NULL inherit (NOT ngx_conf_merge_str_value) so the
-     * "unset" signal survives into postconfig's resolve step.
+     * Strings use a raw data==NULL inherit (NOT ngx_conf_merge_str_value) so
+     * the "unset" signal survives into postconfig's resolve step.
      */
     {
         ngx_flag_t  inherit_selector;
@@ -832,11 +770,10 @@ ngx_http_autocert_effective_ca(ngx_http_autocert_main_conf_t *amcf,
     return &ascf->ca_conf;
 }
 
-
 /*
  * M2: find (or create) the ca_list entry for a CA, keyed by its canonical
- * directory URL. ca_hash = SHA-256(url)[:8] as 16 lowercase hex, used by M3 for the
- * per-CA account dir. Returns NULL on alloc failure.
+ * directory URL. ca_hash = SHA-256(url)[:8] as 16 lowercase hex, used by M3 for
+ * the per-CA account dir. Returns NULL on alloc failure.
  */
 static ngx_autocert_ca_entry_t *
 ngx_http_autocert_ca_entry(ngx_conf_t *cf,
@@ -849,9 +786,9 @@ ngx_http_autocert_ca_entry(ngx_conf_t *cf,
 
     e = amcf->ca_list->elts;
     for (i = 0; i < amcf->ca_list->nelts; i++) {
-        if (e[i].ca_conf.ca.len != cac->ca.len
-            || ngx_strncmp(e[i].ca_conf.ca.data, cac->ca.data, cac->ca.len) != 0)
-        {
+        if ( e[i].ca_conf.ca.len != cac->ca.len ||
+             ngx_strncmp( e[i].ca_conf.ca.data, cac->ca.data, cac->ca.len ) !=
+                 0 ) {
             continue;
         }
 
@@ -933,8 +870,9 @@ ngx_http_autocert_ca_entry(ngx_conf_t *cf,
 
     /*
      * M3: per-CA account key path = <path>/accounts/<ca_hash>/account.key.
-     * amcf->path is already absolute here (init_main_conf ran first). The driver
-     * mkdir's the dirs + migrates the old flat <path>/account.key at runtime.
+     * amcf->path is already absolute here (init_main_conf ran first). The
+     * driver mkdir's the dirs + migrates the old flat <path>/account.key at
+     * runtime.
      */
     {
         u_char  *p;
@@ -958,12 +896,12 @@ ngx_http_autocert_ca_entry(ngx_conf_t *cf,
     return e;
 }
 
-
 /*
  * Bind a vhost's account contact to its CA group. First non-empty email in the
- * group wins (becomes the CA's newAccount contact); a second, DIFFERENT non-empty
- * email for the SAME CA is a config error — one CA has one account, so one
- * contact. An empty vhost email never overrides an already-set group contact.
+ * group wins (becomes the CA's newAccount contact); a second, DIFFERENT
+ * non-empty email for the SAME CA is a config error — one CA has one account,
+ * so one contact. An empty vhost email never overrides an already-set group
+ * contact.
  */
 static ngx_int_t
 ngx_http_autocert_bind_ca_email(ngx_conf_t *cf, ngx_autocert_ca_entry_t *ce,
@@ -1002,7 +940,8 @@ ngx_http_autocert_bind_ca_email(ngx_conf_t *cf, ngx_autocert_ca_entry_t *ce,
  * D5: autocert_wildcard setter. Validates each arg is a sole-leading-label
  * wildcard ("*.example.com") and accumulates them on the scope's srv_conf
  * (lazily creating the array), so repeated directives and the MAIN+SRV merge
- * both append. dns-01-only is checked at postconfig (challenge isn't known yet).
+ * both append. dns-01-only is checked at postconfig (challenge isn't known
+ * yet).
  */
 static char *
 ngx_http_autocert_wildcard(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
@@ -1069,15 +1008,15 @@ ngx_http_autocert_is_wildcard(ngx_str_t *name)
      * label and no further '*'. data[1] is the separating '.', so the byte at
      * data+2 must not be another '.' (that would be a leading empty label). */
     if (name->data[2] == '.' || end[-1] == '.') {
-        return 0;                                   /* leading/trailing empty label */
+        return 0; /* leading/trailing empty label */
     }
 
     for (p = name->data + 2; p < end; p++) {
         if (*p == '*') {
-            return 0;                               /* only the leading-label '*' */
+            return 0; /* only the leading-label '*' */
         }
         if (*p == '.' && p[1] == '.') {
-            return 0;                               /* consecutive dots = empty label */
+            return 0; /* consecutive dots = empty label */
         }
     }
 
@@ -1104,14 +1043,15 @@ ngx_http_autocert_name_covered(ngx_str_t *name, ngx_array_t *wildcards)
     /* A wildcard name is never "covered" by a wildcard — only concrete names
      * are suppressed. (Without this, "*.example.com" would match the wildcard
      * "*.example.com" via the rest-compare below and get routed through the
-     * wrong path; a wildcard server_name must keep its own server_name flow.) */
+     * wrong path; a wildcard server_name must keep its own server_name flow.)
+     */
     if (name->len != 0 && name->data[0] == '*') {
         return 0;
     }
 
     dot = ngx_strlchr(name->data, name->data + name->len, '.');
     if (dot == NULL || dot == name->data || dot + 1 >= name->data + name->len) {
-        return 0;                       /* no label, empty label, or trailing dot */
+        return 0; /* no label, empty label, or trailing dot */
     }
 
     rest = dot + 1;
@@ -1130,13 +1070,13 @@ ngx_http_autocert_name_covered(ngx_str_t *name, ngx_array_t *wildcards)
     return 0;
 }
 
-
 /*
  * D5: add one issuable name to the global set + its CA group (the per-name body
- * lifted out of postconfig so both the server_name loop and the autocert_wildcard
- * loop share it). Dedups against amcf->names; a name already claimed by a
- * different CA is an emerg (one name = one cert = one CA); a same-CA dup still
- * routes through ca_entry so its trust/EAB-conflict gate + email bind run.
+ * lifted out of postconfig so both the server_name loop and the
+ * autocert_wildcard loop share it). Dedups against amcf->names; a name already
+ * claimed by a different CA is an emerg (one name = one cert = one CA); a
+ * same-CA dup still routes through ca_entry so its trust/EAB-conflict gate +
+ * email bind run.
  */
 static ngx_int_t
 ngx_http_autocert_add_name(ngx_conf_t *cf, ngx_http_autocert_main_conf_t *amcf,
@@ -1161,11 +1101,11 @@ ngx_http_autocert_add_name(ngx_conf_t *cf, ngx_http_autocert_main_conf_t *amcf,
     if (i < amcf->names->nelts) {
         /*
          * The name is already claimed by an earlier vhost. There is ONE stored
-         * certificate per name, so it must resolve to ONE CA. If this vhost pins
-         * it to a DIFFERENT CA than the one that first claimed it, that is an
-         * ambiguous config (which CA signs the single cert?) — reject at parse
-         * rather than silently keeping the first CA (Codex M5 LOW). Same CA =
-         * the harmless dup we skip.
+         * certificate per name, so it must resolve to ONE CA. If this vhost
+         * pins it to a DIFFERENT CA than the one that first claimed it, that is
+         * an ambiguous config (which CA signs the single cert?) — reject at
+         * parse rather than silently keeping the first CA (Codex M5 LOW). Same
+         * CA = the harmless dup we skip.
          */
         ngx_autocert_ca_entry_t  *owner = NULL;
         ngx_uint_t                k, m;
@@ -1198,10 +1138,11 @@ ngx_http_autocert_add_name(ngx_conf_t *cf, ngx_http_autocert_main_conf_t *amcf,
 
         /* Dup name, same CA URL: this vhost adds no new name, but it must still
          * pass the SAME trust/EAB-conflict gate a name-contributing vhost does
-         * (ngx_http_autocert_ca_entry rejects a same-URL group reconfigured with
-         * a different ca_certificate/EAB), and its `autocert on <email>` binds to
-         * the CA group's contact. Route through ca_entry so the dup path can't
-         * bypass that validation; the entry already exists so no group grows. */
+         * (ngx_http_autocert_ca_entry rejects a same-URL group reconfigured
+         * with a different ca_certificate/EAB), and its `autocert on <email>`
+         * binds to the CA group's contact. Route through ca_entry so the dup
+         * path can't bypass that validation; the entry already exists so no
+         * group grows. */
         if (owner != NULL) {
             ngx_autocert_ca_entry_t  *grp;
 
@@ -1226,11 +1167,11 @@ ngx_http_autocert_add_name(ngx_conf_t *cf, ngx_http_autocert_main_conf_t *amcf,
 
     *slot = name;
 
-    /* M2: first-wins by CA — a new global name also joins the group of the CA of
-     * the server that introduced it. Create the group lazily here (only now is
-     * there a name for it) so no empty entry appears. ca_entry may grow ca_list
-     * (realloc), so use the fresh `ce` at once — nothing else touches ca_list
-     * before the push below. */
+    /* M2: first-wins by CA — a new global name also joins the group of the CA
+     * of the server that introduced it. Create the group lazily here (only now
+     * is there a name for it) so no empty entry appears. ca_entry may grow
+     * ca_list (realloc), so use the fresh `ce` at once — nothing else touches
+     * ca_list before the push below. */
     ce = ngx_http_autocert_ca_entry(cf, amcf, cac);
     if (ce == NULL) {
         return NGX_ERROR;
@@ -1280,11 +1221,12 @@ ngx_http_autocert_postconfig(ngx_conf_t *cf)
      * M4 (Codex #5): validate the http{}-level CA default even when no enabled
      * server reaches resolve_ca_conf() below. Before M4 the CA knobs were
      * http{}-global and init_main_conf validated them unconditionally; now the
-     * per-server resolve is the only validation, so `http { autocert_staging on;
-     * autocert_ca ...; }` with no `autocert on` anywhere would slip through.
-     * Resolve a COPY of the main-level srv default (merge has already run, so
-     * mutating the real one would be harmless, but a copy avoids a needless
-     * second ca_certificate abspath pass on a value a server may also resolve).
+     * per-server resolve is the only validation, so `http { autocert_staging
+     * on; autocert_ca ...; }` with no `autocert on` anywhere would slip
+     * through. Resolve a COPY of the main-level srv default (merge has already
+     * run, so mutating the real one would be harmless, but a copy avoids a
+     * needless second ca_certificate abspath pass on a value a server may also
+     * resolve).
      */
     {
         ngx_http_autocert_srv_conf_t  *amain;
@@ -1320,9 +1262,9 @@ ngx_http_autocert_postconfig(ngx_conf_t *cf)
         /*
          * Account contact is per-CA: each CA's newAccount gets the first email
          * configured by a vhost in that CA group (bound below via
-         * ngx_http_autocert_bind_ca_email, conflicts rejected). amcf->email keeps
-         * the first-overall email only as a legacy fallback for a CA group whose
-         * own vhosts set none.
+         * ngx_http_autocert_bind_ca_email, conflicts rejected). amcf->email
+         * keeps the first-overall email only as a legacy fallback for a CA
+         * group whose own vhosts set none.
          */
         if (amcf->email.len == 0 && ascf->email.len != 0) {
             amcf->email = ascf->email;
@@ -1330,11 +1272,11 @@ ngx_http_autocert_postconfig(ngx_conf_t *cf)
 
         /* M4: this server's effective (merged) CA config, resolved + validated
          * in place — defaults the CA URL, applies staging<->ca exclusion, makes
-         * ca_certificate absolute, enforces EAB both-or-neither. Must run before
-         * the ca_list lookup, which keys on the resolved cac->ca URL. The
-         * ca_list entry itself is created LAZILY below, only when a globally-new
-         * name actually joins it, so a skip-only / duplicate-only server never
-         * makes an empty CA group (the invariant M5 relies on). */
+         * ca_certificate absolute, enforces EAB both-or-neither. Must run
+         * before the ca_list lookup, which keys on the resolved cac->ca URL.
+         * The ca_list entry itself is created LAZILY below, only when a
+         * globally-new name actually joins it, so a skip-only / duplicate-only
+         * server never makes an empty CA group (the invariant M5 relies on). */
         cac = ngx_http_autocert_effective_ca(amcf, ascf);
 
         if (ngx_http_autocert_resolve_ca_conf(cf, cac) != NGX_OK) {
@@ -1365,8 +1307,8 @@ ngx_http_autocert_postconfig(ngx_conf_t *cf)
              *  - regex names — nginx strips the leading '~' from sn->name, so
              *    test sn->regex, not the first byte (which is then '^', etc.).
              *  - wildcard forms — only a leading-label wildcard "*.rest" is
-             *    issuable, and only via dns-01 (RFC 8555 §7.1.3 forbids http-01/
-             *    tls-alpn-01 for a wildcard). Any other '*' (suffix ".*",
+             *    issuable, and only via dns-01 (RFC 8555 §7.1.3 forbids
+             * http-01/ tls-alpn-01 for a wildcard). Any other '*' (suffix ".*",
              *    embedded, or a leading wildcard under a non-dns-01 challenge)
              *    is rejected. A leading '.' (".rest") is never a concrete name.
              *  - the empty catch-all "".
@@ -1381,8 +1323,9 @@ ngx_http_autocert_postconfig(ngx_conf_t *cf)
             }
             if (ngx_strlchr(name.data, name.data + name.len, '*') != NULL) {
                 /* D4: keep "*.rest" only under dns-01 and only if it is the
-                 * sole, leading-label wildcard. The order flow sends "*.rest" as
-                 * the ACME identifier and stores it under "_wildcard_.rest". */
+                 * sole, leading-label wildcard. The order flow sends "*.rest"
+                 * as the ACME identifier and stores it under "_wildcard_.rest".
+                 */
                 if (amcf->challenge != NGX_HTTP_AUTOCERT_CHALLENGE_DNS_01
                     || !ngx_http_autocert_is_wildcard(&name))
                 {
@@ -1442,16 +1385,18 @@ ngx_http_autocert_postconfig(ngx_conf_t *cf)
      *
      * ca_list entries are created lazily, per added name, so with zero config
      * names ca_list is empty too — and the driver treats an empty ca_list as
-     * "nothing to do", never registering an ACME account. A runtime name drained
-     * later would then have no account to order under. Materialize the group for
-     * the effective CA of the FIRST enabled vhost so the account bootstraps.
+     * "nothing to do", never registering an ACME account. A runtime name
+     * drained later would then have no account to order under. Materialize the
+     * group for the effective CA of the FIRST enabled vhost so the account
+     * bootstraps.
      *
-     * Deliberately only when names->nelts == 0: doing it for every enabled vhost
-     * would also mint an empty group for a skip-only vhost in an otherwise
-     * static config, bootstrapping an account for a CA nothing ever issues
-     * under. An empty group is inert for the config-name scheduler either way
-     * (it skips groups with no names) — the runtime drain path orders by host,
-     * not from the group's name list, so it only needs the account to exist.
+     * Deliberately only when names->nelts == 0: doing it for every enabled
+     * vhost would also mint an empty group for a skip-only vhost in an
+     * otherwise static config, bootstrapping an account for a CA nothing ever
+     * issues under. An empty group is inert for the config-name scheduler
+     * either way (it skips groups with no names) — the runtime drain path
+     * orders by host, not from the group's name list, so it only needs the
+     * account to exist.
      */
     if (amcf->names->nelts == 0 && amcf->enabled_servers != 0) {
         for (s = 0; s < cmcf->servers.nelts; s++) {
@@ -1500,28 +1445,30 @@ ngx_http_autocert_postconfig(ngx_conf_t *cf)
          * address for any global, so a non-NULL tag would make
          * ngx_shared_memory_add() reject the second module's attach as a
          * different use of the same name. Both sides pass NULL; the on-shm
-         * api_version stamp (checked in every helper) is the real compat gate. */
+         * api_version stamp (checked in every helper) is the real compat gate.
+         */
         amcf->requests_zone = ngx_shared_memory_add(cf, &name,
                                   NGX_HTTP_AUTOCERT_REQUESTS_ZONE_SIZE, NULL);
         if (amcf->requests_zone == NULL) {
             return NGX_ERROR;
         }
-        /* OWNER init, installed UNCONDITIONALLY: autocert deliberately claims the
-         * zone even if a consumer's postconfig ran first and installed its own
-         * inactive callback — the owner's callback activates the proven-current
-         * layout. A consumer, conversely, may only install its callback when
-         * zone->init is still NULL. Owner/consumer is decided by WHICH init
-         * callback runs, never by zone->data; the requests header is in the slab
-         * arena at shpool->data. */
+        /* OWNER init, installed UNCONDITIONALLY: autocert deliberately claims
+         * the zone even if a consumer's postconfig ran first and installed its
+         * own inactive callback — the owner's callback activates the
+         * proven-current layout. A consumer, conversely, may only install its
+         * callback when zone->init is still NULL. Owner/consumer is decided by
+         * WHICH init callback runs, never by zone->data; the requests header is
+         * in the slab arena at shpool->data. */
         amcf->requests_zone->init = ngx_autocert_requests_init_zone;
     }
 
     /*
      * M10b: when tls-alpn-01 is the configured challenge (or a test seed is
      * present), set up the challenge-cert store the helper writes and the
-     * cert_cb reads. Created BEFORE serve_init so the latter sees amcf->alpn_zone
-     * and installs the ALPN selection callback. Reuses its tree across reload
-     * (noreuse off) so an in-flight challenge survives a reconfigure.
+     * cert_cb reads. Created BEFORE serve_init so the latter sees
+     * amcf->alpn_zone and installs the ALPN selection callback. Reuses its tree
+     * across reload (noreuse off) so an in-flight challenge survives a
+     * reconfigure.
      */
     if ((amcf->challenge == NGX_HTTP_AUTOCERT_CHALLENGE_TLS_ALPN_01
          && amcf->enabled_servers != 0)
@@ -1629,7 +1576,7 @@ ngx_http_autocert_challenge_handler(ngx_http_request_t *r)
     if (r->uri.len < pfxlen
         || ngx_strncmp(r->uri.data, NGX_HTTP_AUTOCERT_WK_PREFIX, pfxlen) != 0)
     {
-        return NGX_DECLINED;            /* not our path — let others handle it */
+        return NGX_DECLINED; /* not our path — let others handle it */
     }
 
     ascf = ngx_http_get_module_srv_conf(r, ngx_http_autocert_module);
@@ -1664,8 +1611,9 @@ ngx_http_autocert_challenge_handler(ngx_http_request_t *r)
      * Drain any request body before producing our own response. A GET/HEAD may
      * still carry a Content-Length / chunked body; a content-phase handler that
      * emits output without discarding it leaves those bytes in the connection
-     * buffer, desyncing keepalive framing (the next pipelined request mis-parses
-     * the leftover as its start line). Mirrors ngx_http_stub_status_module.
+     * buffer, desyncing keepalive framing (the next pipelined request
+     * mis-parses the leftover as its start line). Mirrors
+     * ngx_http_stub_status_module.
      */
     rc = ngx_http_discard_request_body(r);
     if (rc != NGX_OK) {
@@ -1855,8 +1803,8 @@ ngx_http_autocert(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
          * Seed ONLY for a server{}-level `autocert on` (NGX_HTTP_SRV_CONF in
          * cmd_type). The http{}-level global occurrence writes the template srv
          * conf that EVERY server inherits via merge_ptr — seeding there would
-         * give a plain `listen 80;` vhost empty cert arrays too, which makes ssl
-         * build a pointless ctx and trips the no-cert checks. A server that
+         * give a plain `listen 80;` vhost empty cert arrays too, which makes
+         * ssl build a pointless ctx and trips the no-cert checks. A server that
          * wants autocert TLS serving therefore carries its own `autocert on`
          * (the documented form). Skip if the operator already set
          * ssl_certificate (UNSET_PTR test).
@@ -2007,10 +1955,12 @@ ngx_http_autocert_key_type(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
 
     for (i = 1; i < cf->args->nelts; i++) {
         if (ngx_http_autocert_map_key_type(&value[i], &kv) != NGX_OK) {
-            ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
-                               "invalid key type \"%V\" in \"autocert_key_type\", "
-                               "expected p256, p384, rsa2048, rsa3072 (rsa) "
-                               "or rsa4096", &value[i]);
+            ngx_conf_log_error(
+                NGX_LOG_EMERG, cf, 0,
+                "invalid key type \"%V\" in \"autocert_key_type\", "
+                "expected p256, p384, rsa2048, rsa3072 (rsa) "
+                "or rsa4096",
+                &value[i] );
             return NGX_CONF_ERROR;
         }
 
@@ -2064,7 +2014,8 @@ ngx_http_autocert_store(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
     }
 
     /* "default" is the module's own hardened layout (was "secure" — renamed so
-     * it doesn't imply the certbot layout is insecure). "secure" still accepted. */
+     * it doesn't imply the certbot layout is insecure). "secure" still
+     * accepted. */
     if (ngx_strcmp(value[1].data, "default") == 0
         || ngx_strcmp(value[1].data, "secure") == 0)
     {
@@ -2074,9 +2025,11 @@ ngx_http_autocert_store(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
         amcf->store = NGX_HTTP_AUTOCERT_STORE_CERTBOT;
 
     } else {
-        ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
-                           "invalid layout \"%V\" in \"autocert_store_layout\", "
-                           "expected \"default\" or \"certbot\"", &value[1]);
+        ngx_conf_log_error(
+            NGX_LOG_EMERG, cf, 0,
+            "invalid layout \"%V\" in \"autocert_store_layout\", "
+            "expected \"default\" or \"certbot\"",
+            &value[1] );
         return NGX_CONF_ERROR;
     }
 
@@ -2105,10 +2058,11 @@ ngx_http_autocert_challenge(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
         amcf->challenge = NGX_HTTP_AUTOCERT_CHALLENGE_DNS_01;
 
     } else {
-        ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
-                           "invalid challenge \"%V\" in \"autocert_challenge\", "
-                           "expected \"http-01\", \"tls-alpn-01\" or \"dns-01\"",
-                           &value[1]);
+        ngx_conf_log_error(
+            NGX_LOG_EMERG, cf, 0,
+            "invalid challenge \"%V\" in \"autocert_challenge\", "
+            "expected \"http-01\", \"tls-alpn-01\" or \"dns-01\"",
+            &value[1] );
         return NGX_CONF_ERROR;
     }
 

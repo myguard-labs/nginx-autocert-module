@@ -80,12 +80,11 @@ ngx_int_t ngx_autocert_challenge_set(ngx_shm_zone_t *shm_zone,
 ngx_int_t ngx_autocert_challenge_remove(ngx_shm_zone_t *shm_zone,
     ngx_str_t *token);
 
-
 /*
  * Look up a token and copy its keyauth into *out, allocated from `pool`
- * (worker side, in the request). Returns NGX_OK if found (out set), NGX_DECLINED
- * if absent, NGX_ERROR on a bad argument / OOM. Copying out under the lock keeps
- * the value stable even if the helper removes it right after.
+ * (worker side, in the request). Returns NGX_OK if found (out set),
+ * NGX_DECLINED if absent, NGX_ERROR on a bad argument / OOM. Copying out under
+ * the lock keeps the value stable even if the helper removes it right after.
  */
 ngx_int_t ngx_autocert_challenge_get(ngx_shm_zone_t *shm_zone,
     ngx_str_t *token, ngx_pool_t *pool, ngx_str_t *out);

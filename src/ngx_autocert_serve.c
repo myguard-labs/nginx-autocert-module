@@ -58,25 +58,26 @@
 /*
  * Dual-cert (Phase B): a name can have an EC and an RSA cert on disk at once
  * (different files in the same dir — see order.c). Each is loaded into its own
- * slot here and ALL present slots are installed on the SSL, so OpenSSL picks the
- * leaf matching the client's offered sigalgs/ciphers. Slot 0 = EC (legacy flat
- * files), slot 1 = RSA (.rsa. files). A slot with cert==NULL is simply absent.
+ * slot here and ALL present slots are installed on the SSL, so OpenSSL picks
+ * the leaf matching the client's offered sigalgs/ciphers. Slot 0 = EC (legacy
+ * flat files), slot 1 = RSA (.rsa. files). A slot with cert==NULL is simply
+ * absent.
  */
 #define NGX_AUTOCERT_SLOT_EC    0
 #define NGX_AUTOCERT_SLOT_RSA   1
 #define NGX_AUTOCERT_NSLOTS     2
 
 typedef struct {
-    X509               *cert;        /* leaf; NULL when this variant not on disk */
+    X509 *cert; /* leaf; NULL when this variant not on disk */
     STACK_OF(X509)     *chain;       /* intermediates (may be empty) */
     EVP_PKEY           *key;
-    time_t              mtime;       /* this variant's fullchain mtime at load */
+    time_t              mtime; /* this variant's fullchain mtime at load */
 } ngx_autocert_slot_t;
 
 typedef struct {
     ngx_str_node_t      sn;          /* {node (key=crc32), str=host}; first! */
     ngx_autocert_slot_t slots[NGX_AUTOCERT_NSLOTS];   /* EC, RSA */
-    time_t              checked;     /* last time we stat()'d, coarse (all slots) */
+    time_t              checked; /* last time we stat()'d, coarse (all slots) */
 } ngx_autocert_cert_t;
 
 
@@ -96,11 +97,11 @@ typedef struct {
     ngx_array_t        *names;       /* ngx_str_t: the issuable name set */
     ngx_shm_zone_t     *alpn_zone;   /* M10b tls-alpn-01 cert store; NULL=off */
     ngx_shm_zone_t     *requests_zone; /* A4: runtime-issued names; NULL=off */
-    ngx_uint_t          slot_mask;   /* bit s set => slot s (EC/RSA) is config-
-                                      * enabled; only enabled slots are reloaded
-                                      * + installed, so a stale opposite-keytype
-                                      * file left after a dual->single rollback is
-                                      * never served. */
+    ngx_uint_t          slot_mask; /* bit s set => slot s (EC/RSA) is config-
+                                    * enabled; only enabled slots are reloaded
+                                    * + installed, so a stale opposite-keytype
+                                    * file left after a dual->single rollback is
+                                    * never served. */
 } ngx_autocert_serve_ctx_t;
 
 
@@ -121,7 +122,7 @@ static int  ngx_autocert_alpn_conn_index = -1;
  */
 static ngx_rbtree_t         ngx_autocert_cache_rbtree;
 static ngx_rbtree_node_t    ngx_autocert_cache_sentinel;
-static ngx_pool_t          *ngx_autocert_cache_pool;     /* NULL until first use */
+static ngx_pool_t          *ngx_autocert_cache_pool; /* NULL until first use */
 
 /*
  * Per-worker lookup index of the configured issuance names, built once from
@@ -134,23 +135,23 @@ static ngx_pool_t          *ngx_autocert_cache_pool;     /* NULL until first use
  */
 static ngx_rbtree_t         ngx_autocert_names_rbtree;
 static ngx_rbtree_node_t    ngx_autocert_names_sentinel;
-static ngx_uint_t           ngx_autocert_names_built;     /* 0 until first build */
+static ngx_uint_t           ngx_autocert_names_built; /* 0 until first build */
 static ngx_uint_t           ngx_autocert_names_failed;    /* give up building */
-
 
 /*
  * cert_cb delegation slot (autolabel B3). A consumer module — which must NOT
  * install its own cert_cb, because OpenSSL would silently replace ours — calls
  * ngx_autocert_cert_cb_register() and we invoke it FIRST on every handshake,
- * falling back to our store lookup when it declines. Full contract in the header.
+ * falling back to our store lookup when it declines. Full contract in the
+ * header.
  *
  * Read at HANDSHAKE time rather than copied into sctx at serve_init, so the
  * consumer's config phase may run either before or after ours: whichever order,
  * the handshake sees the final value. Stamped with the registering cycle so a
- * reload that drops the consumer cannot leave us calling a stale pointer into an
- * unloaded .so (a NULL/stale cycle simply means "no consumer this cycle").
+ * reload that drops the consumer cannot leave us calling a stale pointer into
+ * an unloaded .so (a NULL/stale cycle simply means "no consumer this cycle").
  */
-static ngx_int_t          (*ngx_autocert_cert_cb_next)(SSL *ssl_conn, void *arg);
+static ngx_int_t ( *ngx_autocert_cert_cb_next )( SSL *ssl_conn, void *arg );
 static void                *ngx_autocert_cert_cb_next_arg;
 static ngx_cycle_t         *ngx_autocert_cert_cb_next_cycle;
 
@@ -246,14 +247,15 @@ ngx_http_autocert_serve_init(ngx_conf_t *cf,
     sctx->path = amcf->path;
     sctx->store = amcf->store;
     sctx->names = amcf->names;       /* bounds the per-worker cache */
-    sctx->alpn_zone = amcf->alpn_zone;  /* M10b: NULL unless tls-alpn-01 wired */
-    sctx->requests_zone = amcf->requests_zone; /* A4: NULL unless autolabel wired */
+    sctx->alpn_zone = amcf->alpn_zone; /* M10b: NULL unless tls-alpn-01 wired */
+    sctx->requests_zone =
+        amcf->requests_zone; /* A4: NULL unless autolabel wired */
 
     /*
      * Build the enabled-slot mask from the configured key_type list so serving
      * only ever installs a keytype the operator actually asked for. After a
-     * dual-cert -> single rollback the dropped keytype's files may linger in the
-     * store; without this mask OpenSSL could still pick that stale leaf.
+     * dual-cert -> single rollback the dropped keytype's files may linger in
+     * the store; without this mask OpenSSL could still pick that stale leaf.
      */
     sctx->slot_mask = 0;
     {
@@ -398,7 +400,8 @@ ngx_http_autocert_serve_init(ngx_conf_t *cf,
                            &cscf->server_name);
         }
 
-        /* Install the per-SNI cert callback (overrides whatever is on the ctx). */
+        /* Install the per-SNI cert callback (overrides whatever is on the ctx).
+         */
         SSL_CTX_set_cert_cb(sscf->ssl.ctx, ngx_http_autocert_cert_cb, sctx);
         ngx_log_debug1(NGX_LOG_DEBUG_HTTP, cf->log, 0,
                        "autocert: installed cert_cb for \"%V\"",
@@ -578,12 +581,12 @@ ngx_autocert_serve_reload(void)
     ngx_autocert_names_failed = 0;
 }
 
-
 /*
- * Register a consumer's cert callback. See the contract in ngx_autocert_serve.h.
- * Exported (default visibility) — the only symbol this module exports; a consumer
- * resolves it with dlsym(RTLD_DEFAULT, ...) so that autocert being absent is a
- * NULL lookup rather than an unresolved symbol that would stop nginx booting.
+ * Register a consumer's cert callback. See the contract in
+ * ngx_autocert_serve.h. Exported (default visibility) — the only symbol this
+ * module exports; a consumer resolves it with dlsym(RTLD_DEFAULT, ...) so that
+ * autocert being absent is a NULL lookup rather than an unresolved symbol that
+ * would stop nginx booting.
  *
  * Called from the consumer's config phase, once per cycle. Stamping ngx_cycle
  * here is what makes a dropped consumer safe across a reload: the handshake
@@ -618,7 +621,7 @@ ngx_http_autocert_cert_cb_delegate(SSL *ssl_conn, ngx_connection_t *c)
     if (ngx_autocert_cert_cb_next == NULL
         || ngx_autocert_cert_cb_next_cycle != (ngx_cycle_t *) ngx_cycle)
     {
-        return NGX_DECLINED;              /* no consumer registered this cycle */
+        return NGX_DECLINED; /* no consumer registered this cycle */
     }
 
     rc = ngx_autocert_cert_cb_next(ssl_conn, ngx_autocert_cert_cb_next_arg);
@@ -704,11 +707,11 @@ ngx_http_autocert_cert_cb(SSL *ssl_conn, void *arg)
      * acme-tls/1 branch above: an ACME validation handshake must present the
      * challenge cert and nothing else, so a consumer never gets to answer it.
      *
-     * A consumer installs no cert_cb of its own (OpenSSL would replace ours), so
-     * this call is the only way its per-container certs reach the handshake. It
-     * runs even when there is no SNI: that is our "keep the bootstrap cert" case,
-     * but a consumer may still legitimately decline it, and passing it through
-     * keeps the one entry point uniform.
+     * A consumer installs no cert_cb of its own (OpenSSL would replace ours),
+     * so this call is the only way its per-container certs reach the handshake.
+     * It runs even when there is no SNI: that is our "keep the bootstrap cert"
+     * case, but a consumer may still legitimately decline it, and passing it
+     * through keeps the one entry point uniform.
      */
     switch (ngx_http_autocert_cert_cb_delegate(ssl_conn, c)) {
 
@@ -716,7 +719,7 @@ ngx_http_autocert_cert_cb(SSL *ssl_conn, void *arg)
         return 1;                         /* consumer served it; hands off */
 
     case NGX_ERROR:
-        return 0;                         /* consumer wants the handshake failed */
+        return 0; /* consumer wants the handshake failed */
 
     default:                              /* NGX_DECLINED: our turn */
         break;
@@ -817,9 +820,9 @@ ngx_http_autocert_cert_cb(SSL *ssl_conn, void *arg)
      * leading-label wildcard parent "*.<rest>" (RFC 6125 — exactly one label).
      * On a match the cache + store are keyed by the SHARED wildcard segment
      * "_wildcard_.<rest>", NOT the SNI: every subdomain under one wildcard maps
-     * to a single cache entry + a single cert dir, so the cache stays bounded by
-     * the configured wildcard count (an SNI flood under "*.example.com" cannot
-     * create unbounded entries).
+     * to a single cache entry + a single cert dir, so the cache stays bounded
+     * by the configured wildcard count (an SNI flood under "*.example.com"
+     * cannot create unbounded entries).
      */
     store = host;
     store_hash = hash;
@@ -841,8 +844,8 @@ ngx_http_autocert_cert_cb(SSL *ssl_conn, void *arg)
         }
     }
 
-    if (sctx->names != NULL && !ngx_autocert_serve_name_match(sctx, &host, hash))
-    {
+    if ( sctx->names != NULL &&
+         !ngx_autocert_serve_name_match( sctx, &host, hash ) ) {
         ngx_int_t   matched = 0;
         u_char     *dot;
 
@@ -988,8 +991,8 @@ ngx_http_autocert_cert_cb(SSL *ssl_conn, void *arg)
          * the immediately preceding use_certificate set. So per slot we MUST
          * call use_certificate -> use_PrivateKey -> set1_chain in that order,
          * before moving to the next slot — otherwise the second slot's chain
-         * would overwrite the first slot's. A partial bind would hand the client
-         * a key not matching its cert, so any per-slot failure fails the
+         * would overwrite the first slot's. A partial bind would hand the
+         * client a key not matching its cert, so any per-slot failure fails the
          * handshake. The empty chain is set explicitly so a stale ctx
          * intermediate never ships with a fresh leaf.
          *
@@ -1223,10 +1226,10 @@ ngx_http_autocert_cache_reload(ngx_autocert_cert_t *c, ngx_uint_t slot,
     /*
      * The slot is selected by FILENAME (EC = flat, RSA = .rsa.), but a file's
      * contents must match the slot's key family or we would install the wrong
-     * algorithm into a slot. A pre-dual-cert single-RSA deployment wrote its RSA
-     * leaf to the flat fullchain.pem (the EC slot's name); reject it here so the
-     * EC slot stays empty (and the scheduler keeps the EC variant due) instead of
-     * serving an RSA leaf as the "EC" cert.
+     * algorithm into a slot. A pre-dual-cert single-RSA deployment wrote its
+     * RSA leaf to the flat fullchain.pem (the EC slot's name); reject it here
+     * so the EC slot stays empty (and the scheduler keeps the EC variant due)
+     * instead of serving an RSA leaf as the "EC" cert.
      */
     {
         int           want = (slot == NGX_AUTOCERT_SLOT_RSA)
@@ -1234,19 +1237,22 @@ ngx_http_autocert_cache_reload(ngx_autocert_cert_t *c, ngx_uint_t slot,
         EVP_PKEY     *lpk = X509_get0_pubkey(leaf);
 
         if (lpk == NULL || EVP_PKEY_base_id(lpk) != want) {
-            ngx_log_error(NGX_LOG_ERR, log, 0,
-                          "autocert: stored leaf for \"%V\" is not the expected "
-                          "key family for slot %ui; ignoring", host, slot);
+            ngx_log_error(
+                NGX_LOG_ERR, log, 0,
+                "autocert: stored leaf for \"%V\" is not the expected "
+                "key family for slot %ui; ignoring",
+                host, slot );
             goto done;
         }
     }
 
-    /* Verify against the REQUESTED SNI (verify), not the store key (host): for a
-     * wildcard match host is the shared "_wildcard_.<rest>" fs-segment, which is
-     * not a DNS name the leaf's "*.rest" SAN covers. X509_check_host matches the
-     * cert's wildcard SAN against the concrete SNI correctly. An IP identifier
-     * is carried in an iPAddress SAN, which X509_check_host never matches, so
-     * ngx_autocert_cert_covers dispatches to X509_check_ip_asc for an IP. */
+    /* Verify against the REQUESTED SNI (verify), not the store key (host): for
+     * a wildcard match host is the shared "_wildcard_.<rest>" fs-segment, which
+     * is not a DNS name the leaf's "*.rest" SAN covers. X509_check_host matches
+     * the cert's wildcard SAN against the concrete SNI correctly. An IP
+     * identifier is carried in an iPAddress SAN, which X509_check_host never
+     * matches, so ngx_autocert_cert_covers dispatches to X509_check_ip_asc for
+     * an IP. */
     if (!ngx_autocert_cert_covers(leaf, verify)) {
         ngx_log_error(NGX_LOG_ERR, log, 0,
                       "autocert: certificate identity mismatch for \"%V\" "
@@ -1494,13 +1500,12 @@ ngx_http_autocert_alpn_default(ngx_ssl_conn_t *ssl_conn,
     return SSL_TLSEXT_ERR_OK;
 }
 
-
 /*
  * Serve the tls-alpn-01 challenge certificate for `host` on this connection.
  * Look the {cert,key} PEM up in the shared store (filled by the helper), parse
  * them, and bind them to the SSL. Returns 1 to proceed (challenge cert served),
- * 0 to fail the handshake — under acme-tls/1 there is no honest fallback, so any
- * miss or parse/install error fails closed.
+ * 0 to fail the handshake — under acme-tls/1 there is no honest fallback, so
+ * any miss or parse/install error fails closed.
  */
 static int
 ngx_http_autocert_serve_alpn_cert(ngx_connection_t *c, SSL *ssl_conn,
@@ -1555,9 +1560,10 @@ ngx_http_autocert_serve_alpn_cert(ngx_connection_t *c, SSL *ssl_conn,
      * inherited per-vhost leaves — one EC and, since dual-cert, one RSA slot).
      * Without it SSL_use_certificate only replaces the slot matching the
      * challenge key's type, leaving the other-type vhost leaf negotiable: a
-     * client/CA offering that sigalg would get the real leaf (no acmeIdentifier)
-     * instead of the challenge cert and tls-alpn-01 would fail. set1_chain(NULL)
-     * then strips any inherited chain so a stale intermediate never ships.
+     * client/CA offering that sigalg would get the real leaf (no
+     * acmeIdentifier) instead of the challenge cert and tls-alpn-01 would fail.
+     * set1_chain(NULL) then strips any inherited chain so a stale intermediate
+     * never ships.
      */
     SSL_certs_clear(ssl_conn);
 
