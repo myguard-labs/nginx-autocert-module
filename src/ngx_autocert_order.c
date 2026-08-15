@@ -22,7 +22,6 @@
 #include <sys/stat.h>
 #endif
 #include <signal.h>
-#include <time.h>
 
 #if !(NGX_WIN32)
 #include <sys/wait.h>          /* waitpid(2) — dns-01 hook reap (W8 ports this) */
@@ -259,6 +258,10 @@ ngx_autocert_order_start(ngx_autocert_order_t *order)
     order->challenge_set = 0;
     order->alpn_set = 0;
     order->dns_set = 0;
+    order->dns_hook_timed_out = 0;
+    order->dns_hook_cleanup = 0;
+    order->dns_hook_after_authz = 0;
+    order->dns_hook_pid = NGX_INVALID_PID;
     order->poll_tries = 0;
     order->order_poll_tries = 0;
     order->finalize_retried = 0;
@@ -829,35 +832,6 @@ done:
 }
 
 
-#if 0
-/* Monotonic clock in ms, for the retired blocking hook wait deadline (immune to wall-clock
- * jumps and nanosleep/Sleep oversleep). POSIX: clock_gettime(CLOCK_MONOTONIC),
- * returns 0 if the read fails. win32: ngx_autocert_monotonic_ms() (GetTick-
- * Count64, see its definition in ngx_autocert_win32.h for why not QPC). */
-static uint64_t
-ngx_autocert_dns_monotonic(void)
-{
-#if (NGX_WIN32)
-    return ngx_autocert_monotonic_ms();
-#else
-    struct timespec  ts;
-
-    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) {
-        return 0;
-    }
-    return (uint64_t) ts.tv_sec * 1000 + (uint64_t) ts.tv_nsec / 1000000;
-#endif
-}
-
-
-static ngx_msec_int_t
-ngx_autocert_dns_elapsed_ms(uint64_t start)
-{
-    return (ngx_msec_int_t) (ngx_autocert_dns_monotonic() - start);
-}
-#endif
-
-
 /*
  * M16 (D3): run a dns-01 operator hook (publish or remove the TXT record) by
  * fork+execve, argv = { hook, "_acme-challenge.<name>", <txt>, NULL }.
@@ -867,10 +841,9 @@ ngx_autocert_dns_elapsed_ms(uint64_t start)
  * convention), so sanitizing it would break the common case. The hook path is
  * an absolute, config-validated path the operator controls, not attacker input.
  *
- * This blocks worker 0 for up to dns_hook_timeout seconds while the hook runs.
- * Hooks are expected to be short (e.g. a curl to a DNS-provider API); the long
- * propagation wait is handled asynchronously by the delay timer, NOT here. Only
- * one order runs at a time, so the brief block is acceptable.
+ * Completion is observed asynchronously by a timer callback. Hooks are expected
+ * to be short (e.g. a curl to a DNS-provider API); the separate propagation
+ * delay is also handled asynchronously. Neither wait may block worker 0.
  *
  * Safety: never system()/popen() (no shell, no injection surface); the child
  * closes every inherited descriptor above stderr (the worker's epoll/listen fds
@@ -891,177 +864,6 @@ ngx_autocert_dns_elapsed_ms(uint64_t start)
  */
 #define NGX_AUTOCERT_DNS_HOOK_CMDLINE_MAX  (NGX_MAX_PATH * 4)
 #endif
-
-#if 0
-
-/*
- * POSIX half of the dns-01 hook spawn: fork+execve the already-validated
- * argv, with a bounded wait against `timeout_ms` (already clamped by the
- * caller, shared with the win32 arm below so both platforms clamp
- * identically). Extracted verbatim from ngx_autocert_order_dns_hook() (W8)
- * with no behaviour change — only the parameter plumbing (order/hook/argv/
- * timeout_ms passed in, name passed in for the failure log line) differs
- * from the pre-extraction body. See ngx_autocert_order_dns_hook()'s comment
- * above for the full safety contract (no shell, close-every-fd, _exit on
- * exec failure, SIGCHLD masking).
- */
-static ngx_int_t
-ngx_autocert_dns_hook_spawn_blocking(ngx_autocert_order_t *order, ngx_str_t *hook,
-    ngx_str_t *name, char **argv, ngx_msec_t timeout_ms)
-{
-    pid_t             pid, w;
-    int               status;
-    ngx_int_t         rc;
-    uint64_t          start;
-    struct timespec   step;
-    sigset_t          set, oset;
-
-    extern char     **environ;
-
-    /*
-     * Block SIGCHLD across the fork+wait. nginx installs a SIGCHLD handler
-     * (ngx_signal_handler -> ngx_process_get_status) that reaps ALL children
-     * with waitpid(-1); left unblocked it steals our child before this waitpid
-     * runs (ECHILD). With it blocked we reap the specific child ourselves; the
-     * (now superfluous) signal is delivered harmlessly on restore.
-     */
-    sigemptyset(&set);
-    sigaddset(&set, SIGCHLD);
-    if (sigprocmask(SIG_BLOCK, &set, &oset) != 0) {
-        ngx_log_error(NGX_LOG_ERR, order->log, ngx_errno,
-                      "autocert: dns-01 sigprocmask() failed");
-        return NGX_ERROR;
-    }
-
-    rc = NGX_OK;
-
-    pid = fork();
-    if (pid < 0) {
-        ngx_log_error(NGX_LOG_ERR, order->log, ngx_errno,
-                      "autocert: dns-01 fork() failed");
-        rc = NGX_ERROR;
-        goto unblock;
-    }
-
-    if (pid == 0) {
-        /* child */
-        long  maxfd, fd;
-
-        /* restore the inherited signal mask so the hook runs unblocked */
-        (void) sigprocmask(SIG_SETMASK, &oset, NULL);
-
-        /* Own process group so a timeout can kill the whole subtree (the hook
-         * plus any children it spawns), not just the direct process. */
-        (void) setpgid(0, 0);
-
-        /* Close every inherited fd above stderr so the hook can't touch worker
-         * sockets/cert fds. Prefer close_range(2) (Linux 5.9+): one syscall vs.
-         * a loop that, with a soft RLIMIT_NOFILE of ~1M on systemd/containers,
-         * would otherwise issue ~1M close() calls in the child. Fall back to the
-         * bounded loop only when close_range is unavailable. */
-#if defined(__linux__) && defined(SYS_close_range)
-        if (syscall(SYS_close_range, 3, ~0U, 0) == 0) {
-            /* done */
-        } else
-#endif
-        {
-            maxfd = sysconf(_SC_OPEN_MAX);
-            if (maxfd < 0) {
-                maxfd = 1024;
-            }
-            for (fd = 3; fd < maxfd; fd++) {
-                (void) ngx_autocert_close((int) fd);
-            }
-        }
-
-        (void) execve(argv[0], argv, environ);
-        _exit(127);     /* exec failed: _exit, never exit() */
-    }
-
-    /*
-     * Parent ALSO sets the child's pgid (the canonical double-setpgid): the
-     * child runs setpgid(0,0), but if the timeout fires before it does, the
-     * later kill(-pid) would hit a non-existent group and the hook would keep
-     * running. Setting it here too makes the group exist regardless of which
-     * side wins the race. EACCES (child already exec'd) / ESRCH (already gone)
-     * are benign.
-     */
-    (void) setpgid(pid, pid);
-
-    /*
-     * Parent: bounded wait. A blocking waitpid() would pin the worker forever
-     * on a wedged hook, so poll with WNOHANG against a CLOCK_MONOTONIC deadline
-     * (immune to oversleep / EINTR drift) and a short pacing sleep. On timeout
-     * SIGKILL the child's whole process group, then reap with a BOUNDED grace
-     * loop — if even that does not collect it (child stuck in D state), give up
-     * and let nginx's SIGCHLD reaper harvest the zombie after the mask restore,
-     * rather than pin the worker on a blocking wait.
-     */
-    step.tv_sec = 0;
-    step.tv_nsec = 20 * 1000 * 1000;    /* 20 ms */
-    start = ngx_autocert_dns_monotonic();
-
-    for ( ;; ) {
-        w = waitpid(pid, &status, WNOHANG);
-
-        if (w == pid) {
-            break;
-        }
-        if (w < 0) {
-            if (ngx_errno == EINTR) {
-                continue;
-            }
-            ngx_log_error(NGX_LOG_ERR, order->log, ngx_errno,
-                          "autocert: dns-01 waitpid() failed");
-            rc = NGX_ERROR;
-            goto unblock;
-        }
-        /* w == 0: child still running */
-        if (ngx_autocert_dns_elapsed_ms(start) >= (ngx_msec_int_t) timeout_ms) {
-            ngx_int_t  grace;
-
-            ngx_log_error(NGX_LOG_ERR, order->log, 0,
-                          "autocert: dns-01 hook \"%V\" timed out after %T s, "
-                          "killing", hook, order->dns_hook_timeout);
-            /* Kill the whole group; if the group kill fails (e.g. the child
-             * lost the setpgid race and is still in its own inherited group),
-             * fall back to killing the direct child so it never lingers. */
-            if (kill(-pid, SIGKILL) != 0) {
-                (void) kill(pid, SIGKILL);
-            }
-
-            /* bounded grace reap (~1s) so a stuck child can't pin the worker */
-            for (grace = 0; grace < 50; grace++) {
-                w = waitpid(pid, &status, WNOHANG);
-                if (w == pid || (w < 0 && ngx_errno != EINTR)) {
-                    break;
-                }
-                (void) nanosleep(&step, NULL);
-            }
-            rc = NGX_ERROR;
-            goto unblock;
-        }
-        (void) nanosleep(&step, NULL);
-    }
-
-    if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
-        ngx_log_error(NGX_LOG_ERR, order->log, 0,
-                      "autocert: dns-01 hook \"%V\" failed (%s %d) for \"%V\"",
-                      hook,
-                      WIFEXITED(status) ? "exit" : "signal",
-                      WIFEXITED(status) ? WEXITSTATUS(status)
-                                        : WTERMSIG(status),
-                      name);
-        rc = NGX_ERROR;
-    }
-
-unblock:
-
-    (void) sigprocmask(SIG_SETMASK, &oset, NULL);
-    return rc;
-}
-
-#endif /* retired blocking POSIX implementation */
 
 #if (NGX_WIN32)
 
@@ -1089,12 +891,10 @@ unblock:
  *  - close-every-fd -> bInheritHandles = FALSE: stronger than the POSIX
  *    close loop (the child never sees any inherited handle at all, not just
  *    the ones above stderr).
- *  - bounded WNOHANG poll -> WaitForSingleObject(proc, 20 ms) against the
- *    same ngx_autocert_dns_monotonic()/elapsed_ms() deadline, never
- *    WaitForSingleObject(..., INFINITE).
- *  - SIGKILL + bounded grace reap -> TerminateJobObject() then a bounded
- *    (~1s) grace WaitForSingleObject poll, same shape as the POSIX 50-
- *    iteration loop.
+ *  - status polling -> the timer callback uses WaitForSingleObject(proc, 0),
+ *    never an in-worker wait.
+ *  - SIGKILL -> TerminateJobObject() on the deadline, then the status timer
+ *    performs nonblocking cleanup.
  *  - WIFEXITED/WEXITSTATUS -> GetExitCodeProcess(); no signal concept, so
  *    only the exit-code branch of the failure log line applies.
  *
@@ -1104,7 +904,7 @@ unblock:
  */
 static ngx_int_t
 ngx_autocert_dns_hook_spawn_win32(ngx_autocert_order_t *order, ngx_str_t *hook,
-    ngx_str_t *name, char **argv, ngx_msec_t timeout_ms)
+    char **argv, ngx_msec_t timeout_ms)
 {
     ngx_int_t                          rc;
     ngx_int_t                          off;
@@ -1119,7 +919,6 @@ ngx_autocert_dns_hook_spawn_win32(ngx_autocert_order_t *order, ngx_str_t *hook,
     HANDLE                             handles[1];
     wchar_t                             hook_w[NGX_MAX_PATH];
     wchar_t                             cmdline_w[NGX_AUTOCERT_DNS_HOOK_CMDLINE_MAX];
-    DWORD                               mapped;
 
     job = NULL;
     proc = NULL;
@@ -1361,11 +1160,10 @@ cleanup:
  * generic reaper cannot consume the status before our one-shot waitpid call. */
 static ngx_int_t
 ngx_autocert_dns_hook_spawn(ngx_autocert_order_t *order, ngx_str_t *hook,
-    ngx_str_t *name, char **argv, ngx_msec_t timeout_ms)
+    char **argv, ngx_msec_t timeout_ms)
 {
 #if (NGX_WIN32)
-    return ngx_autocert_dns_hook_spawn_win32(order, hook, name, argv,
-                                              timeout_ms);
+    return ngx_autocert_dns_hook_spawn_win32(order, hook, argv, timeout_ms);
 #else
     pid_t      pid;
     sigset_t   set;
@@ -1477,7 +1275,16 @@ ngx_autocert_order_dns_hook_timer(ngx_event_t *ev)
     order->dns_hook_process = NULL;
     order->dns_hook_job = NULL;
     if (job != NULL) { CloseHandle(job); }
-    if (wait_rc != WAIT_OBJECT_0 || !GetExitCodeProcess(proc, &exit_code)) {
+    if (wait_rc != WAIT_OBJECT_0) {
+        errno = ngx_autocert_win32_errno(GetLastError());
+        ngx_log_error(NGX_LOG_ERR, order->log, ngx_errno,
+                      "autocert: dns-01 hook status failed");
+        CloseHandle(proc);
+        ngx_autocert_order_dns_hook_done(order, NGX_ERROR);
+        return;
+    }
+    if (!GetExitCodeProcess(proc, &exit_code)) {
+        errno = ngx_autocert_win32_errno(GetLastError());
         ngx_log_error(NGX_LOG_ERR, order->log, ngx_errno,
                       "autocert: dns-01 hook status failed");
         CloseHandle(proc);
@@ -1531,7 +1338,7 @@ ngx_autocert_order_dns_hook_deadline(ngx_event_t *ev)
     ngx_autocert_order_t  *order = ev->data;
 
 #if !(NGX_WIN32)
-    if (order->dns_hook_pid != NGX_INVALID_PID) {
+    if (order->dns_hook_pid > 0) {
         ngx_log_error(NGX_LOG_ERR, order->log, 0,
                       "autocert: dns-01 hook timed out after %T s, killing",
                       order->dns_hook_timeout);
@@ -1655,7 +1462,7 @@ ngx_autocert_order_dns_hook(ngx_autocert_order_t *order, ngx_str_t *hook,
         timeout_ms = (ngx_msec_t) order->dns_hook_timeout * 1000;
     }
 
-    return ngx_autocert_dns_hook_spawn(order, hook, &name, argv, timeout_ms);
+    return ngx_autocert_dns_hook_spawn(order, hook, argv, timeout_ms);
 }
 
 
@@ -3458,6 +3265,35 @@ ngx_autocert_order_finish(ngx_autocert_order_t *order, ngx_int_t rc)
 void
 ngx_autocert_order_free(ngx_autocert_order_t *order)
 {
+#if (NGX_WIN32)
+    if (order->dns_hook_process != NULL) {
+        if (order->dns_hook_job != NULL) {
+            (void) TerminateJobObject(order->dns_hook_job, 1);
+        } else {
+            (void) TerminateProcess(order->dns_hook_process, 1);
+        }
+        CloseHandle(order->dns_hook_process);
+        order->dns_hook_process = NULL;
+    }
+    if (order->dns_hook_job != NULL) {
+        CloseHandle(order->dns_hook_job);
+        order->dns_hook_job = NULL;
+    }
+#else
+    if (order->dns_hook_pid > 0) {
+        if (kill(-order->dns_hook_pid, SIGKILL) != 0) {
+            (void) kill(order->dns_hook_pid, SIGKILL);
+        }
+        (void) sigprocmask(SIG_SETMASK, &order->dns_hook_sigmask, NULL);
+        order->dns_hook_pid = NGX_INVALID_PID;
+    }
+#endif
+    if (order->dns_hook_timer.timer_set) {
+        ngx_del_timer(&order->dns_hook_timer);
+    }
+    if (order->dns_hook_deadline_timer.timer_set) {
+        ngx_del_timer(&order->dns_hook_deadline_timer);
+    }
     ngx_autocert_order_unpublish(order);
     if (order->poll_timer.timer_set) {
         ngx_del_timer(&order->poll_timer);
