@@ -136,6 +136,14 @@ struct ngx_autocert_acme_request_s {
     off_t                         content_length;  /* -1 if unknown */
     size_t                        body_offset;     /* start of body in recv */
 
+    /* Header-boundary scan cursor: offset into recv (from b->start) already
+     * searched for CRLFCRLF, so each read event resumes the scan instead of
+     * re-walking the whole accumulated buffer from b->start (O(N^2) across
+     * incremental reads). Reset to 0 per request/response. Backed off by up
+     * to (CRLFCRLF length - 1) bytes before use so a boundary split across
+     * two reads is never skipped. */
+    size_t                        hdr_scan_pos;
+
     /* Incremental chunked-decode validation cursor (avoids re-walking the whole
      * accumulated body on every read — that would be O(N^2)). dechunk_pos is
      * the offset into recv (from b->start) up to which framing is already

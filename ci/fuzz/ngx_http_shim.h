@@ -291,6 +291,7 @@ struct ngx_autocert_acme_request_s {
     ngx_uint_t   chunked;
     off_t        content_length;
     size_t       body_offset;
+    size_t       hdr_scan_pos;
     size_t       dechunk_pos;
     size_t       dechunk_total;
 };

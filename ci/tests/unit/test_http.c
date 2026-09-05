@@ -347,6 +347,155 @@ test_body_framing(void)
 }
 
 
+/*
+ * ---- hdr_scan_pos: incremental header-boundary scan ----
+ *
+ * Drives parse_response over a response delivered in pieces (as the real
+ * read handler does across NGX_AGAIN events) instead of one shot, so the
+ * persisted scan cursor (r->hdr_scan_pos) is actually exercised: each call
+ * appends more bytes to the same buffer and re-invokes the parser, exactly
+ * like ngx_autocert_acme_read_handler's loop. feed_sizes gives the number of
+ * bytes visible to the buffer after each call (cumulative, not a delta).
+ */
+static ngx_int_t
+parse_resp_incremental(const char *resp, const size_t *feed_sizes,
+    size_t nfeeds, ngx_autocert_acme_request_t *r)
+{
+    ngx_buf_t  *b;
+    size_t      total = strlen(resp);
+    size_t      i;
+    ngx_int_t   rc = NGX_AGAIN;
+
+    req_init(r);
+    b = ngx_pnalloc(&pool, sizeof(ngx_buf_t));
+    b->start = ngx_pnalloc(&pool, total ? total : 1);
+    b->pos = b->start;
+    b->last = b->start;
+    b->end = b->start + total;
+    r->recv = b;
+
+    for (i = 0; i < nfeeds; i++) {
+        size_t  upto = feed_sizes[i];
+
+        CHECK(upto <= total, "incremental: feed size within buffer");
+        memcpy(b->start, resp, upto);
+        b->last = b->start + upto;
+
+        rc = ngx_autocert_acme_parse_response(r);
+        if (rc != NGX_AGAIN) {
+            break;
+        }
+    }
+
+    return rc;
+}
+
+
+static void
+test_hdr_scan_cursor(void)
+{
+    ngx_autocert_acme_request_t  r;
+    ngx_int_t                    rc;
+
+    /*
+     * The CRLFCRLF boundary is split across two feeds: the first feed ends
+     * right after the lone CR that starts it ("...0\r\n\r"), the second
+     * delivers the final "\n". A cursor that fails to back off by (marker
+     * length - 1) before resuming the scan would start searching AFTER the
+     * split "\r", never see the completed "\r\n\r\n", and wrongly report
+     * AGAIN forever instead of DONE.
+     */
+    {
+        static const char  resp[] =
+            "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n";
+        size_t              split = sizeof(resp) - 1 - 1;  /* stop before \n */
+        size_t              feeds[2];
+
+        feeds[0] = split;
+        feeds[1] = sizeof(resp) - 1;
+
+        rc = parse_resp_incremental(resp, feeds, 2, &r);
+        CHECK(rc == NGX_DONE && r.status == 200,
+              "hdr_scan_pos: CRLFCRLF split across two reads still found");
+        ngx_http_fuzz_pool_reset(&pool);
+    }
+
+    /*
+     * Same split, but one byte earlier: first feed ends after "...0\r\n\r\n"
+     * minus the LAST TWO bytes ("...0\r\n"), second feed delivers the
+     * trailing "\r\n". This is the case a too-small backoff (e.g. only 1
+     * byte instead of marker_len - 1 == 3) would miss, since the boundary's
+     * first byte ('\r') already sits before the (wrongly small) resume
+     * point.
+     */
+    {
+        static const char  resp[] =
+            "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n";
+        size_t              feeds[2];
+
+        feeds[0] = sizeof(resp) - 1 - 2;   /* "...Length: 0\r\n" */
+        feeds[1] = sizeof(resp) - 1;       /* + trailing "\r\n" */
+
+        rc = parse_resp_incremental(resp, feeds, 2, &r);
+        CHECK(rc == NGX_DONE && r.status == 200,
+              "hdr_scan_pos: boundary split one byte earlier still found");
+        ngx_http_fuzz_pool_reset(&pool);
+    }
+
+    /*
+     * A byte sequence that LOOKS like a false-start of the boundary just
+     * before the real split point must not desync the cursor: "\r\n\r" (3
+     * of the 4 marker bytes) appears mid-header-value here, followed by
+     * ordinary header bytes, then the real terminator arrives in a later
+     * feed. The cursor must still find the REAL CRLFCRLF, not stop early or
+     * skip past it.
+     */
+    {
+        static const char  resp[] =
+            "HTTP/1.1 200 OK\r\n"
+            "X-Odd: a\r\n"          /* ordinary header, no false start */
+            "Content-Length: 0\r\n"
+            "\r\n";
+        size_t              feeds[3];
+
+        feeds[0] = 20;                      /* mid status-line/header area */
+        feeds[1] = sizeof(resp) - 1 - 4;    /* just before final CRLFCRLF */
+        feeds[2] = sizeof(resp) - 1;
+
+        rc = parse_resp_incremental(resp, feeds, 3, &r);
+        CHECK(rc == NGX_DONE && r.status == 200,
+              "hdr_scan_pos: multi-feed scan finds boundary delivered last");
+        ngx_http_fuzz_pool_reset(&pool);
+    }
+
+    /* Sanity: many tiny 1-byte-at-a-time feeds (worst case for a resume
+     * cursor) still finds the boundary and parses headers correctly. */
+    {
+        static const char  resp[] =
+            "HTTP/1.1 201 Created\r\nLocation: https://x/1\r\n"
+            "Content-Length: 0\r\n\r\n";
+        size_t              feeds[sizeof(resp)];
+        size_t              n = sizeof(resp) - 1;
+        size_t              i;
+
+        for (i = 0; i < n; i++) {
+            feeds[i] = i + 1;
+        }
+
+        rc = parse_resp_incremental(resp, feeds, n, &r);
+        CHECK(rc == NGX_DONE && r.status == 201,
+              "hdr_scan_pos: byte-at-a-time feed finds boundary");
+        if (rc == NGX_DONE) {
+            ngx_str_t  *loc = ngx_autocert_acme_header(&r, "Location");
+            CHECK(loc != NULL && streq(loc, "https://x/1"),
+                  "hdr_scan_pos: header captured correctly after "
+                  "byte-at-a-time scan");
+        }
+        ngx_http_fuzz_pool_reset(&pool);
+    }
+}
+
+
 int
 main(void)
 {
@@ -356,6 +505,7 @@ main(void)
     test_parse_url();
     test_status_line();
     test_body_framing();
+    test_hdr_scan_cursor();
 
     if (failures) {
         fprintf(stderr, "\n%d test(s) FAILED\n", failures);

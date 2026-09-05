@@ -292,12 +292,18 @@ gcc -D_GNU_SOURCE -Wall -Wextra -Werror $CORE_INC -o "$BUILD_DIR/test_cert_time"
 	$INET_OBJS -lssl -lcrypto
 "$BUILD_DIR/test_cert_time"
 
-# Slice just ngx_autocert_account_json_safe from the shipped account
-# source — the function depends only on ngx_str_t, so no nginx objects
-# are linked.
+# Slice ngx_autocert_account_json_safe + ngx_autocert_account_log_safe from
+# the shipped account source. json_safe depends only on ngx_str_t; log_safe
+# calls nginx core's ngx_escape_json (ngx_string.o) but never touches a pool
+# or ngx_cycle itself — those are only pulled in because ngx_string.o is
+# linked as a whole object and OTHER functions in it reference ngx_cycle /
+# ngx_log_error_core / ngx_pnalloc. Same stub-link idiom as test_ratecap.c.
 bash ci/tests/unit/extract_jsonsafe.sh
 # shellcheck disable=SC2086
 gcc -Wall -Wextra -Werror -Ici/tests/unit $CORE_INC \
 	-o "$BUILD_DIR/test_account_jsonsafe" \
-	"$WORKSPACE/ci/tests/unit/test_account_jsonsafe.c"
+	"$WORKSPACE/ci/tests/unit/test_account_jsonsafe.c" \
+	"$NGX/objs/src/core/ngx_string.o" \
+	"$NGX/objs/src/core/ngx_palloc.o" \
+	"$NGX/objs/src/os/unix/ngx_alloc.o"
 "$BUILD_DIR/test_account_jsonsafe"
