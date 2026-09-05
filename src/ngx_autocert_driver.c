@@ -2299,12 +2299,13 @@ ngx_autocert_runtime_marker_remove(ngx_cycle_t *cycle,
 
 
 /*
- * A6 persist (read side): boot-time-only rebuild of the requests shm zone from
- * on-disk markers. Called once from ngx_autocert_driver_init_process(), before
- * the singleton lock is taken by THIS process's first-ever start — never from
- * the single-process reload path (ngx_autocert_driver_reload), which already
- * inherits the live shm segment and would just re-see its own markers as a
- * no-op churn every reload.
+ * A6 persist (read side): rebuild of the requests shm zone from on-disk markers.
+ * Called from ngx_autocert_driver_init_process() on first boot, and from
+ * ngx_autocert_relock_handler() after a worker-0 handoff or graceful reload
+ * (USR2 upgrade) takes the lock. On reload, this process has already inherited
+ * the live shm segment, so the seed is a no-op for names still present in config
+ * but re-inserts any markers whose hosts were dropped from config and then
+ * auto-restored by new label events.
  *
  * For each top-level directory entry in the store container that carries the
  * marker: read the literal host, skip it if a config name now covers it (the
@@ -2990,9 +2991,9 @@ ngx_autocert_driver_exit_process(ngx_cycle_t *cycle)
  * the dead cycle and its pool, so a reload silently ignores new autocert config
  * and can touch freed cycle memory. init_module calls this on the
  * single-process path to tear the engine state down and re-arm it against the
- * NEW cycle. The interprocess lock is intentionally kept open: this process is
- * still the sole driver, so there is no peer to hand it to and re-flock'ing
- * would only add a failure mode.
+ * NEW cycle. The interprocess lock is released and re-acquired: the lock file
+ * lives in the store dir, so a reload that changes autocert_path must pick up
+ * the correct lock file location from the new cycle's config.
  *
  * Must run inside the worker event loop (true on reload — init_module fires
  * from ngx_init_cycle() while the loop is live), since it re-arms a timer.
