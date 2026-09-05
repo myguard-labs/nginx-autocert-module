@@ -301,3 +301,18 @@ gcc -Wall -Wextra -Werror -Ici/tests/unit $CORE_INC \
 	-o "$BUILD_DIR/test_account_jsonsafe" \
 	"$WORKSPACE/ci/tests/unit/test_account_jsonsafe.c"
 "$BUILD_DIR/test_account_jsonsafe"
+
+# Cert-cache freshness key (audit MINOR): mtime alone is whole-second
+# resolution and blind to an atomic rename landing a different file with a
+# coincidentally equal mtime, or two renewals inside one second. Slices the
+# slot struct + sentinel + ngx_autocert_slot_fresh() from the shipped
+# ngx_autocert_serve.c (too heavy to include-shim whole: SSL cert_cb + PEM
+# parse + ngx_http_ssl_module.h/v2/v3) and drives it against real temp files
+# via ngx_autocert_fstat, so the mtime/size/inode values are genuine kernel
+# output, not hand-built fixtures.
+bash "$WORKSPACE/ci/tests/unit/extract_slotfresh.sh"
+# shellcheck disable=SC2086
+gcc -D_GNU_SOURCE -Wall -Wextra -Werror -Ici/tests/unit -I"$WORKSPACE" \
+	$CORE_INC \
+	-o "$BUILD_DIR/test_slot_fresh" \
+	"$WORKSPACE/ci/tests/unit/test_slot_fresh.c"

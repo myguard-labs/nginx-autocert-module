@@ -53,9 +53,12 @@
 /*
  * One cached certificate, keyed by SNI host. Lives for the life of the worker
  * process in a static rbtree; the cert/key OpenSSL objects are refcounted and
- * handed to each connection's SSL via SSL_use_*. mtime is the fullchain.pem
- * mtime observed at load; a renewal rewrites the files (M6b stores atomically),
- * so a changed mtime triggers a reload on the next handshake.
+ * handed to each connection's SSL via SSL_use_*. mtime/size/uniq are the
+ * fullchain.pem mtime, size and inode/file-id observed at load; a renewal
+ * rewrites the files (M6b stores atomically), so a change in ANY of the three
+ * triggers a reload on the next handshake -- mtime alone is whole-second
+ * resolution and blind to an atomic rename landing a same-second,
+ * same-mtime file (audit MINOR).
  */
 /*
  * Dual-cert (Phase B): a name can have an EC and an RSA cert on disk at once
@@ -74,7 +77,31 @@ typedef struct {
     STACK_OF(X509)     *chain;       /* intermediates (may be empty) */
     EVP_PKEY           *key;
     time_t              mtime; /* this variant's fullchain mtime at load */
+    off_t               size;  /* this variant's fullchain size at load */
+    ngx_file_uniq_t      uniq; /* this variant's fullchain inode/file-id at
+                                * load (audit MINOR): mtime alone is
+                                * whole-second resolution and unchanged by an
+                                * atomic rename that happens to land a
+                                * same-second, same-mtime file, so two
+                                * renewals inside one second, or a rename that
+                                * swaps in a different inode with a
+                                * coincidentally equal mtime, left a stale
+                                * cert served until the NEXT unrelated write
+                                * nudged mtime. size+uniq widen the key so
+                                * either change alone forces a reload; all
+                                * three must match for "unchanged". */
 } ngx_autocert_slot_t;
+
+/*
+ * Sentinel value for slot->uniq meaning "never loaded" (mirrors mtime's -1
+ * sentinel below). ngx_file_uniq_t is unsigned on both platforms (ino_t is
+ * unsigned in practice, uint64_t on win32), so no valid inode/file-id can
+ * equal (ngx_file_uniq_t) -1 -- wrap-to-all-ones is exactly ~(uniq_t) 0. Used
+ * together with mtime == -1, never alone, so a genuine file whose real uniq
+ * happened to collide (impossible here, but see the comment above) still
+ * reloads because the paired mtime sentinel does not match either.
+ */
+#define NGX_AUTOCERT_UNIQ_NEVER_LOADED   ((ngx_file_uniq_t) -1)
 
 typedef struct {
     ngx_str_node_t      sn;          /* {node (key=crc32), str=host}; first! */
@@ -923,7 +950,11 @@ ngx_http_autocert_cert_cb(SSL *ssl_conn, void *arg)
         cert->sn.str.len = store.len;
         cert->sn.node.key = store_hash;
         cert->slots[NGX_AUTOCERT_SLOT_EC].mtime = -1;    /* force first load */
+        cert->slots[NGX_AUTOCERT_SLOT_EC].uniq =
+            NGX_AUTOCERT_UNIQ_NEVER_LOADED;
         cert->slots[NGX_AUTOCERT_SLOT_RSA].mtime = -1;
+        cert->slots[NGX_AUTOCERT_SLOT_RSA].uniq =
+            NGX_AUTOCERT_UNIQ_NEVER_LOADED;
 
         ngx_rbtree_insert(&ngx_autocert_cache_rbtree, &cert->sn.node);
     }
@@ -970,6 +1001,7 @@ ngx_http_autocert_cert_cb(SSL *ssl_conn, void *arg)
                         sl->key = NULL;
                     }
                     sl->mtime = -1;
+                    sl->uniq = NGX_AUTOCERT_UNIQ_NEVER_LOADED;
                     continue;
                 }
                 (void) ngx_http_autocert_cache_reload(cert, s, &store, &host,
@@ -1045,6 +1077,33 @@ ngx_http_autocert_cert_cb(SSL *ssl_conn, void *arg)
     }
 
     return 1;
+}
+
+
+/*
+ * Is slot `sl`'s cached freshness key still current against `st` (audit
+ * MINOR)? All three of mtime, size and inode/file-id must match for
+ * "unchanged" -- mtime alone is whole-second resolution and blind to an
+ * atomic rename that lands a different file with a coincidentally equal
+ * mtime (or two renewals inside the same second), which previously left a
+ * STALE cert served until some later, unrelated write nudged mtime.
+ * NGX_AUTOCERT_UNIQ_NEVER_LOADED can never equal a real fstat'd st_ino
+ * (unsigned wraparound of -1 is the all-ones value, never a legal
+ * inode/file-id), so the paired sl->mtime == -1 "never loaded" sentinel set
+ * at cache-entry creation still forces the first load through this same
+ * three-way test rather than needing a separate check.
+ *
+ * Split out of ngx_http_autocert_cache_reload so it is independently
+ * unit-testable (ci/tests/unit/test_slot_fresh.c slices it out exactly like
+ * ngx_autocert_account_json_safe) without linking the whole SSL/OpenSSL
+ * cert-parsing reload path.
+ */
+static ngx_int_t
+ngx_autocert_slot_fresh(ngx_autocert_slot_t *sl, ngx_autocert_stat_t *st)
+{
+    return sl->mtime == st->st_mtime
+           && sl->size == st->st_size
+           && sl->uniq == st->st_ino;
 }
 
 
@@ -1145,7 +1204,16 @@ ngx_http_autocert_cache_reload(ngx_autocert_cert_t *c, ngx_uint_t slot,
     }
     ngx_autocert_close(fd);
 
-    if (sl->mtime == st.st_mtime) {
+    /*
+     * st_ino/st_mtime/st_size are read via ngx_autocert_slot_fresh() rather
+     * than through the ngx_file_uniq()/ngx_file_mtime() macros directly:
+     * those are defined against BY_HANDLE_FILE_INFORMATION on win32, not
+     * against ngx_autocert_stat_t (see ngx_autocert_win32.h), so they don't
+     * apply to `st` here on either platform's shim -- the struct's own
+     * fields (already populated from those exact macros inside
+     * ngx_autocert_fstat) are the portable accessor for this call site.
+     */
+    if (ngx_autocert_slot_fresh(sl, &st)) {
         ngx_log_debug1(NGX_LOG_DEBUG_HTTP, log, 0,
                        "autocert: stored cert for \"%V\" unchanged", host);
         return NGX_OK;                    /* unchanged */
@@ -1301,6 +1369,8 @@ ngx_http_autocert_cache_reload(ngx_autocert_cert_t *c, ngx_uint_t slot,
     sl->chain = chain;
     sl->key = key;
     sl->mtime = st.st_mtime;
+    sl->size = st.st_size;
+    sl->uniq = st.st_ino;
 
     leaf = NULL;                          /* ownership transferred */
     chain = NULL;
