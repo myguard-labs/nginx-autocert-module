@@ -1313,7 +1313,9 @@ ngx_autocert_order_dns_hook_timer(ngx_event_t *ev)
     int                     status;
 
     order = ev->data;
-    w = waitpid(order->dns_hook_pid, &status, WNOHANG);
+    do {
+        w = waitpid(order->dns_hook_pid, &status, WNOHANG);
+    } while (w == -1 && ngx_autocert_err_is_intr(ngx_errno));
     if (w == 0) {
         ngx_add_timer(ev, 20);
         return;
@@ -3316,9 +3318,21 @@ ngx_autocert_order_free(ngx_autocert_order_t *order)
     }
 #else
     if (order->dns_hook_pid > 0) {
+        pid_t  w;
+        int    status;
+
         if (kill(-order->dns_hook_pid, SIGKILL) != 0) {
             (void) kill(order->dns_hook_pid, SIGKILL);
         }
+
+        /* Reap now: the timers below are about to be deleted, so the async
+         * waitpid() in ngx_autocert_order_dns_hook_timer() will never run
+         * again for this pid. Skipping this reap leaves a zombie behind and
+         * order (which holds dns_hook_pid) is about to be freed regardless. */
+        do {
+            w = waitpid(order->dns_hook_pid, &status, 0);
+        } while (w == -1 && ngx_autocert_err_is_intr(ngx_errno));
+
         (void) sigprocmask(SIG_SETMASK, &order->dns_hook_sigmask, NULL);
         order->dns_hook_pid = NGX_INVALID_PID;
     }
