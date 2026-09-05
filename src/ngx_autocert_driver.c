@@ -83,8 +83,13 @@
  * can rebuild the requests shm zone from disk after a real process restart
  * (fresh shm, unlike a single-process reload which inherits the old segment).
  * Leading dot keeps it out of any directory listing a store tool might do.
+ *
+ * NGX_AUTOCERT_RUNTIME_MARKER and its open-flag contract
+ * (NGX_AUTOCERT_MARKER_OPEN_WRITE / _READ) are defined once in
+ * ngx_autocert_shared.h so ci/tests/unit/test_marker_open.c shares the exact
+ * same flags this file uses, instead of keeping its own copy that could
+ * silently drift from production.
  */
-#define NGX_AUTOCERT_RUNTIME_MARKER  ".autocert-runtime"
 
 
 /*
@@ -2214,7 +2219,7 @@ ngx_autocert_runtime_marker_write(ngx_cycle_t *cycle, ngx_autocert_conf_t *acf,
      * pinned fd.
      */
     fd = ngx_autocert_openat_mode(dfd, NGX_AUTOCERT_RUNTIME_MARKER,
-                O_WRONLY | O_CREAT | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC, 0644);
+                NGX_AUTOCERT_MARKER_OPEN_WRITE, 0644);
     (void) ngx_autocert_close(dfd);
     if (fd == -1) {
         ngx_log_error(NGX_LOG_ERR, cycle->log, ngx_errno,
@@ -2397,7 +2402,7 @@ ngx_autocert_runtime_seed(ngx_cycle_t *cycle)
          * as a possibility even before that check runs).
          */
         mfd = ngx_autocert_openat(dfd, NGX_AUTOCERT_RUNTIME_MARKER,
-                     O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
+                     NGX_AUTOCERT_MARKER_OPEN_READ);
         if (mfd == -1) {
             (void) ngx_autocert_close(dfd);
             continue; /* not a runtime dir (or config-only) */

@@ -94,6 +94,33 @@ struct ngx_autocert_test_rename_hdr_s {
 
 
 /*
+ * A6 runtime marker: filename and open-flag contract shared between the
+ * driver (production, ngx_autocert_driver.c) and its unit test
+ * (ci/tests/unit/test_marker_open.c). Defined exactly once here so the test
+ * cannot silently drift from production by keeping its own copy — that used
+ * to be possible and made the test pass regardless of what the driver did.
+ *
+ * WRITE flags: O_NONBLOCK is REQUIRED (a planted FIFO must fail fast with
+ * ENXIO instead of blocking openat() forever) and O_TRUNC must NOT be set
+ * (truncation happens only after the fd is proven to be a regular file, via
+ * ftruncate()). O_NOFOLLOW rejects a symlinked leaf.
+ *
+ * READ flags: O_NONBLOCK for the same FIFO reason (a FIFO opened O_RDONLY
+ * with no writer would otherwise be free to hang under some conditions);
+ * O_NOFOLLOW rejects a symlinked leaf. The S_ISREG + st_nlink check at each
+ * call site is the actual type gate — these flags only remove the blocking
+ * possibility before that check runs.
+ */
+#define NGX_AUTOCERT_RUNTIME_MARKER    ".autocert-runtime"
+
+#define NGX_AUTOCERT_MARKER_OPEN_WRITE \
+    (O_WRONLY | O_CREAT | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC)
+
+#define NGX_AUTOCERT_MARKER_OPEN_READ \
+    (O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
+
+
+/*
  * ngx_autocert_mode_t — POSIX side. The win32 side is typedef'd in
  * ngx_autocert_win32.h (unsigned int; see its comment for why it cannot be
  * `#define mode_t`, and for the security-descriptor translation W5b owns).
@@ -258,14 +285,19 @@ ngx_int_t ngx_autocert_get_conf(ngx_cycle_t *cycle, ngx_autocert_conf_t *out);
  * tests unchanged.
  *
  * Split in two because a directory fd has no win32 analogue:
- * FlushFileBuffers() fails outright on a directory handle. Every dir-fsync
- * call site here is already best-effort by design (durability nicety, never
- * a correctness requirement — see the doc comments at its call sites), so
+ * FlushFileBuffers() fails outright on a directory handle. Callers differ
+ * in how much they rely on the directory fsync succeeding — account.c's key
+ * save treats it as a best-effort durability nicety (the key file itself is
+ * already fsynced + closed first), while order.c's commit-rename call sites
+ * treat it as a hard correctness requirement and abort the renewal on
+ * failure, because that fsync is what makes the just-committed rename
+ * durable — see the doc comments at each call site for which applies.
  * ngx_autocert_fsync_dir() is the seam that is allowed to be a real fsync on
- * POSIX and a documented no-op on win32; ngx_autocert_fsync() itself stays a
- * real flush on both platforms and must never be widened to swallow a
- * directory's failure too, or a genuine file-flush failure would go silently
- * unreported.
+ * POSIX and a documented no-op on win32 (win32 callers get an unconditional
+ * success since FlushFileBuffers cannot target a directory at all);
+ * ngx_autocert_fsync() itself stays a real flush on both platforms and must
+ * never be widened to swallow a directory's failure too, or a genuine
+ * file-flush failure would go silently unreported.
  */
 #if !(NGX_WIN32)
 #define ngx_autocert_fsync(fd)          fsync(fd)

@@ -2990,18 +2990,39 @@ ngx_autocert_order_store(ngx_autocert_order_t *order)
 }
 
 
-/* fsync an open directory fd so a preceding rename/create in it is durable.
- * Does not close the fd (caller owns it). */
+/*
+ * fsync an open directory fd so a preceding rename/create in it is durable.
+ * Does not close the fd (caller owns it). NOT best-effort: every caller here
+ * treats a failure as a hard NGX_ERROR (see NGX_AUTOCERT_STORE_FAIL() and the
+ * renewal-commit callers above) because this fsync is what makes the commit
+ * rename durable -- reporting success here when the directory entry never
+ * hit disk would let a renewal claim durability it does not have.
+ *
+ * EINTR is retried in a bounded loop: a signal interrupting fsync(2) is not
+ * a real failure, just an interruption, and POSIX.1-2001 leaves it
+ * unspecified whether the fsync was still performed, so retrying is the
+ * only way to know the directory entry is actually durable. The loop is
+ * bounded so a signal storm cannot hang a renewal; a genuine I/O error
+ * (e.g. EIO) still returns NGX_ERROR on the first non-EINTR failure.
+ */
 static ngx_int_t
 ngx_autocert_order_fsync_dirfd(ngx_autocert_order_t *order, int fd,
     const char *label)
 {
-    if (ngx_autocert_fsync_dir(fd) == -1) {
-        ngx_log_error(NGX_LOG_ERR, order->log, ngx_errno,
-                      "autocert: fsync(\"%s\") failed", label);
-        return NGX_ERROR;
+    int  tries;
+
+    for (tries = 0; tries < 8; tries++) {
+        if (ngx_autocert_fsync_dir(fd) != -1) {
+            return NGX_OK;
+        }
+        if (!ngx_autocert_err_is_intr(ngx_errno)) {
+            break;
+        }
     }
-    return NGX_OK;
+
+    ngx_log_error(NGX_LOG_ERR, order->log, ngx_errno,
+                  "autocert: fsync(\"%s\") failed", label);
+    return NGX_ERROR;
 }
 
 

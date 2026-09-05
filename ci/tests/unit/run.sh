@@ -142,7 +142,8 @@ gcc -Wall -Wextra -Werror $CORE_INC \
 # opened O_WRONLY without O_NONBLOCK blocks in openat() until a reader
 # appears, which wedged the sole ACME driver loop (and its worker) after a
 # successful runtime issuance; O_NOFOLLOW does not stop it.
-gcc -Wall -Wextra -Werror \
+# shellcheck disable=SC2086
+gcc -Wall -Wextra -Werror $CORE_INC \
 	"$WORKSPACE/ci/tests/unit/test_marker_open.c" \
 	-o test_marker_open
 ./test_marker_open
