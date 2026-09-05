@@ -3322,17 +3322,22 @@ ngx_autocert_order_publish_files_at(ngx_autocert_order_t *order, int cfd,
      * A failure AFTER at least one file landed has already mutated the live
      * dir, so this is NOT the POSIX situation where NGX_ERROR means the
      * commit simply did not happen and staging is disposable. Report it as
-     * NGX_ABORT so the caller PRESERVES staging: the files that did not land
-     * are still sitting there and the next attempt can finish the job without
-     * a fresh ACME order. Destroying staging here would leave live torn AND
-     * burn a CA rate-limit slot re-issuing what we already hold.
+     * NGX_ABORT so the caller PRESERVES staging, as FORENSIC EVIDENCE of
+     * which files did and did not land. It is deliberately not a resume
+     * point: ngx_autocert_order_store() unconditionally rm's the staging dir
+     * on entry (see the rm_staging_at above its mkdirat), so the next attempt
+     * starts from a fresh ACME order regardless. Recovery is handled instead
+     * by the freshness path -- ngx_autocert_name_due() pairs the stored key
+     * against the stored leaf, so the torn pair reads as DUE and is reissued
+     * on the next sweep rather than silently wedging the vhost.
      */
     if (rc == NGX_ERROR && landed > 0) {
         ngx_log_error(NGX_LOG_ALERT, order->log, 0,
                       "autocert: PARTIAL publish of \"%s\": %d file(s) "
                       "replaced, then \"%s\" failed; the live key/chain pair "
-                      "may be mismatched. Staging \"%s\" is kept so the "
-                      "remaining files can be published on retry.",
+                      "may be mismatched. Staging \"%s\" is kept for "
+                      "diagnosis; the pair is detected as stale and reissued "
+                      "on the next sweep.",
                       dir, landed, failed != NULL ? failed : "?", staging);
         rc = NGX_ABORT;
     }
