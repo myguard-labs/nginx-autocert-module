@@ -2689,6 +2689,20 @@ ngx_autocert_driver_trylock(ngx_cycle_t *cycle)
         return NGX_ERROR;
     }
 
+    /*
+     * open_dir_path() creates missing path components at 0700, but adopts an
+     * ALREADY EXISTING store directory whatever its owner or mode — a store
+     * pre-created (or substituted) by another local user under e.g. /var/tmp
+     * would otherwise be adopted silently, letting that user plant or swap
+     * certificate material underneath us. Refuse before taking the lock.
+     */
+    if (ngx_autocert_check_owner_mode(bfd, cycle->log, "store directory")
+        != NGX_OK)
+    {
+        (void) ngx_autocert_close(bfd);
+        return NGX_ERROR;
+    }
+
 #if (NGX_WIN32)
     /* W9/B2: gate IN FRONT OF the flock-based serializer below, which is
      * POSIX-only (LockFileEx contention maps to EAGAIN, but the worker-0
