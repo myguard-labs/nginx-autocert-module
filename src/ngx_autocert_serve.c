@@ -164,7 +164,8 @@ static ngx_int_t ngx_http_autocert_cache_reload(ngx_autocert_cert_t *c,
     ngx_autocert_serve_ctx_t *sctx, ngx_log_t *log);
 static ngx_int_t ngx_http_autocert_install_dummy(SSL_CTX *ctx, ngx_log_t *log);
 static ngx_int_t ngx_http_autocert_read_file(ngx_pool_t *pool,
-    u_char *path, ngx_str_t *out, time_t *mtime);
+    u_char *path, ngx_str_t *out, time_t *mtime, ngx_uint_t check_owner,
+    ngx_log_t *log);
 static int ngx_http_autocert_alpn_select(ngx_ssl_conn_t *ssl_conn,
     const unsigned char **out, unsigned char *outlen, const unsigned char *in,
     unsigned int inlen, void *arg);
@@ -1160,8 +1161,10 @@ ngx_http_autocert_cache_reload(ngx_autocert_cert_t *c, ngx_uint_t slot,
         return NGX_ERROR;
     }
 
-    if (ngx_http_autocert_read_file(tmp, chain_path, &chain_pem, NULL) != NGX_OK
-        || ngx_http_autocert_read_file(tmp, key_path, &key_pem, NULL) != NGX_OK)
+    if (ngx_http_autocert_read_file(tmp, chain_path, &chain_pem, NULL, 0, log)
+            != NGX_OK
+        || ngx_http_autocert_read_file(tmp, key_path, &key_pem, NULL, 1, log)
+            != NGX_OK)
     {
         goto done;
     }
@@ -1327,10 +1330,20 @@ done:
 }
 
 
-/* Read a whole file into a pool buffer. Optionally returns its mtime. */
+/*
+ * Read a whole file into a pool buffer. Optionally returns its mtime.
+ *
+ * check_owner gates ngx_autocert_check_owner_mode() on the open fd before any
+ * of it is trusted: the serving key (unlike the fullchain, which is meant to
+ * be servable and carries no secret) must never be loaded from a
+ * world/group-readable file or one owned by someone other than this worker's
+ * euid — the same asymmetry the account key's load path already enforces
+ * (ngx_autocert_account.c). Callers pass 0 for a non-secret path (the
+ * fullchain) and 1 for the key.
+ */
 static ngx_int_t
 ngx_http_autocert_read_file(ngx_pool_t *pool, u_char *path, ngx_str_t *out,
-    time_t *mtime)
+    time_t *mtime, ngx_uint_t check_owner, ngx_log_t *log)
 {
     int                  fd;
     ngx_autocert_stat_t  st;
@@ -1346,6 +1359,13 @@ ngx_http_autocert_read_file(ngx_pool_t *pool, u_char *path, ngx_str_t *out,
     }
 
     if (ngx_autocert_fstat(fd, &st) == -1) {
+        ngx_autocert_close(fd);
+        return NGX_ERROR;
+    }
+
+    if (check_owner
+        && ngx_autocert_check_owner_mode(fd, log, "serving key") != NGX_OK)
+    {
         ngx_autocert_close(fd);
         return NGX_ERROR;
     }

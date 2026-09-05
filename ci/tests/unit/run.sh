@@ -163,6 +163,20 @@ gcc -D_GNU_SOURCE -Wall -Wextra -Werror $CORE_INC \
 	"$NGX/objs/src/core/ngx_string.o" -o test_store_open
 ./test_store_open
 
+# Store-directory / serving-key ownership guard (ngx_autocert_check_owner_mode,
+# ngx_autocert_shared.h): driver.c's trylock and serve.c's cache reload both
+# adopt filesystem state (a store directory, a serving key) that a hostile
+# co-tenant could have pre-created or substituted. open_dir_path()/open_file_
+# path() pin every ancestor against a planted symlink, but say nothing about
+# who owns the inode or what it is writable by -- this guard closes that gap.
+# Exercises real owner-only / group-writable / world-readable dirs and files
+# in a temp tree.
+# shellcheck disable=SC2086
+gcc -D_GNU_SOURCE -Wall -Wextra -Werror $CORE_INC \
+	"$WORKSPACE/ci/tests/unit/test_owner_mode.c" \
+	"$NGX/objs/src/core/ngx_string.o" -o test_owner_mode
+./test_owner_mode
+
 # win32 root-splitting classifier (ngx_autocert_win32_classify_root, W5g):
 # drive-absolute / UNC / relative root recognition, both \ and / separators,
 # and the two drive-relative EINVAL rejects. Compiled unconditionally in

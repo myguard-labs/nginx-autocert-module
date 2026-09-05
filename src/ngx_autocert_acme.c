@@ -1505,11 +1505,29 @@ ngx_autocert_acme_dechunk(ngx_autocert_acme_request_t *r)
         p = eol + sizeof(CRLF) - 1;         /* past the size line */
 
         if (size == 0) {
-            /* last chunk; a trailing CRLF (after optional trailers) ends it. We
-             * tolerate trailers: require at least the final CRLF is present. */
-            eol = ngx_autocert_memmem(p, end - p, CRLF, sizeof(CRLF) - 1);
-            if (eol == NULL) {
-                return NGX_AGAIN;
+            /*
+             * Last chunk. RFC 7230 SS4.1.2: zero or more trailer fields, each
+             * terminated by CRLF, followed by a genuine EMPTY line (a bare
+             * CRLF) that ends the message. A naive "any following CRLF ends
+             * it" search (the pre-fix behaviour) accepts a truncated
+             * "0\r\nFoo: x\r\n" as complete: the first CRLF found is the one
+             * ending the trailer FIELD, not the empty line ending the
+             * message, so a real trailer or a genuinely incomplete stream is
+             * misread as a clean end-of-body. Walk trailer lines one at a
+             * time and require the terminator to be an EMPTY line.
+             */
+            for ( ;; ) {
+                eol = ngx_autocert_memmem(p, end - p, CRLF, sizeof(CRLF) - 1);
+                if (eol == NULL) {
+                    return NGX_AGAIN;      /* line not complete yet */
+                }
+                if (eol == p) {
+                    /* genuine empty line: end of trailers, end of message */
+                    p = eol + sizeof(CRLF) - 1;
+                    break;
+                }
+                /* a trailer field line; skip it and look for the next one */
+                p = eol + sizeof(CRLF) - 1;
             }
             break;
         }

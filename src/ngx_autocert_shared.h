@@ -1177,4 +1177,55 @@ ngx_autocert_win32_dacl_mode(const ngx_int_t *is_owner,
 }
 
 
+/*
+ * Refuse an already-open directory or file fd unless it is owned by our own
+ * euid and carries no group/other permission bits. ngx_autocert_fstat()
+ * fabricates a POSIX-shaped st_mode/st_uid on both platforms (win32's side
+ * walks the real DACL via ngx_autocert_win32_dacl_mode() above), so this one
+ * check is portable without an #ifdef.
+ *
+ * Both the store directory (adopted, not created, whenever it already
+ * exists — driver.c's trylock) and the stored serving key (serve.c's cache
+ * reload) are read from a filesystem the threat model treats as
+ * attacker-writable by another local user: ngx_autocert_open_dir_path()
+ * pins every path component against a planted symlink, but says nothing
+ * about who owns the inode it lands on or what it is writable by. Without
+ * this a directory or key pre-created (or substituted) by another local
+ * user is adopted silently — the same asymmetry account.c's account-key
+ * load path (`ngx_autocert_account.c`, S_ISREG + group/other + owner check)
+ * already closes for the account key.
+ *
+ * `what` names the object in the log line ("store directory", "serving
+ * key"); the caller owns and closes fd. Returns NGX_OK when the check
+ * passes, NGX_ERROR (with a log line already emitted) otherwise.
+ */
+static ngx_inline ngx_int_t
+ngx_autocert_check_owner_mode(int fd, ngx_log_t *log, const char *what)
+{
+    ngx_autocert_stat_t  st;
+
+    if (ngx_autocert_fstat(fd, &st) == -1) {
+        ngx_log_error(NGX_LOG_ERR, log, ngx_errno,
+                      "autocert: fstat(%s) failed", what);
+        return NGX_ERROR;
+    }
+
+    if (st.st_mode & (S_IRWXG | S_IRWXO)) {
+        ngx_log_error(NGX_LOG_ERR, log, 0,
+                      "autocert: %s has group/other permissions "
+                      "(refusing to adopt it)", what);
+        return NGX_ERROR;
+    }
+
+    if (st.st_uid != ngx_autocert_geteuid()) {
+        ngx_log_error(NGX_LOG_ERR, log, 0,
+                      "autocert: %s is not owned by the worker euid "
+                      "(refusing to adopt it)", what);
+        return NGX_ERROR;
+    }
+
+    return NGX_OK;
+}
+
+
 #endif /* _NGX_AUTOCERT_SHARED_H_INCLUDED_ */
