@@ -28,6 +28,7 @@
 #include <openssl/x509.h>
 #include <openssl/x509v3.h>
 #include <openssl/core_names.h>
+#include <openssl/err.h>
 
 #if (OPENSSL_VERSION_NUMBER < 0x30000000L)
 // cppcheck-suppress preprocessorErrorDirective -- intentional OpenSSL 3.0 floor
@@ -1218,9 +1219,78 @@ ngx_autocert_timegm(const struct tm *tm)
  * detect a stored cert whose algorithm no longer matches the slot it was read
  * for (e.g. a pre-dual-cert RSA leaf sitting under the flat EC filename).
  */
+/*
+ * Passphrase callback for the freshness path's private-key probe. Returning 0
+ * means "no passphrase available", so an encrypted PEM fails immediately.
+ * OpenSSL's DEFAULT callback (what PEM_read_bio_PrivateKey(bio,NULL,NULL,NULL)
+ * installs) PROMPTS ON THE TERMINAL, which would block the master's renewal
+ * sweep forever whenever a controlling terminal exists. Never pass NULL here.
+ */
+static int
+ngx_http_autocert_no_passphrase(char *buf, int size, int rwflag, void *u)
+{
+    (void) buf; (void) size; (void) rwflag; (void) u;
+    return 0;
+}
+
+
+/*
+ * Does the private key at `key_path` match `leaf`? Returns NGX_OK on a
+ * verified match, NGX_ABORT when the key is absent, unreadable, encrypted or
+ * simply does not pair with the leaf.
+ *
+ * Why the freshness path needs this at all: the store publishes privkey and
+ * fullchain as two separate files, so a crash or a partially restored backup
+ * can leave a NEW key beside an OLD-but-perfectly-valid chain. That chain
+ * parses, covers the right name, has the right key family and is not yet in
+ * its renew window, so every other freshness test reads it as fresh and no
+ * reissue is ever scheduled — while serve.c's X509_check_private_key rejects
+ * the pair on every handshake and serves nothing. The vhost would stay dark
+ * until the OLD chain's own notAfter finally drifted into the renew window.
+ * Checking the pair here is what turns that silent outage into a reissue.
+ */
+static ngx_int_t
+ngx_http_autocert_key_pairs_with(const char *key_path, X509 *leaf)
+{
+    int        fd;
+    BIO       *bio;
+    EVP_PKEY  *key;
+    int        ok;
+
+    fd = ngx_autocert_open_file_path(key_path, O_RDONLY);
+    if (fd == -1) {
+        return NGX_ABORT;               /* missing/unreadable -> reissue */
+    }
+
+    bio = BIO_new_fd(fd, BIO_CLOSE);    /* BIO owns + closes fd */
+    if (bio == NULL) {
+        (void) ngx_autocert_close(fd);
+        return NGX_ABORT;
+    }
+
+    key = PEM_read_bio_PrivateKey(bio, NULL, ngx_http_autocert_no_passphrase,
+                                  NULL);
+    BIO_free(bio);
+    if (key == NULL) {
+        ERR_clear_error();              /* an unparsable key is not fatal */
+        return NGX_ABORT;
+    }
+
+    ok = X509_check_private_key(leaf, key);
+    EVP_PKEY_free(key);
+
+    if (ok != 1) {
+        ERR_clear_error();              /* mismatch queues an error */
+        return NGX_ABORT;
+    }
+
+    return NGX_OK;
+}
+
+
 ngx_int_t
 ngx_http_autocert_cert_not_after(const char *path, time_t *out, int *key_id,
-    const ngx_str_t *verify_name)
+    const ngx_str_t *verify_name, const char *key_path)
 {
     int         fd;
     BIO        *bio;
@@ -1267,6 +1337,19 @@ ngx_http_autocert_cert_not_after(const char *path, time_t *out, int *key_id,
      */
     if (verify_name != NULL && verify_name->len != 0
         && !ngx_autocert_cert_covers(leaf, verify_name))
+    {
+        X509_free(leaf);
+        return NGX_ABORT;
+    }
+
+    /*
+     * Pair check: the stored private key must actually match this leaf. Same
+     * NGX_ABORT contract as the identity check above -- the caller reissues.
+     * Runs after the identity check so a wrong-domain leaf is still reported
+     * as such, and only when the caller asks (key_path non-NULL).
+     */
+    if (key_path != NULL
+        && ngx_http_autocert_key_pairs_with(key_path, leaf) != NGX_OK)
     {
         X509_free(leaf);
         return NGX_ABORT;
