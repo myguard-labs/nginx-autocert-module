@@ -160,6 +160,14 @@ run_one() {
     if [ "$rc" -eq 0 ]; then
         echo "✓ ${label} (${elapsed}s)"
         PASS+=("$label")
+    elif [ "$rc" -eq 77 ]; then
+        # 77 = the automake convention for "this test does not apply here"
+        # (a capability the build genuinely lacks), as opposed to 0 "it
+        # passed" or anything else "it failed". A script that exits 0 to
+        # opt out is indistinguishable from one that ran and passed, which
+        # is how a suite silently stops testing what it claims to.
+        echo "- ${label} skipped (${elapsed}s)"
+        SKIP+=("$label (not applicable)")
     else
         echo "::error::e2e ${FLAVOR}: ${label} failed (exit ${rc}, ${elapsed}s)"
         FAIL+=("$label")
@@ -218,14 +226,20 @@ chmod +x "$SERVER_BIN" 2>/dev/null || true
 # below can be a plain pool over a flat array instead of two near-identical
 # loops. Skips are decided here, before any slot is spent on them.
 TASK_LABEL=(); TASK_MODE=(); TASK_PATH=(); TASK_ENV=()
+MISSING=()
 
 for entry in "${SCRIPTS[@]}"; do
     script="${entry%%:*}"
     mode="${entry#"$script"}"; mode="${mode#:}"   # "sudo" or ""
     path="$HERE/$script"
     if [ ! -f "$path" ]; then
-        echo "::warning::missing e2e script $script — skipping"
-        SKIP+=("$script (missing)")
+        # A script named in SCRIPTS that is not on disk is a BUG in the suite
+        # (renamed, deleted, or a typo), not a condition to skip past: the
+        # suite would report green while silently testing less than it
+        # declares. A genuinely inapplicable test exits 77 from inside the
+        # script; it never goes missing.
+        echo "::error::e2e script declared in SCRIPTS but not found: $script"
+        MISSING+=("$script")
         continue
     fi
     TASK_LABEL+=("$script"); TASK_MODE+=("${mode:-nosudo}")
@@ -240,8 +254,8 @@ if [ -f "$cvr" ]; then
         TASK_PATH+=("$cvr");                             TASK_ENV+=("CERT_CASE=$case")
     done
 else
-    echo "::warning::cert-validate-reject.sh missing — skipping"
-    SKIP+=("cert-validate-reject.sh (missing)")
+    echo "::error::e2e script declared but not found: cert-validate-reject.sh"
+    MISSING+=("cert-validate-reject.sh")
 fi
 
 # Concurrency. Default 1 = the historical sequential behaviour, so this is inert
@@ -345,11 +359,15 @@ echo "==================== e2e summary (${FLAVOR}) ===================="
 printf 'passed:  %d\n' "${#PASS[@]}"
 printf 'failed:  %d\n' "${#FAIL[@]}"
 printf 'skipped: %d\n' "${#SKIP[@]}"
+printf 'missing: %d\n' "${#MISSING[@]}"
 if [ "${#FAIL[@]}" -gt 0 ]; then
     printf '  FAIL: %s\n' "${FAIL[@]}"
 fi
 if [ "${#SKIP[@]}" -gt 0 ]; then
     printf '  SKIP: %s\n' "${SKIP[@]}"
+fi
+if [ "${#MISSING[@]}" -gt 0 ]; then
+    printf '  MISSING: %s\n' "${MISSING[@]}"
 fi
 
 # Slowest-first, because the only actionable question here is "what is the long
@@ -368,4 +386,6 @@ if [ "${#DURATIONS[@]}" -gt 0 ]; then
 fi
 echo "================================================================"
 
-[ "${#FAIL[@]}" -eq 0 ]
+# A declared-but-absent script fails the suite just like a failing one: it
+# means the suite ran less than it says it runs.
+[ "${#FAIL[@]}" -eq 0 ] && [ "${#MISSING[@]}" -eq 0 ]

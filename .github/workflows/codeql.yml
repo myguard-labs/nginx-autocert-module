@@ -1,4 +1,4 @@
-# sync-sha: 8dfde3ba84779700394d44e419f3bfcd9481a6ef9b98055fa9a0d9981fe06f44
+# sync-sha: 7f279f6d4720ec12cdb8b3aa3eea025b97ba2a41d919586c75999c7c3c14c04d
 name: CodeQL
 
 env:
@@ -70,3 +70,36 @@ jobs:
         uses: github/codeql-action/analyze@8aad20d150bbac5944a9f9d289da16a4b0d87c1e # v4
         with:
           category: /language:c-cpp
+          output: sarif-results
+
+      # analyze@v4 always uploads to the Security tab and always exits 0 --
+      # it has no gate of its own, so an error-level finding merged silently
+      # for as long as this workflow existed. Fail the job here on any SARIF
+      # result whose rule carries security-severity or problem.severity
+      # "error" (CodeQL's own error tier, as opposed to warning/note/
+      # recommendation), so a real defect blocks the branch instead of only
+      # showing up as a Security-tab alert someone has to remember to check.
+      - name: Fail on error-level CodeQL findings
+        if: always()
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          files=(sarif-results/*.sarif)
+          if [ "${#files[@]}" -eq 0 ]; then
+            echo "::error::no SARIF output found under sarif-results/ -- analyze step did not run or output: path changed"
+            exit 1
+          fi
+          count=0
+          for f in "${files[@]}"; do
+            n="$(jq '[.runs[]
+                       | . as $run
+                       | .results[]
+                       | (.level // ($run.tool.driver.rules[.ruleIndex].defaultConfiguration.level // "warning"))
+                       | select(. == "error")] | length' "$f")"
+            count=$((count + n))
+          done
+          echo "error-level CodeQL findings: $count"
+          if [ "$count" -gt 0 ]; then
+            echo "::error::$count error-level CodeQL finding(s) -- see the Security tab for /language:c-cpp"
+            exit 1
+          fi

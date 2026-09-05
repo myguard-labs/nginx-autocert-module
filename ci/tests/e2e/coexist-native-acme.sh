@@ -32,8 +32,12 @@ mkdir -p "$PREFIX/logs" "$PREFIX/conf" "$PREFIX/store"
 
 # Native acme is angie-only. Detect it; skip otherwise (mainline nginx etc.).
 if ! "$SERVER_BIN" -V 2>&1 | grep -q -- '--with-http_acme_module'; then
+    # 77, not 0: this test genuinely does not apply to a server built without
+    # the native acme module, and exiting 0 would make an opt-out
+    # indistinguishable from a pass in the suite summary. run-all.sh maps 77
+    # to "skipped".
     echo "SKIP coexist-native-acme: SERVER_BIN built without native acme module"
-    exit 0
+    exit 77
 fi
 
 # Self-signed leaf so the autocert vhost has a literal ssl_certificate fallback
