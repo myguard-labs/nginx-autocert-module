@@ -1,4 +1,4 @@
-# sync-sha: 21e7ba60a89615b902d78ad269e171f86718ef6736ece4fd51f29eaa9f06de9f
+# sync-sha: b035a4761e722ef69d07aa6bf148b3506064ce312041ac6e4d6b7510398bd708
 name: Build & Test
 
 # Third-party actions pinned to commit SHAs for supply-chain safety.

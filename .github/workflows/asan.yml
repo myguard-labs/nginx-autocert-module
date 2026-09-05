@@ -1,4 +1,4 @@
-# sync-sha: d891c1cb3548c86519c87e95c7ab5daefbbf8a735aaa6ec8bf9c5b3298f5fece
+# sync-sha: fc64db1cc21f2ecc70ab41b5a61a5187d452881f83b6513fb704e0aa1bbdda65
 name: ASan
 
 # Manual ASan+UBSan soak — 30s mixed-load soak of the HTTP-01 serve path with an
