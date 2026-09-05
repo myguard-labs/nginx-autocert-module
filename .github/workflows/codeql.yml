@@ -1,4 +1,4 @@
-# sync-sha: de09239e179cbd63d75aac1b3abce9bbad4356866350dc44164563f21b1a5bb6
+# sync-sha: 5002dc5a51cd92dcc7a92312fc5a01767fb121eeb9de580db696e897658834eb
 name: CodeQL
 
 env:
@@ -91,20 +91,27 @@ jobs:
           fi
           count=0
           for f in "${files[@]}"; do
-            # .ruleIndex is OPTIONAL in SARIF 2.1.0 -- a result may name its
-            # rule by .ruleId alone. Indexing rules[] with a null index is a
-            # hard jq error, which under this step's `set -e` would fail the
-            # job and be reported as an error-level finding when there is
-            # none. Resolve the rule only when an index is actually present,
-            # and fall back to "warning" (SARIF's own default) otherwise.
+            # A result identifies its rule by .ruleId, by .ruleIndex, or by
+            # neither (carrying an explicit .level instead) -- all three are
+            # legal in SARIF 2.1.0. Resolve .ruleId FIRST: indexing rules[]
+            # with a null .ruleIndex is a hard jq error that, under this
+            # step's set -e, fails the job and reports an error-level finding
+            # where there is none; but merely not crashing is not enough --
+            # falling straight through to "warning" would silently DROP a
+            # genuine error-level rule that was named by id alone, turning a
+            # blocking gate into a green one. Only when neither id nor index
+            # resolves do we fall back to "warning", SARIF's own default.
             n="$(jq '[.runs[]
                        | . as $run
                        | .results[]
+                       | . as $r
                        | (.level
-                          // (.ruleIndex as $i
-                              | if $i == null then null
-                                else $run.tool.driver.rules[$i]
-                                       .defaultConfiguration.level end)
+                          // ( ( [ $run.tool.driver.rules[]?
+                                   | select(.id == $r.ruleId) ][0]
+                                 // ($r.ruleIndex as $i
+                                     | if $i == null then null
+                                       else $run.tool.driver.rules[$i] end) )
+                               | .defaultConfiguration.level? )
                           // "warning")
                        | select(. == "error")] | length' "$f")"
             count=$((count + n))
