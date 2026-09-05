@@ -316,3 +316,4 @@ gcc -D_GNU_SOURCE -Wall -Wextra -Werror -Ici/tests/unit -I"$WORKSPACE" \
 	$CORE_INC \
 	-o "$BUILD_DIR/test_slot_fresh" \
 	"$WORKSPACE/ci/tests/unit/test_slot_fresh.c"
+"$BUILD_DIR/test_slot_fresh"
