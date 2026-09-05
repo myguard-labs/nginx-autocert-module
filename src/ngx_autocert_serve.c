@@ -1218,7 +1218,8 @@ ngx_http_autocert_cache_reload(ngx_autocert_cert_t *c, ngx_uint_t slot,
         goto done;
     }
 
-    key = PEM_read_bio_PrivateKey(bio, NULL, NULL, NULL);
+    key = PEM_read_bio_PrivateKey(bio, NULL,
+                                   ngx_http_autocert_no_passphrase_cb, NULL);
     if (key == NULL) {
         ngx_log_error(NGX_LOG_ERR, log, 0,
                       "autocert: bad private key in \"%s\"", key_path);
@@ -1562,7 +1563,8 @@ ngx_http_autocert_serve_alpn_cert(ngx_connection_t *c, SSL *ssl_conn,
         goto done;
     }
 
-    key = PEM_read_bio_PrivateKey(bio, NULL, NULL, NULL);
+    key = PEM_read_bio_PrivateKey(bio, NULL,
+                                   ngx_http_autocert_no_passphrase_cb, NULL);
     if (key == NULL) {
         ngx_log_error(NGX_LOG_ERR, c->log, 0,
                       "autocert: bad tls-alpn-01 key for \"%V\"", host);

@@ -45,6 +45,18 @@ void ngx_http_autocert_key_free(EVP_PKEY *pkey);
 
 
 /*
+ * PEM passphrase callback for PEM_read_bio_PrivateKey() call sites that load
+ * unattended, from-disk keys. A NULL callback makes OpenSSL fall back to its
+ * default console prompt; on an nginx worker with no controlling tty that
+ * blocks forever on a read that will never be answered. This callback always
+ * returns 0 (no passphrase available), so an encrypted key fails to load
+ * cleanly instead of hanging the worker.
+ */
+int ngx_http_autocert_no_passphrase_cb(char *buf, int size, int rwflag,
+    void *u);
+
+
+/*
  * PEM round-trip for persisting the account key. _to_pem writes an unencrypted
  * PKCS#8 private key into *out (pool-allocated). _from_pem parses one back.
  * Both return NGX_OK / NGX_ERROR; _from_pem stores the key in *out (caller

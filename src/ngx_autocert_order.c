@@ -2197,7 +2197,8 @@ ngx_autocert_order_validate_cert(ngx_autocert_order_t *order)
     if (bio == NULL) {
         goto done;
     }
-    key = PEM_read_bio_PrivateKey(bio, NULL, NULL, NULL);
+    key = PEM_read_bio_PrivateKey(bio, NULL,
+                                   ngx_http_autocert_no_passphrase_cb, NULL);
     if (key == NULL) {
         ngx_log_error(NGX_LOG_ERR, order->log, 0,
                       "autocert: order private key did not parse");

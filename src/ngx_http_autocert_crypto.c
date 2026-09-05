@@ -292,6 +292,24 @@ ngx_http_autocert_cert_to_pem(ngx_pool_t *pool, X509 *cert, ngx_str_t *out)
 }
 
 
+/*
+ * PEM passphrase callback shared by every unattended PEM_read_bio_PrivateKey()
+ * call site. See the declaration in ngx_http_autocert_crypto.h: a NULL
+ * callback would otherwise make OpenSSL block on a console prompt an nginx
+ * worker can never answer, so this always fails the passphrase request.
+ */
+int
+ngx_http_autocert_no_passphrase_cb(char *buf, int size, int rwflag, void *u)
+{
+    (void) buf;
+    (void) size;
+    (void) rwflag;
+    (void) u;
+
+    return 0;
+}
+
+
 ngx_int_t
 ngx_http_autocert_key_from_pem(ngx_str_t *pem, EVP_PKEY **out)
 {
@@ -308,7 +326,8 @@ ngx_http_autocert_key_from_pem(ngx_str_t *pem, EVP_PKEY **out)
         return NGX_ERROR;
     }
 
-    pkey = PEM_read_bio_PrivateKey(bio, NULL, NULL, NULL);
+    pkey = PEM_read_bio_PrivateKey(bio, NULL,
+                                    ngx_http_autocert_no_passphrase_cb, NULL);
     BIO_free(bio);
 
     if (pkey == NULL) {
