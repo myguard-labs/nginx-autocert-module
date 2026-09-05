@@ -48,6 +48,9 @@
 
 set -euo pipefail
 
+# shellcheck source=ci/tests/e2e/image-pins.sh
+. "$(dirname "${BASH_SOURCE[0]}")/image-pins.sh"
+
 SERVER_BIN="${SERVER_BIN:?set SERVER_BIN to the built nginx/angie binary}"
 NGX_BUILD_DIR="${NGX_BUILD_DIR:-$(cd "$(dirname "$SERVER_BIN")/.." && pwd)}"
 
@@ -89,7 +92,7 @@ MGMT_PORT=$((DNS_PORT + 1))
 docker run -d --name "$DNS_NAME" --network "$NET_NAME" \
     -p "${DNS_PORT}":53/udp -p "${DNS_PORT}":53/tcp \
     -p "${MGMT_PORT}":8055 \
-    ghcr.io/letsencrypt/pebble-challtestsrv:latest \
+    "$CHALLTESTSRV_IMAGE" \
     -dnsserver :53 -management :8055 \
     -http01 "" -https01 "" -tlsalpn01 "" -doh "" \
     -defaultIPv4 "" -defaultIPv6 "" >/dev/null
@@ -153,7 +156,7 @@ docker run -d --name "$PEBBLE_A" --network "$NET_NAME" \
     -e PEBBLE_VA_NOSLEEP=1 \
     -e PEBBLE_WFE_NONCEREJECT=0 \
     -v "$PREFIX/pebbleA.json:/test/config/pebble-config.json:ro" \
-    ghcr.io/letsencrypt/pebble:latest \
+    "$PEBBLE_IMAGE" \
     -config /test/config/pebble-config.json \
     -dnsserver "${DNS_CONTAINER_IP}:53" -strict >/dev/null
 
@@ -162,7 +165,7 @@ docker run -d --name "$PEBBLE_B" --network "$NET_NAME" \
     -e PEBBLE_VA_NOSLEEP=1 \
     -e PEBBLE_WFE_NONCEREJECT=0 \
     -v "$PREFIX/pebbleB.json:/test/config/pebble-config.json:ro" \
-    ghcr.io/letsencrypt/pebble:latest \
+    "$PEBBLE_IMAGE" \
     -config /test/config/pebble-config.json \
     -dnsserver "${DNS_CONTAINER_IP}:53" -strict >/dev/null
 
