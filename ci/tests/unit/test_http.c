@@ -319,6 +319,31 @@ test_body_framing(void)
     CHECK(rc == NGX_ERROR,
           "body: digit-less chunk-size line rejected");
     ngx_http_fuzz_pool_reset(&pool);
+
+    /* chunked body with a genuine trailer field, correctly terminated by an
+     * empty line, is accepted and the trailer is not mistaken for the body
+     * terminator. */
+    rc = parse_resp(RESP("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n"
+                         "5\r\nhello\r\n0\r\nFoo: x\r\n\r\n"), &r);
+    CHECK(rc == NGX_DONE && r.body_out.len == 5
+          && memcmp(r.body_out.data, "hello", 5) == 0,
+          "body: last chunk with a genuine trailer field + empty line "
+          "terminator accepted");
+    ngx_http_fuzz_pool_reset(&pool);
+
+    /* last chunk followed by a trailer field's CRLF but NO further empty
+     * line is an INCOMPLETE message, not a complete one: "0\r\nFoo: x\r\n" is
+     * merely the end of the trailer field's own line, not the empty line
+     * that closes trailers per RFC 7230 SS4.1.2. The pre-fix parser searched
+     * for "any following CRLF" and stopped at the trailer field's CRLF,
+     * misreading this as a complete body. */
+    rc = parse_resp(RESP("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n"
+                         "5\r\nhello\r\n0\r\nFoo: x\r\n"), &r);
+    CHECK(rc == NGX_AGAIN,
+          "body: last chunk + trailer field with no closing empty line is "
+          "incomplete, not a complete body (regression for the "
+          "any-following-CRLF trailer bug)");
+    ngx_http_fuzz_pool_reset(&pool);
 }
 
 
