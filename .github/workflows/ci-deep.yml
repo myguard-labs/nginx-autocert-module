@@ -155,7 +155,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Setup build deps + ccache
-        uses: ./.github/actions/setup
+        uses: ./.github/actions/setup  # zizmor: ignore[self-repository] actionlint rejects $/ (actionlint#711)
         with:
           packages: >-
             build-essential ccache curl libpcre2-dev libssl-dev pkg-config
@@ -195,7 +195,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Setup build deps + ccache
-        uses: ./.github/actions/setup
+        uses: ./.github/actions/setup  # zizmor: ignore[self-repository] actionlint rejects $/ (actionlint#711)
         with:
           packages: >-
             build-essential ccache curl libpcre2-dev libssl-dev pkg-config
@@ -235,7 +235,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Setup scanner deps + ccache
-        uses: ./.github/actions/setup
+        uses: ./.github/actions/setup  # zizmor: ignore[self-repository] actionlint rejects $/ (actionlint#711)
         with:
           packages: >-
             build-essential ccache clang-tidy flawfinder libpcre2-dev libssl-dev
@@ -341,7 +341,7 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: Build module + load/serve tests
-        uses: ./.github/actions/build-module
+        uses: ./.github/actions/build-module  # zizmor: ignore[self-repository] actionlint rejects $/ (actionlint#711)
         with:
           flavor: angie
           version: ${{ steps.v.outputs.angie_version }}

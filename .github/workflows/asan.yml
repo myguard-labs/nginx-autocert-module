@@ -52,7 +52,7 @@ jobs:
           persist-credentials: false
 
       - name: Setup build deps + ccache
-        uses: ./.github/actions/setup
+        uses: ./.github/actions/setup  # zizmor: ignore[self-repository] actionlint rejects $/ (actionlint#711)
         with:
           packages: >-
             build-essential ccache curl libpcre2-dev libssl-dev pkg-config wget

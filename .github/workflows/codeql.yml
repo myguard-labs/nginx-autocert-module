@@ -44,7 +44,7 @@ jobs:
       # CodeQL must trace real compiler invocations. A restored ccache can
       # satisfy every module object without letting the extractor see C/C++.
       - name: Install build dependencies
-        uses: ./.github/actions/setup
+        uses: ./.github/actions/setup  # zizmor: ignore[self-repository] actionlint rejects $/ (actionlint#711)
         with:
           packages: >-
             build-essential curl libpcre2-dev libssl-dev zlib1g-dev

@@ -63,25 +63,25 @@ jobs:
     name: Build&Test
     permissions:
       contents: read
-    uses: ./.github/workflows/build-test.yml
+    uses: ./.github/workflows/build-test.yml  # zizmor: ignore[self-repository] actionlint rejects $/ (actionlint#711)
 
   security-scanners:
     name: Security scanners
     permissions:
       contents: read
-    uses: ./.github/workflows/security-scanners.yml
+    uses: ./.github/workflows/security-scanners.yml  # zizmor: ignore[self-repository] actionlint rejects $/ (actionlint#711)
 
   fuzzing:
     name: Fuzzing
     permissions:
       contents: read
-    uses: ./.github/workflows/fuzzing.yml
+    uses: ./.github/workflows/fuzzing.yml  # zizmor: ignore[self-repository] actionlint rejects $/ (actionlint#711)
 
   lint:
     name: Lint
     permissions:
       contents: read
-    uses: ./.github/workflows/lint.yml
+    uses: ./.github/workflows/lint.yml  # zizmor: ignore[self-repository] actionlint rejects $/ (actionlint#711)
 
   codeql:
     name: CodeQL
@@ -90,4 +90,4 @@ jobs:
       # Granted per-job, not at workflow level: no other job here needs either.
       security-events: write  # CodeQL uploads its SARIF to code scanning
       actions: read  # the CodeQL action reads run metadata to attribute results
-    uses: ./.github/workflows/codeql.yml
+    uses: ./.github/workflows/codeql.yml  # zizmor: ignore[self-repository] actionlint rejects $/ (actionlint#711)
