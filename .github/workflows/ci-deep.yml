@@ -1,4 +1,4 @@
-# sync-sha: b614b70426114abbec51d9fcb076ab9f3b3a12faebb3812f3cb849137a6e9814
+# sync-sha: d9ba8ce7dddbc81a525430090553e360277427b1c1be655f2df01ad7bdccc797
 name: CI Deep
 
 # Exhaustive dynamic analysis — monthly cron, release, and on-demand only,
@@ -264,7 +264,21 @@ jobs:
           echo "NGINX_SRC_TREE=$GITHUB_WORKSPACE/nginx-${NGINX_VERSION}" >> "$GITHUB_ENV"
       - name: flawfinder
         run: |
-          flawfinder --minlevel=1 "$GITHUB_WORKSPACE/src/" 2>&1 | tee flawfinder.log
+          set -u
+          # --minlevel=1 keeps the low-severity hits in the uploaded log;
+          # --error-level=4 fails the step only at that floor or above. Today's
+          # tree tops out at level 2 (verified locally with flawfinder 2.0.20),
+          # so 4 is clean now and still catches a real level-4/5 regression.
+          # Same floor as security-scanners.yml's PR-gating flawfinder step;
+          # keep the two in sync.
+          #
+          # Status via PIPESTATUS[0], not pipefail alone: piping into tee makes
+          # tee's exit status the pipeline's, which silently discarded
+          # flawfinder's for as long as this step existed. The log must still
+          # be written for "Upload reports" when the tool fails.
+          flawfinder --minlevel=1 --error-level=4 \
+            "$GITHUB_WORKSPACE/src/" 2>&1 | tee flawfinder.log
+          exit "${PIPESTATUS[0]}"
       - name: clang-tidy (cert-*, security.*)
         run: |
           set -euo pipefail
@@ -286,8 +300,21 @@ jobs:
           exit "$status"
       - name: semgrep
         run: |
-          semgrep scan --config p/c --config p/security-audit \
-            "$GITHUB_WORKSPACE/src/" 2>&1 | tee semgrep.log || true
+          set -u
+          # --severity + --error mirror security-scanners.yml's PR-gating
+          # semgrep step: block on WARNING and ERROR, ignore INFO. This step
+          # used to be advisory twice over -- `| tee` handed the pipeline
+          # tee's exit status, and a trailing `|| true` discarded even that --
+          # so this deep scan accepted findings the PR gate would reject.
+          # Clean on today's tree (0 findings, verified locally with semgrep
+          # 1.169.0).
+          #
+          # Status via PIPESTATUS[0] rather than pipefail so semgrep.log is
+          # still written for "Upload reports" when the scan fails.
+          semgrep scan --jobs=1 --metrics=off --config p/c --config p/security-audit \
+            --severity=WARNING --severity=ERROR --error \
+            "$GITHUB_WORKSPACE/src/" 2>&1 | tee semgrep.log
+          exit "${PIPESTATUS[0]}"
       - name: Upload reports
         if: always()
         uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
