@@ -331,7 +331,18 @@ else
             run_one "${TASK_LABEL[$i]}" "$slot" \
                 invoke "${TASK_MODE[$i]}" "${TASK_PATH[$i]}" ${TASK_ENV[$i]:+"${TASK_ENV[$i]}"}
             # Subshell: report the verdict through the filesystem.
-            printf '%s\t%s\t%s\n' "${#FAIL[@]}" "${DURATIONS[0]%%	*}" "${TASK_LABEL[$i]}" \
+            #
+            # The VERDICT is written, not the fail-count. Folding on
+            # "${#FAIL[@]}" alone cannot represent a skip: a task that exits
+            # 77 leaves FAIL empty and would be folded back as a PASS -- the
+            # exact "opting out is indistinguishable from passing" bug the
+            # 77 convention exists to prevent, reintroduced on the
+            # concurrent path only.
+            if   [ "${#FAIL[@]}" -gt 0 ]; then verdict=fail
+            elif [ "${#SKIP[@]}" -gt 0 ]; then verdict=skip
+            else                               verdict=pass
+            fi
+            printf '%s\t%s\t%s\n' "$verdict" "${DURATIONS[0]%%	*}" "${TASK_LABEL[$i]}" \
                 > "$RESULT_DIR/$i"
         ) &
         SLOT_OF_PID[$!]="$slot"
@@ -341,16 +352,23 @@ else
     # Fold the per-task verdicts back into the parent's arrays. A task whose
     # result file is missing (killed, disk full, subshell died before the write)
     # counts as a FAILURE, never as a pass - silence must not read as success.
-    PASS=(); FAIL=(); DURATIONS=()
+    PASS=(); FAIL=(); SKIP=(); DURATIONS=()
     for i in "${!TASK_LABEL[@]}"; do
         if [ ! -s "$RESULT_DIR/$i" ]; then
             echo "::error::e2e ${FLAVOR}: ${TASK_LABEL[$i]} produced no result (worker died?)"
             FAIL+=("${TASK_LABEL[$i]} (no result)")
             continue
         fi
-        IFS=$'\t' read -r nfail secs label < "$RESULT_DIR/$i"
+        IFS=$'\t' read -r verdict secs label < "$RESULT_DIR/$i"
         DURATIONS+=("${secs}	${label}")
-        if [ "$nfail" -eq 0 ]; then PASS+=("$label"); else FAIL+=("$label"); fi
+        # Anything that is not a recognised verdict counts as a FAILURE:
+        # a corrupt or truncated result file must never read as success.
+        case "$verdict" in
+            pass) PASS+=("$label") ;;
+            skip) SKIP+=("$label (not applicable)") ;;
+            fail) FAIL+=("$label") ;;
+            *)    FAIL+=("$label (unreadable result)") ;;
+        esac
     done
 fi
 

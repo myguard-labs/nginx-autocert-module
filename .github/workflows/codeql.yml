@@ -1,4 +1,4 @@
-# sync-sha: 7f279f6d4720ec12cdb8b3aa3eea025b97ba2a41d919586c75999c7c3c14c04d
+# sync-sha: de09239e179cbd63d75aac1b3abce9bbad4356866350dc44164563f21b1a5bb6
 name: CodeQL
 
 env:
@@ -91,10 +91,21 @@ jobs:
           fi
           count=0
           for f in "${files[@]}"; do
+            # .ruleIndex is OPTIONAL in SARIF 2.1.0 -- a result may name its
+            # rule by .ruleId alone. Indexing rules[] with a null index is a
+            # hard jq error, which under this step's `set -e` would fail the
+            # job and be reported as an error-level finding when there is
+            # none. Resolve the rule only when an index is actually present,
+            # and fall back to "warning" (SARIF's own default) otherwise.
             n="$(jq '[.runs[]
                        | . as $run
                        | .results[]
-                       | (.level // ($run.tool.driver.rules[.ruleIndex].defaultConfiguration.level // "warning"))
+                       | (.level
+                          // (.ruleIndex as $i
+                              | if $i == null then null
+                                else $run.tool.driver.rules[$i]
+                                       .defaultConfiguration.level end)
+                          // "warning")
                        | select(. == "error")] | length' "$f")"
             count=$((count + n))
           done
