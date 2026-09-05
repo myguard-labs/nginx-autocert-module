@@ -1197,12 +1197,18 @@ ngx_http_autocert_cache_reload(ngx_autocert_cert_t *c, ngx_uint_t slot,
      * malformed intermediate, which must abort the reload (don't silently
      * accept a truncated chain). Then clear the queue either way.
      */
-    if (ERR_GET_REASON(ERR_peek_last_error()) != PEM_R_NO_START_LINE) {
-        ngx_log_error(NGX_LOG_ERR, log, 0,
-                      "autocert: malformed certificate chain in \"%s\"",
-                      chain_path);
-        ERR_clear_error();
-        goto done;
+    {
+        unsigned long err = ERR_peek_last_error();
+
+        if (ERR_GET_LIB(err) != ERR_LIB_PEM
+            || ERR_GET_REASON(err) != PEM_R_NO_START_LINE)
+        {
+            ngx_log_error(NGX_LOG_ERR, log, 0,
+                          "autocert: malformed certificate chain in \"%s\"",
+                          chain_path);
+            ERR_clear_error();
+            goto done;
+        }
     }
     ERR_clear_error();
 

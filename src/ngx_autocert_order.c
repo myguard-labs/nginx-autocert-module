@@ -2175,11 +2175,18 @@ ngx_autocert_order_validate_cert(ngx_autocert_order_t *order)
         }
         X509_free(x);
     }
-    if (ERR_GET_REASON(ERR_peek_last_error()) != PEM_R_NO_START_LINE) {
-        ngx_log_error(NGX_LOG_ERR, order->log, 0,
-                      "autocert: downloaded chain has a malformed certificate");
-        ERR_clear_error();
-        goto done;
+    {
+        unsigned long err = ERR_peek_last_error();
+
+        if (ERR_GET_LIB(err) != ERR_LIB_PEM
+            || ERR_GET_REASON(err) != PEM_R_NO_START_LINE)
+        {
+            ngx_log_error(NGX_LOG_ERR, order->log, 0,
+                          "autocert: downloaded chain has a malformed "
+                          "certificate");
+            ERR_clear_error();
+            goto done;
+        }
     }
     ERR_clear_error();
 
