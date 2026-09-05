@@ -112,6 +112,11 @@ static ngx_int_t ngx_autocert_order_seed_staging_at(ngx_autocert_order_t *order,
     int cfd, const char *dir, int sfd, ngx_uint_t skip_kt);
 static ngx_int_t ngx_autocert_order_swap_dirs_at(ngx_autocert_order_t *order,
     int cfd, const char *staging, const char *dir);
+#if (NGX_WIN32)
+static ngx_int_t ngx_autocert_order_publish_files_at(
+    ngx_autocert_order_t *order, int cfd, const char *staging,
+    const char *dir);
+#endif
 static ngx_int_t ngx_autocert_order_publish_alpn(ngx_autocert_order_t *order);
 static ngx_int_t ngx_autocert_order_publish_dns(ngx_autocert_order_t *order);
 static ngx_int_t ngx_autocert_order_dns_hook(ngx_autocert_order_t *order,
@@ -2517,9 +2522,12 @@ ngx_autocert_order_domain_safe(ngx_str_t *domain)
  *   - first issuance (no live dir): rename(2) the staging dir into place;
  *   - renewal (live dir exists): renameat2(RENAME_EXCHANGE) swaps the staging
  *     and live dirs in a single syscall, so the whole pair flips at once.
- * On a kernel/filesystem without RENAME_EXCHANGE we fall back to the old
- * sequential two-file rename (key then chain), which keeps a small mismatch
- * window only there. fsync of the parent dir makes the rename itself durable.
+ * On a POSIX kernel/filesystem without RENAME_EXCHANGE we do NOT fall back to
+ * a sequential rename: we defer and retry, keeping the live cert untouched.
+ * win32 has no RENAME_EXCHANGE at all (NTFS cannot rename over an existing
+ * directory), so there the pair is published file by file into the live dir,
+ * each rename atomic on its own; see ngx_autocert_order_publish_files_at().
+ * fsync of the parent dir makes the rename itself durable.
  */
 /*
  * Split a fullchain PEM into the leaf (first certificate) and the rest of the
@@ -2594,6 +2602,24 @@ static const char *ngx_autocert_store_files[] = {
     "privkey.rsa.pem",  "fullchain.rsa.pem",  "cert.rsa.pem",  "chain.rsa.pem",
     NULL
 };
+
+#if (NGX_WIN32)
+/*
+ * The SAME set of files as ngx_autocert_store_files[], but in the order the
+ * win32 per-file commit must publish them (see
+ * ngx_autocert_order_publish_files_at). Order here IS significant: both
+ * private keys are published before either fullchain, because the serve path
+ * triggers a reload off fullchain.pem's mtime. The certbot-only cert.pem /
+ * chain.pem are last — nothing serves from them.
+ */
+static const char *ngx_autocert_publish_order[] = {
+    "privkey.pem",      "privkey.rsa.pem",
+    "fullchain.pem",    "fullchain.rsa.pem",
+    "cert.pem",         "chain.pem",
+    "cert.rsa.pem",     "chain.rsa.pem",
+    NULL
+};
+#endif
 
 /* Per-keytype PEM leaf names. priv/chain always; leaf/rest are certbot-only. */
 static void
@@ -2915,7 +2941,8 @@ ngx_autocert_order_store(ngx_autocert_order_t *order)
                                            (char *) dir);
 
     if (swap == NGX_OK) {
-        /* staging now holds the OLD pair; drop it. */
+        /* POSIX: staging now holds the OLD pair. win32: the per-file publish
+         * left staging holding spent copies. Either way it is garbage now. */
         ngx_autocert_order_rm_staging_at(cfd, (char *) staging);
         rc = ngx_autocert_order_fsync_dirfd(order, cfd, (char *) cdir);
         (void) ngx_autocert_close(cfd);
@@ -2930,14 +2957,37 @@ ngx_autocert_order_store(ngx_autocert_order_t *order)
     }
 
     /*
-     * swap == NGX_DECLINED: this filesystem has no RENAME_EXCHANGE, so the
-     * live pair cannot be replaced atomically. Rather than do a sequential
-     * two-file rename that could leave a mismatched key/chain on a crash,
-     * defer: the live cert is left untouched and renewal retries (backoff).
-     * First issuance is unaffected -- it has no live dir and commits with a
-     * single atomic rename above. This only blocks renewal on exotic stores
-     * (network / fuse / overlay fs); a local cert store always supports
-     * RENAME_EXCHANGE.
+     * swap == NGX_DECLINED (POSIX only — the win32 arm never returns it).
+     *
+     * This filesystem has no RENAME_EXCHANGE, so the live pair cannot be
+     * replaced in one atomic step. We defer rather than fall back to a
+     * sequential two-file rename: the live cert is left untouched and renewal
+     * retries under backoff. First issuance is unaffected -- it has no live
+     * dir and commits with a single atomic rename above. This only blocks
+     * renewal on exotic stores (network / fuse / overlay fs); a local cert
+     * store always supports RENAME_EXCHANGE.
+     *
+     * Why deferring is still right HERE but a per-file publish is right on
+     * win32 — the two are not in contradiction:
+     *
+     *   - On POSIX the atomic whole-dir swap EXISTS. When a filesystem
+     *     declines it, accepting a sequential rename would trade a guarantee
+     *     we can normally keep for a crash window we do not have to accept,
+     *     on a store that is by construction unusual. Deferring costs a
+     *     delayed renewal on an exotic fs and nothing else.
+     *   - On win32 the atomic whole-dir swap DOES NOT EXIST AT ALL: NTFS
+     *     cannot rename over an existing directory. Deferring there is not a
+     *     conservative choice, it is a permanent one — every win32 renewal
+     *     would fail forever and every module-managed certificate would
+     *     silently expire. So the win32 arm publishes file by file, where
+     *     each individual rename IS atomic.
+     *
+     * The crash window that argument gives up on win32 is bounded and
+     * self-healing: a crash between the two renames leaves a mismatched but
+     * PRESENT key/chain pair (never a missing one — staging is fully written
+     * and fsync'd first), and the driver treats an unreadable or corrupt
+     * stored cert as due for reissue, so the next sweep re-issues and
+     * re-publishes instead of wedging on it.
      */
     ngx_log_error(NGX_LOG_ERR, order->log, 0,
                   "autocert: cannot atomically replace \"%s\" (filesystem "
@@ -3126,6 +3176,17 @@ ngx_autocert_order_swap_dirs_at(ngx_autocert_order_t *order, int cfd,
 {
     ngx_int_t  rc;
 
+#if (NGX_WIN32)
+    /*
+     * NTFS cannot rename over an existing directory, so the atomic whole-dir
+     * swap below is unreachable here and ngx_autocert_renameat2() would only
+     * return NGX_DECLINED. Publish the pair file by file instead; each
+     * individual file lands atomically. Rationale and the ordering argument
+     * live on ngx_autocert_order_publish_files_at().
+     */
+    return ngx_autocert_order_publish_files_at(order, cfd, staging, dir);
+#else
+
     rc = ngx_autocert_renameat2(cfd, staging, cfd, dir, RENAME_EXCHANGE);
 
     if (rc == NGX_DECLINED) {
@@ -3140,7 +3201,114 @@ ngx_autocert_order_swap_dirs_at(ngx_autocert_order_t *order, int cfd,
                       "failed", staging, dir);
     }
     return rc;
+#endif
 }
+
+
+#if (NGX_WIN32)
+/*
+ * Windows has no RENAME_EXCHANGE, and NTFS cannot rename over an EXISTING
+ * DIRECTORY at all: FILE_RENAME_INFORMATION with ReplaceIfExists=TRUE is
+ * defined for files, not for a populated directory destination. So the
+ * whole-<seg> directory swap the POSIX path performs is not expressible here
+ * by any sequence of win32 primitives — see ngx_autocert_renameat2() in
+ * ngx_autocert_win32.h, which returns NGX_DECLINED for RENAME_EXCHANGE.
+ *
+ * Instead we publish the pair FILE BY FILE into the live dir. Renaming one
+ * file over an existing file IS atomic on NTFS (ReplaceIfExists=TRUE), so
+ * every individual file a reader opens is always a complete, valid PEM: it
+ * sees either the whole old file or the whole new one, never a partial write.
+ * The staging pair was fully written AND fsync'd by the caller before we are
+ * reached, so each rename below publishes already-durable bytes and the live
+ * dir is never left missing a file.
+ *
+ * ORDERING IS LOAD-BEARING: the private key goes first, the chain second.
+ * The serve path (ngx_http_autocert_cache_reload) stats fullchain.pem and
+ * returns early when its mtime is unchanged — the CHAIN is what triggers a
+ * reload. Publishing the key first means that by the time the chain's mtime
+ * moves and a reload is triggered, the matching key is already in place.
+ * The reverse order would arm a reload against the still-old key on every
+ * renewal, turning a rare race into a guaranteed one.
+ *
+ * Residual window: between the two renames a reader can pair a NEW key with
+ * an OLD chain. That is not a serving fault — serve.c's
+ * X509_check_private_key() rejects the mismatch, logs it and keeps the
+ * previously cached certificate, so the reload is retried rather than a
+ * broken pair served. If the process CRASHES between the two renames the
+ * mismatch is persistent rather than transient, which is still safe: the
+ * driver treats an unreadable/corrupt stored cert as due for reissue, so the
+ * next sweep re-issues and re-publishes rather than wedging on it.
+ */
+static ngx_int_t
+ngx_autocert_order_publish_files_at(ngx_autocert_order_t *order, int cfd,
+    const char *staging, const char *dir)
+{
+    int          sfd, lfd, i;
+    const char  *name;
+    ngx_int_t    rc = NGX_OK;
+
+    sfd = ngx_autocert_openat(cfd, staging,
+                              O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (sfd == -1) {
+        ngx_log_error(NGX_LOG_ERR, order->log, ngx_errno,
+                      "autocert: open staging \"%s\" failed", staging);
+        return NGX_ERROR;
+    }
+
+    lfd = ngx_autocert_openat(cfd, dir,
+                              O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (lfd == -1) {
+        ngx_log_error(NGX_LOG_ERR, order->log, ngx_errno,
+                      "autocert: open live \"%s\" failed", dir);
+        (void) ngx_autocert_close(sfd);
+        return NGX_ERROR;
+    }
+
+    /*
+     * Publish in the fixed order of ngx_autocert_publish_order[]: every
+     * privkey before every fullchain (see ORDERING above), then the
+     * certbot-only cert.pem/chain.pem, which nothing serves from.
+     * A file absent from staging is simply not published — seed_staging_at
+     * has already hardlinked the other keytype's files in, so an absent name
+     * means neither keytype ever issued it.
+     */
+    for (i = 0; (name = ngx_autocert_publish_order[i]) != NULL; i++) {
+        ngx_autocert_stat_t  st;
+
+        if (ngx_autocert_fstatat(sfd, name, &st, AT_SYMLINK_NOFOLLOW) == -1) {
+            if (ngx_errno == NGX_ENOENT) {
+                continue;
+            }
+            ngx_log_error(NGX_LOG_ERR, order->log, ngx_errno,
+                          "autocert: publish fstatat(\"%s\") failed", name);
+            rc = NGX_ERROR;
+            break;
+        }
+        if (!S_ISREG(st.st_mode)) {
+            continue;
+        }
+
+        /* flags==0 => ReplaceIfExists=TRUE: atomic replace of the live file. */
+        if (ngx_autocert_renameat2(sfd, name, lfd, name, 0) != NGX_OK) {
+            ngx_log_error(NGX_LOG_ERR, order->log, ngx_errno,
+                          "autocert: publish rename(\"%s/%s\" -> \"%s/%s\") "
+                          "failed", staging, name, dir, name);
+            rc = NGX_ERROR;
+            break;
+        }
+    }
+
+    if (rc == NGX_OK) {
+        /* Make the renames themselves durable before we report success. */
+        rc = ngx_autocert_order_fsync_dirfd(order, lfd, dir);
+    }
+
+    (void) ngx_autocert_close(lfd);
+    (void) ngx_autocert_close(sfd);
+
+    return rc;
+}
+#endif
 
 
 /* Write data to <leaf> inside the pinned staging dir fd (mode), force perms,
