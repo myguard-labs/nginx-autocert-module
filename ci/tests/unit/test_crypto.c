@@ -564,7 +564,6 @@ static void
 test_key_curve_name(void)
 {
     EVP_PKEY  *pkey;
-    RSA       *rsa;
 
     CHECK(ngx_http_autocert_key_curve_name(NULL) == NULL,
           "key_curve_name(NULL) returns NULL, does not crash");
@@ -588,29 +587,29 @@ test_key_curve_name(void)
     }
 
     /* Non-EC key: EVP_PKEY_base_id != EVP_PKEY_EC short-circuits before any
-     * curve-table lookup -- must return NULL, not misread garbage as a curve. */
-    pkey = EVP_PKEY_new();
-    rsa = RSA_new();
-    CHECK(pkey != NULL && rsa != NULL, "key_curve_name: alloc RSA fixture");
-    if (pkey != NULL && rsa != NULL) {
-        BIGNUM *e = BN_new();
-        CHECK(e != NULL && BN_set_word(e, RSA_F4) == 1
-              && RSA_generate_key_ex(rsa, 2048, e, NULL) == 1,
-              "key_curve_name: generate RSA fixture key");
-        if (EVP_PKEY_assign_RSA(pkey, rsa) == 1) {
-            rsa = NULL;  /* pkey now owns it */
+     * curve-table lookup -- must return NULL, not misread garbage as a curve.
+     *
+     * Built with the EVP keygen API, not RSA_new/RSA_generate_key_ex: the
+     * low-level RSA_* calls are deprecated in OpenSSL 3.0, so under the
+     * suite's -Werror they make this file unbuildable on any OpenSSL 3 host.
+     * EVP_PKEY_keygen is available on 1.1.0+ and 3.x alike. */
+    {
+        EVP_PKEY_CTX  *rctx = EVP_PKEY_CTX_new_id(EVP_PKEY_RSA, NULL);
+
+        pkey = NULL;
+        CHECK(rctx != NULL, "key_curve_name: alloc RSA keygen ctx");
+        if (rctx != NULL) {
+            CHECK(EVP_PKEY_keygen_init(rctx) == 1
+                  && EVP_PKEY_CTX_set_rsa_keygen_bits(rctx, 2048) == 1
+                  && EVP_PKEY_keygen(rctx, &pkey) == 1 && pkey != NULL,
+                  "key_curve_name: generate RSA fixture key");
+            EVP_PKEY_CTX_free(rctx);
+        }
+        if (pkey != NULL) {
             CHECK(ngx_http_autocert_key_curve_name(pkey) == NULL,
                   "key_curve_name(RSA key) returns NULL, not a curve name");
+            EVP_PKEY_free(pkey);
         }
-        if (e != NULL) {
-            BN_free(e);
-        }
-    }
-    if (rsa != NULL) {
-        RSA_free(rsa);
-    }
-    if (pkey != NULL) {
-        EVP_PKEY_free(pkey);
     }
 }
 
