@@ -1405,9 +1405,12 @@ ngx_http_autocert_alpn_select(ngx_ssl_conn_t *ssl_conn,
             }
 
             if (ngx_autocert_alpn_conn_index != -1) {
-                (void) SSL_set_ex_data(ssl_conn,
-                                       ngx_autocert_alpn_conn_index,
-                                       (void *) 1);
+                if (SSL_set_ex_data(ssl_conn,
+                                    ngx_autocert_alpn_conn_index,
+                                    (void *) 1) != 1)
+                {
+                    return SSL_TLSEXT_ERR_ALERT_FATAL;
+                }
             }
 
             return SSL_TLSEXT_ERR_OK;
