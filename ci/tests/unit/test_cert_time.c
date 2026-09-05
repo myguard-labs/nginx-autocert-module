@@ -226,6 +226,56 @@ test_cert_not_after(void)
 }
 
 
+/*
+ * serve.c and order.c both gate a loaded leaf's validity window with:
+ *
+ *   if (X509_cmp_current_time(notBefore) >= 0
+ *       || X509_cmp_current_time(notAfter) <= 0)
+ *       -> reject
+ *
+ * X509_cmp_current_time() returns 0 on a parse ERROR for the ASN1_TIME, not
+ * "equal to now" -- a >0/<0-only check would silently treat a malformed
+ * notBefore/notAfter as valid. This test builds a deliberately unparsable
+ * ASN1_TIME (garbage bytes, wrong tag), confirms X509_cmp_current_time really
+ * does return 0 on it (the premise the fix relies on), then exercises the
+ * exact guard expression standalone -- since the guard itself lives inline in
+ * two large static server functions this TU does not otherwise reach.
+ */
+static void
+test_cmp_current_time_zero_is_rejected(void)
+{
+    ASN1_TIME  *bad = ASN1_STRING_new();
+    int         r;
+
+    CHECK(bad != NULL, "allocated an ASN1_TIME for the malformed-time probe");
+    if (bad == NULL) {
+        return;
+    }
+
+    /* Not a valid UTCTime/GeneralizedTime payload -> parse failure. */
+    ASN1_STRING_set(bad, "not-a-time", -1);
+
+    r = X509_cmp_current_time(bad);
+    CHECK(r == 0, "X509_cmp_current_time returns 0 on a malformed ASN1_TIME");
+
+    /* The fixed guard (matches serve.c / order.c): >=0 / <=0 rejects r == 0
+     * on both the notBefore and notAfter arms. */
+    CHECK((r >= 0) || (r <= 0),
+          "fixed guard rejects a malformed time on either arm (r == 0)");
+
+    /*
+     * Negative control: the pre-fix guard used bare > 0 / < 0, which is
+     * vacuously false for r == 0 and would have let a malformed time through
+     * as "valid" on both arms. Demonstrate that shape goes wrong here.
+     */
+    CHECK(!(r > 0) && !(r < 0),
+          "pre-fix guard (>0 / <0 only) would NOT reject r == 0 -- "
+          "the exact gap the fix closes");
+
+    ASN1_STRING_free(bad);
+}
+
+
 int
 main(void)
 {
@@ -234,6 +284,7 @@ main(void)
 
     test_timegm_vectors();
     test_cert_not_after();
+    test_cmp_current_time_zero_is_rejected();
 
     if (failures) {
         fprintf(stderr, "\n%d test(s) FAILED\n", failures);

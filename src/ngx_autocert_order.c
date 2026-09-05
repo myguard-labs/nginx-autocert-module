@@ -2228,8 +2228,14 @@ ngx_autocert_order_validate_cert(ngx_autocert_order_t *order)
                       &order->domain);
         goto done;
     }
-    if (X509_cmp_current_time(X509_get0_notBefore(leaf)) > 0
-        || X509_cmp_current_time(X509_get0_notAfter(leaf)) < 0)
+    /*
+     * X509_cmp_current_time() returns 0 on a parse ERROR for the given time,
+     * not "equal to now" — a >0/<0-only check would silently accept a
+     * malformed notBefore/notAfter as valid. Reject that alongside an
+     * out-of-window certificate.
+     */
+    if (X509_cmp_current_time(X509_get0_notBefore(leaf)) >= 0
+        || X509_cmp_current_time(X509_get0_notAfter(leaf)) <= 0)
     {
         ngx_log_error(
             NGX_LOG_ERR, order->log, 0,
