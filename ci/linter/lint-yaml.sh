@@ -33,6 +33,14 @@
 # that are genuinely inapplicable get a `# zizmor: ignore[rule]` at the line,
 # with the reason -- never a blanket rule disable in zizmor.yml.
 #
+# DO NOT "fix" the self-repository findings by taking zizmor's offered autofix.
+# zizmor wants `uses: $/.github/actions/setup` instead of `./...`. That IS real
+# GitHub Actions syntax, but actionlint 1.7.7 REJECTS it (actionlint#711), and
+# both tools run in this script under `|| rc=1` -- so applying the autofix just
+# moves the red from zizmor to actionlint. The findings are suppressed per line
+# instead. Revisit only once actionlint accepts `$/`; then drop the
+# `# zizmor: ignore[self-repository]` comments and re-run this script.
+#
 # --offline: no API calls from a commit hook. The online audits need a token and
 # only add repo-settings context, which belongs in a periodic review, not here.
 #
