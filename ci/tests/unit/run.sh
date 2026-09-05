@@ -324,3 +324,21 @@ gcc -D_GNU_SOURCE -Wall -Wextra -Werror -Ici/tests/unit -I"$WORKSPACE" \
 	-o "$BUILD_DIR/test_slot_fresh" \
 	"$WORKSPACE/ci/tests/unit/test_slot_fresh.c"
 "$BUILD_DIR/test_slot_fresh"
+
+# Config-time name/contact validation (audit MINOR): server_name/
+# autocert_wildcard values land verbatim, unescaped, in the ACME newOrder
+# JSON and as a filesystem path segment; autocert_contact's email is
+# json_safe-checked today only at ACME-bootstrap time. Both gates now run at
+# `nginx -t` (ngx_http_autocert_add_name / ngx_http_autocert_contact in
+# ngx_http_autocert_module.c). ngx_autocert_dns_name_valid is header-only
+# (ngx_autocert_ident.h, same file test_ipident.c already exercises this
+# way); ngx_autocert_account_json_safe is sliced by the same
+# extract_jsonsafe.sh test_account_jsonsafe uses above. A wildcard
+# ("*.example.com") and a punycode label ("xn--...") MUST still be accepted
+# -- an over-strict gate here breaks a working config, which is worse than
+# the bug this closes.
+# shellcheck disable=SC2086
+gcc -Wall -Wextra -Werror -Ici/tests/unit -I"$WORKSPACE" $HTTP_INC \
+	-o "$BUILD_DIR/test_name_valid" \
+	"$WORKSPACE/ci/tests/unit/test_name_valid.c" -lssl -lcrypto
+"$BUILD_DIR/test_name_valid"
