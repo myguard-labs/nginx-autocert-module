@@ -1,4 +1,4 @@
-# sync-sha: 32cfd3d08a6819cf10cd9195a8e7c25098ce0d4c3b59290aa41379b91a588825
+# sync-sha: 8a00d132a3e11f87f2d885b33ac92b7bbe2683db3d36243d8ff9eec214143391
 name: Windows build
 
 # Native Windows port gate (W17). Proves the module compiles and links on
@@ -1315,7 +1315,7 @@ jobs:
       # and every renewal failed while first issuance kept passing CI.
       #
       # Method (mirrors ci/tests/e2e/renewal.sh):
-      #   - Pebble issues SHORT-lived certs (certificateValidityPeriod 3600 =
+      #   - Pebble issues SHORT-lived certs (profiles.default.validityPeriod 3600 =
       #     1h) and autocert_renew_before is 2h. 2h > 1h means a freshly issued
       #     cert is ALWAYS already inside its renew window, so the next scan
       #     reissues it. No clock skew, no waiting.
@@ -1362,7 +1362,7 @@ jobs:
           $pebbleCert = Get-Item "$root/pebble-cert.pem"
           $pebbleKey  = Get-Item "$root/pebble-key.pem"
 
-          # certificateValidityPeriod is what makes renew_before 2h bite: a 1h
+          # The profile validityPeriod is what makes renew_before 2h bite: a 1h
           # cert is inside a 2h renew window the moment it is issued.
           $pebbleConfig = @{
             pebble = @{
@@ -1374,7 +1374,17 @@ jobs:
               tlsPort                     = 5998
               ocspResponderURL            = ''
               externalAccountBindingRequired = $false
-              certificateValidityPeriod   = 3600
+              # Validity comes from the PROFILE, not the legacy top-level
+              # certificateValidityPeriod key -- this Pebble reads profiles and
+              # silently ignores the old key even under -strict, which made the
+              # lane issue 90d certs and never renew. Matches
+              # ci/tests/e2e/renewal.sh.
+              profiles                    = @{
+                default = @{
+                  description    = 'short-lived certs so renew_before forces a renewal'
+                  validityPeriod = 3600
+                }
+              }
             }
           } | ConvertTo-Json -Depth 5
           Set-Content -Encoding ascii -Path "$root/pebble-config.json" -Value $pebbleConfig
