@@ -115,24 +115,36 @@ typedef unsigned int  ngx_autocert_mode_t;
  * include-order or `_WIN32_WINNT` problem; the header is simply unusable
  * here. So this struct and these macros are our own, not UCRT's.
  *
- * Five members: st_mode, st_nlink, st_size, st_mtime, st_uid are the only
- * fields any call site in this repo reads (grepped for every `\.st_[a-z]+`/
- * `->st_[a-z]+` against a `struct stat`/`ngx_autocert_stat_t` in src/ —
- * account.c's ownership check reads st_uid, ngx_http_autocert_cache_reload's
- * and ngx_http_autocert_read_file's mtime-reload logic in serve.c reads
- * st_mtime). st_size is `off_t` — nginx's own `__int64` typedef on win32 —
- * so the existing `<= 0` / `> NGX_AUTOCERT_REQUEST_NAME_MAX` checks keep
- * 64-bit semantics; a `_off_t` (32-bit on UCRT, and undefined here
- * regardless) would silently truncate them. st_mode uses
- * ngx_autocert_mode_t, matching the POSIX side. st_mtime is populated via
- * nginx's own `ngx_file_mtime()` FILETIME conversion (ngx_files.h), the same
- * one the core win32 file-info path already uses. st_uid has no win32
- * meaning, same as ngx_autocert_geteuid() above (W7): the shim bodies set it
- * to the identical placeholder ngx_autocert_geteuid() returns, so
- * account.c's `st.st_uid != ngx_autocert_geteuid()` ownership check keeps
- * compiling and takes the same "always unprivileged, always safe default"
- * branch geteuid() already documents — this is not a new privilege decision,
- * real ownership verification is still W11 (key ACL) as already noted above.
+ * Six members: st_mode, st_nlink, st_size, st_mtime, st_uid, st_ino are the
+ * only fields any call site in this repo reads (grepped for every
+ * `\.st_[a-z]+`/`->st_[a-z]+` against a `struct stat`/`ngx_autocert_stat_t`
+ * in src/ — account.c's ownership check reads st_uid,
+ * ngx_http_autocert_cache_reload's and ngx_http_autocert_read_file's
+ * freshness logic in serve.c reads st_mtime and (audit MINOR) st_ino). st_size
+ * is `off_t` — nginx's own `__int64` typedef on win32 — so the existing
+ * `<= 0` / `> NGX_AUTOCERT_REQUEST_NAME_MAX` checks keep 64-bit semantics; a
+ * `_off_t` (32-bit on UCRT, and undefined here regardless) would silently
+ * truncate them. st_mode uses ngx_autocert_mode_t, matching the POSIX side.
+ * st_mtime is populated via nginx's own `ngx_file_mtime()` FILETIME
+ * conversion (ngx_files.h), the same one the core win32 file-info path
+ * already uses — like the POSIX `time_t st_mtime`, this is WHOLE-SECOND
+ * resolution only: nginx defines no portable sub-second accessor on either
+ * platform (`ngx_file_mtime()` divides FILETIME's 100ns ticks down to whole
+ * seconds; POSIX `st_mtime` is itself second-granular, `st_mtim.tv_nsec` is
+ * a distinct, non-portable field nginx's own file-info layer never exposes).
+ * st_ino is nginx's own `ngx_file_uniq_t` (uint64_t on win32, ino_t on
+ * POSIX) — populated here from `BY_HANDLE_FILE_INFORMATION`'s
+ * nFileIndexHigh/nFileIndexLow via `ngx_file_uniq()`, the exact same macro
+ * ngx_open_file_cache already uses for this purpose. Note NTFS file IDs are
+ * not stable across a volume format-and-restore the way an inode number
+ * mostly is, but they ARE stable across the rename+replace an ACME renewal
+ * performs, which is what this guards. st_uid has no win32 meaning, same as
+ * ngx_autocert_geteuid() above (W7): the shim bodies set it to the identical
+ * placeholder ngx_autocert_geteuid() returns, so account.c's
+ * `st.st_uid != ngx_autocert_geteuid()` ownership check keeps compiling and
+ * takes the same "always unprivileged, always safe default" branch geteuid()
+ * already documents — this is not a new privilege decision, real ownership
+ * verification is still W11 (key ACL) as already noted above.
  *
  * The `S_IF*`/`S_IS*`/`S_IRWX*` macros are `#ifndef`-guarded rather than
  * defined unconditionally: MinGW-w64's own headers may already supply some
@@ -145,6 +157,7 @@ typedef struct {
     off_t                st_size;
     time_t               st_mtime;
     ngx_uid_t            st_uid;
+    ngx_file_uniq_t      st_ino;
 } ngx_autocert_stat_t;
 
 #ifndef S_IFMT
@@ -1614,6 +1627,7 @@ static ngx_inline int ngx_autocert_fstatat( int dfd, const char *name,
     st->st_size = ngx_file_size(&info);
     st->st_mtime = ngx_file_mtime(&info);
     st->st_uid = ngx_autocert_geteuid();
+    st->st_ino = ngx_file_uniq(&info);
 
     return 0;
 }
@@ -1665,6 +1679,7 @@ ngx_autocert_fstat(int fd, ngx_autocert_stat_t *st)
     st->st_size = ngx_file_size(&info);
     st->st_mtime = ngx_file_mtime(&info);
     st->st_uid = ngx_autocert_geteuid();
+    st->st_ino = ngx_file_uniq(&info);
 
     return 0;
 }
