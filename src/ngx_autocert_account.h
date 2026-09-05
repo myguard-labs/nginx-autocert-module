@@ -134,4 +134,18 @@ ngx_int_t ngx_autocert_account_post(ngx_autocert_account_t *acct,
     void *data);
 
 
+/*
+ * Reject a byte that would break out of a JSON string when embedded verbatim
+ * (control char < 0x20, '"', '\\'). Used internally on ACME response bytes
+ * (kid/nonce/urls) before they land in a signed JWS payload; also called from
+ * ngx_http_autocert_module.c at config-parse time on autocert_contact so a
+ * JSON-unsafe email fails nginx -t instead of only the runtime newAccount
+ * POST. Both call sites are compiled into the same ngx_http_autocert_module
+ * .so (see this project's config script), so no ABI/versioning concern
+ * applies (contrast ngx_autocert_requests.c's vendored-into-two-.so's helpers,
+ * which must not gain new callers or new accepted shapes).
+ */
+ngx_uint_t ngx_autocert_account_json_safe(ngx_str_t *s);
+
+
 #endif /* _NGX_AUTOCERT_ACCOUNT_H_INCLUDED_ */

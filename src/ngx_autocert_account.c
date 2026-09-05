@@ -44,7 +44,6 @@ static ngx_uint_t ngx_autocert_account_is_bad_nonce(
     ngx_autocert_acme_request_t *req);
 static ngx_int_t ngx_autocert_account_set_nonce(ngx_autocert_account_t *acct,
     ngx_str_t *nonce);
-static ngx_uint_t ngx_autocert_account_json_safe(ngx_str_t *s);
 static ngx_int_t ngx_autocert_account_build_eab(ngx_autocert_account_t *acct,
     ngx_str_t *jwk, ngx_str_t *out);
 static void ngx_autocert_account_finish(ngx_autocert_account_t *acct,
@@ -1014,8 +1013,13 @@ static ngx_int_t ngx_autocert_account_set_nonce(ngx_autocert_account_t *acct,
  * or a backslash would corrupt the protected header or inject a field. ACME
  * tokens/URLs/nonces never legitimately contain these, so reject rather than
  * escape — a value with them is a malformed/hostile server response.
+ *
+ * Not static: ngx_http_autocert_contact() (ngx_http_autocert_module.c, same
+ * .so — see this project's config script) calls this at config-parse time so
+ * a JSON-unsafe autocert_contact value fails nginx -t instead of only
+ * surfacing as a runtime newAccount POST error.
  */
-static ngx_uint_t
+ngx_uint_t
 ngx_autocert_account_json_safe(ngx_str_t *s)
 {
     size_t  i;
