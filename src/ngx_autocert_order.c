@@ -2605,27 +2605,15 @@ static const char *ngx_autocert_store_files[] = {
 
 #if (NGX_WIN32)
 /*
- * The SAME set of files as ngx_autocert_store_files[], but in the order the
- * win32 per-file commit must publish them (see
- * ngx_autocert_order_publish_files_at).
- *
- * Order here IS significant, and the invariant is PER SLOT: each slot's
- * private key must be published before THAT SLOT's fullchain. The serve path
- * keeps a per-slot cached mtime (serve.c's ngx_autocert_slot_chain_name[] and
- * sl->mtime) and arms a reload for a slot off that slot's own chain -- the EC
- * slot off fullchain.pem, the RSA slot off fullchain.rsa.pem -- so each slot
- * needs its key in place before its own chain moves. Publishing both keys
- * ahead of both chains, as the order below does, satisfies that for both
- * slots at once; it is a sufficient ordering, not the invariant itself.
- * The certbot-only cert.pem / chain.pem are last -- nothing serves from them.
+ * The win32 per-file commit publishes ONLY the four names belonging to the
+ * ISSUING order's own key_type (see ngx_autocert_order_publish_files_at).
+ * The other keytype's files were already hardlink-seeded into staging by
+ * ngx_autocert_order_seed_staging_at() and are correct in the live dir as-is;
+ * renaming them again would be a no-op copy that still bumps the live file's
+ * mtime, and serve.c's per-slot reload is armed off that mtime
+ * (ngx_autocert_slot_chain_name[] / sl->mtime), so touching the other slot's
+ * files would spuriously arm a reload for a cert that did not change.
  */
-static const char *ngx_autocert_publish_order[] = {
-    "privkey.pem",      "privkey.rsa.pem",
-    "fullchain.pem",    "fullchain.rsa.pem",
-    "cert.pem",         "chain.pem",
-    "cert.rsa.pem",     "chain.rsa.pem",
-    NULL
-};
 #endif
 
 /* Per-keytype PEM leaf names. priv/chain always; leaf/rest are certbot-only. */
@@ -2981,20 +2969,10 @@ ngx_autocert_order_store(ngx_autocert_order_t *order)
      * renewal on exotic stores (network / fuse / overlay fs); a local cert
      * store always supports RENAME_EXCHANGE.
      *
-     * Why deferring is still right HERE but a per-file publish is right on
-     * win32 — the two are not in contradiction:
-     *
-     *   - On POSIX the atomic whole-dir swap EXISTS. When a filesystem
-     *     declines it, accepting a sequential rename would trade a guarantee
-     *     we can normally keep for a crash window we do not have to accept,
-     *     on a store that is by construction unusual. Deferring costs a
-     *     delayed renewal on an exotic fs and nothing else.
-     *   - On win32 the atomic whole-dir swap DOES NOT EXIST AT ALL: NTFS
-     *     cannot rename over an existing directory. Deferring there is not a
-     *     conservative choice, it is a permanent one — every win32 renewal
-     *     would fail forever and every module-managed certificate would
-     *     silently expire. So the win32 arm publishes file by file, where
-     *     each individual rename IS atomic.
+     * Deferring is right here because POSIX HAS an atomic whole-dir swap to
+     * fall back on later; win32 has no such swap at all (NTFS cannot rename
+     * over an existing directory), so it cannot defer without failing every
+     * renewal forever -- it publishes file by file instead, below.
      *
      * The crash window that argument gives up on win32 is bounded and
      * self-healing: a crash between the two renames leaves a mismatched but
@@ -3235,14 +3213,24 @@ ngx_autocert_order_swap_dirs_at(ngx_autocert_order_t *order, int cfd,
  * reached, so each rename below publishes already-durable bytes and the live
  * dir is never left missing a file.
  *
- * ORDERING IS LOAD-BEARING, per slot: each slot's private key goes before
- * that slot's chain. The serve path (ngx_http_autocert_cache_reload) stats
- * the SLOT's chain and returns early when that slot's cached mtime is
- * unchanged — the chain is what triggers a reload for its slot. Publishing
+ * Only the ISSUING order's own key_type is published here: priv, chain, leaf,
+ * rest, from ngx_autocert_keytype_pem_names(order->key_type, ...). The OTHER
+ * keytype's files are never touched -- ngx_autocert_order_seed_staging_at()
+ * already hardlinked them into staging and they are already correct in the
+ * live dir, so renaming them again would be a no-op copy that still bumps
+ * the live file's mtime. serve.c's per-slot reload is armed off that mtime
+ * (ngx_autocert_slot_chain_name[] / sl->mtime), so touching the other slot's
+ * files would spuriously arm a reload for a cert that never changed.
+ *
+ * ORDERING IS LOAD-BEARING within this one keytype: the private key must be
+ * published before the chain. The serve path (ngx_http_autocert_cache_reload)
+ * stats the SLOT's chain and returns early when that slot's cached mtime is
+ * unchanged -- the chain is what triggers a reload for its slot. Publishing
  * the key first means that by the time the chain's mtime moves and a reload
  * is armed, the matching key is already in place. The reverse order would arm
  * a reload against the still-old key on every renewal, turning a rare race
- * into a guaranteed one. ngx_autocert_publish_order[] encodes this.
+ * into a guaranteed one. leaf/rest are certbot-only; nothing serves from them,
+ * so they are published last, in either order.
  *
  * Residual window: between the two renames a reader can pair a NEW key with
  * an OLD chain. That is not a serving fault — serve.c's
@@ -3262,6 +3250,16 @@ ngx_autocert_order_publish_files_at(ngx_autocert_order_t *order, int cfd,
     const char  *name;
     const char  *failed = NULL;
     ngx_int_t    rc = NGX_OK;
+    const char  *publish_order[5];
+    const char  *priv_name, *chain_name, *leaf_name, *rest_name;
+
+    ngx_autocert_keytype_pem_names(order->key_type, &priv_name, &chain_name,
+                                    &leaf_name, &rest_name);
+    publish_order[0] = priv_name;
+    publish_order[1] = chain_name;
+    publish_order[2] = leaf_name;
+    publish_order[3] = rest_name;
+    publish_order[4] = NULL;
 
     sfd = ngx_autocert_openat(cfd, staging,
                               O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
@@ -3281,14 +3279,12 @@ ngx_autocert_order_publish_files_at(ngx_autocert_order_t *order, int cfd,
     }
 
     /*
-     * Publish in the fixed order of ngx_autocert_publish_order[]: every
-     * privkey before every fullchain (see ORDERING above), then the
-     * certbot-only cert.pem/chain.pem, which nothing serves from.
-     * A file absent from staging is simply not published — seed_staging_at
-     * has already hardlinked the other keytype's files in, so an absent name
-     * means neither keytype ever issued it.
+     * Publish ONLY this order's own key_type: priv, chain, leaf, rest (see
+     * ORDERING above). The other keytype's files are hardlink-seeded and
+     * deliberately left alone. A file absent from staging (leaf/rest under
+     * the secure store layout) is simply not published.
      */
-    for (i = 0; (name = ngx_autocert_publish_order[i]) != NULL; i++) {
+    for (i = 0; (name = publish_order[i]) != NULL; i++) {
         ngx_autocert_stat_t  st;
 
         if (ngx_autocert_fstatat(sfd, name, &st, AT_SYMLINK_NOFOLLOW) == -1) {
@@ -3332,27 +3328,33 @@ ngx_autocert_order_publish_files_at(ngx_autocert_order_t *order, int cfd,
      * on the next sweep rather than silently wedging the vhost.
      */
     if (rc == NGX_ERROR && landed > 0) {
+        /* PARTIAL publish: some files already landed in the live dir, the
+         * rest are still only in staging, and the live key/chain pair may be
+         * mismatched. Staging is kept (dir, staging) for diagnosis; the
+         * mismatched pair reads as stale and is reissued on the next sweep
+         * rather than wedging the vhost. */
         ngx_log_error(NGX_LOG_ALERT, order->log, 0,
                       "autocert: PARTIAL publish of \"%s\": %d file(s) "
-                      "replaced, then \"%s\" failed; the live key/chain pair "
-                      "may be mismatched. Staging \"%s\" is kept for "
-                      "diagnosis; the pair is detected as stale and reissued "
-                      "on the next sweep.",
+                      "replaced, then \"%s\" failed; staging \"%s\" kept",
                       dir, landed, failed != NULL ? failed : "?", staging);
         rc = NGX_ABORT;
     }
 
     if (rc == NGX_OK) {
         /*
-         * Best-effort durability barrier for the renames. NOTE: on win32
-         * ngx_autocert_fsync_dir() is an unconditional no-op (there is no
-         * portable directory-fsync there), so this does NOT make the rename
-         * metadata durable the way the POSIX path's parent-dir fsync does.
-         * What IS durable is the staging CONTENTS: every PEM was written and
-         * fsync'd by the caller before we were reached. A crash can therefore
-         * lose a rename, never a half-written file.
+         * Best-effort durability barrier for the renames. On win32
+         * ngx_autocert_fsync_dir() is an unconditional no-op today, so a
+         * failure here cannot happen yet -- but if that ever changes, every
+         * file has ALREADY landed in the live dir at this point, so treat a
+         * fsync failure as non-fatal: log it and keep NGX_OK rather than
+         * returning NGX_ERROR after the commit already happened (every byte
+         * was fsync'd in staging before publish, so nothing is lost).
          */
-        rc = ngx_autocert_order_fsync_dirfd(order, lfd, dir);
+        if (ngx_autocert_order_fsync_dirfd(order, lfd, dir) != NGX_OK) {
+            ngx_log_error(NGX_LOG_WARN, order->log, 0,
+                          "autocert: fsync(\"%s\") failed after publish; "
+                          "files already landed, continuing", dir);
+        }
     }
 
     (void) ngx_autocert_close(lfd);
