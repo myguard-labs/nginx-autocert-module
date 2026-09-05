@@ -3174,8 +3174,6 @@ static ngx_int_t
 ngx_autocert_order_swap_dirs_at(ngx_autocert_order_t *order, int cfd,
     const char *staging, const char *dir)
 {
-    ngx_int_t  rc;
-
 #if (NGX_WIN32)
     /*
      * NTFS cannot rename over an existing directory, so the atomic whole-dir
@@ -3186,6 +3184,7 @@ ngx_autocert_order_swap_dirs_at(ngx_autocert_order_t *order, int cfd,
      */
     return ngx_autocert_order_publish_files_at(order, cfd, staging, dir);
 #else
+    ngx_int_t  rc;
 
     rc = ngx_autocert_renameat2(cfd, staging, cfd, dir, RENAME_EXCHANGE);
 
