@@ -1190,10 +1190,35 @@ ngx_autocert_dns_hook_spawn(ngx_autocert_order_t *order, ngx_str_t *hook,
 
     if (pid == 0) {
         long  maxfd, fd;
+        int   nullfd;
         extern char **environ;
 
         (void) sigprocmask(SIG_SETMASK, &order->dns_hook_sigmask, NULL);
         (void) setpgid(0, 0);
+
+        /*
+         * Redirect stdin and stdout to /dev/null before the close-everything
+         * loop below: without this the hook inherits this worker's real
+         * stdin/stdout (whatever nginx was started against — a log pipe, a
+         * terminal, or nothing at all), and an arbitrary operator-configured
+         * hook program has no business reading or writing either. stderr
+         * (fd 2) is deliberately LEFT connected to the worker's stderr: the
+         * win32 arm of this same hook only reports an exit code (see its
+         * comment above), so fd 2 is the one channel a hook has to surface a
+         * diagnostic, and nginx's own stderr is already whatever the admin
+         * chose it to be (typically the error log or /dev/null), not a
+         * secret. A failed open()/dup2() here aborts the child via _exit()
+         * rather than silently running with the wrong stdio.
+         */
+        nullfd = open("/dev/null", O_RDWR);
+        if (nullfd < 0 || dup2(nullfd, STDIN_FILENO) < 0
+            || dup2(nullfd, STDOUT_FILENO) < 0)
+        {
+            _exit(127);
+        }
+        if (nullfd > STDOUT_FILENO) {
+            (void) ngx_autocert_close(nullfd);
+        }
 #if defined(__linux__) && defined(SYS_close_range)
         if (syscall(SYS_close_range, 3, ~0U, 0) != 0)
 #endif
