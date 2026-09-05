@@ -1,4 +1,6 @@
 /*
+ * Copyright (C) 2026 Thijs Eilander
+ * SPDX-License-Identifier: BSD-2-Clause
  * ngx_autocert_account — ACME account bootstrap (M4d-2). See the header for the
  * contract. Implemented as a small chained state machine over the M4b HTTPS
  * client: directory -> newNonce -> POST newAccount. Each step's completion

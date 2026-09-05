@@ -1,4 +1,6 @@
 /*
+ * Copyright (C) 2026 Thijs Eilander
+ * SPDX-License-Identifier: BSD-2-Clause
  * ngx_http_autocert_crypto — JOSE/ACME crypto primitives (M3).
  *
  * Self-contained on top of OpenSSL: ECDSA account-key generation (P-256 /

@@ -1,4 +1,6 @@
 /*
+ * Copyright (C) 2026 Thijs Eilander
+ * SPDX-License-Identifier: BSD-2-Clause
  * ngx_autocert_serve — per-SNI certificate serving (M7).
  * See ngx_autocert_serve.h for the contract.
  */

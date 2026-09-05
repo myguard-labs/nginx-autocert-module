@@ -1,4 +1,6 @@
 /*
+ * Copyright (C) 2026 Thijs Eilander
+ * SPDX-License-Identifier: BSD-2-Clause
  * ngx_autocert_alpn — shared-memory tls-alpn-01 challenge certificate store
  * (M10b).
  *

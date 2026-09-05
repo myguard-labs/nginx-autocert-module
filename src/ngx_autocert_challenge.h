@@ -1,4 +1,6 @@
 /*
+ * Copyright (C) 2026 Thijs Eilander
+ * SPDX-License-Identifier: BSD-2-Clause
  * ngx_autocert_challenge — shared-memory HTTP-01 challenge token store (M5).
  *
  * The ACME helper process discovers a per-authorization token and computes its

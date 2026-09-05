@@ -1,4 +1,6 @@
 /*
+ * Copyright (C) 2026 Thijs Eilander
+ * SPDX-License-Identifier: BSD-2-Clause
  * ngx_autocert_order — ACME order + authorization + issuance flow (M6a/M6b).
  * See the header for the contract. A chained state machine over the live
  * account's kid-signed POST primitive (ngx_autocert_account_post) plus one

@@ -1,4 +1,6 @@
 /*
+ * Copyright (C) 2026 Thijs Eilander
+ * SPDX-License-Identifier: BSD-2-Clause
  * A3.4: pure, driver-local rate-cap + wildcard-cover primitives, factored out
  * of ngx_autocert_driver.c so they can be unit-tested without the whole driver
  * TU (which pulls order/acme/http). No global state here — all windows are

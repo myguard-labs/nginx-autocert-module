@@ -1,4 +1,6 @@
 /*
+ * Copyright (C) 2026 Thijs Eilander
+ * SPDX-License-Identifier: BSD-2-Clause
  * ngx_autocert_account — ACME account bootstrap on the helper process (M4d-2).
  *
  * Drives the first three steps of the ACME protocol (RFC 8555) using the M4b

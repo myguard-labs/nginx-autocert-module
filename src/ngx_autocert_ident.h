@@ -1,4 +1,6 @@
 /*
+ * Copyright (C) 2026 Thijs Eilander
+ * SPDX-License-Identifier: BSD-2-Clause
  * ngx_autocert_ident — identifier classification + store-segment mapping
  * helpers, shared across the CORE and HTTP modules AND the standalone crypto
  * unit tests (M3/M8).

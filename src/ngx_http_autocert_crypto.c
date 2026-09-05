@@ -1,4 +1,6 @@
 /*
+ * Copyright (C) 2026 Thijs Eilander
+ * SPDX-License-Identifier: BSD-2-Clause
  * ngx_http_autocert_crypto — JOSE/ACME crypto primitives (M3).
  * See ngx_http_autocert_crypto.h for the contract.
  */

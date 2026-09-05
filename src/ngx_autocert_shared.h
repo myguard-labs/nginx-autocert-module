@@ -1,4 +1,6 @@
 /*
+ * Copyright (C) 2026 Thijs Eilander
+ * SPDX-License-Identifier: BSD-2-Clause
  * ngx_autocert_shared — the narrow interface the CORE helper process uses to
  * read the HTTP module's configuration without depending on the HTTP module's
  * private conf struct. The helper is an NGX_CORE_MODULE; it cannot use

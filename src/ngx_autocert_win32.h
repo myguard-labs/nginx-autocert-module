@@ -1,5 +1,7 @@
 /*
  * Copyright (C) 2026 Thijs Eilander
+ * SPDX-License-Identifier: BSD-2-Clause
+ * Copyright (C) 2026 Thijs Eilander
  *
  * ngx_autocert_win32 — win32 support skeleton for the store-IO shim.
  *

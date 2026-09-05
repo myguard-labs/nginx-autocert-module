@@ -1,4 +1,6 @@
 /*
+ * Copyright (C) 2026 Thijs Eilander
+ * SPDX-License-Identifier: BSD-2-Clause
  * ngx_autocert_requests — shared-memory runtime cert-request registry
  * (autolabel A1). See the header for the cross-module contract. An rbtree of
  * host->state in a slab zone, keyed by crc32(host) with the full host compared

@@ -1,4 +1,6 @@
 /*
+ * Copyright (C) 2026 Thijs Eilander
+ * SPDX-License-Identifier: BSD-2-Clause
  * ngx_autocert_driver — public entry points for the worker-0 ACME engine
  * driver. The driver runs the process-agnostic ACME state machine (account
  * bootstrap, order flow, renewal scheduler) on worker 0's event loop. The

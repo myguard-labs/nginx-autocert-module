@@ -1,4 +1,6 @@
 /*
+ * Copyright (C) 2026 Thijs Eilander
+ * SPDX-License-Identifier: BSD-2-Clause
  * ngx_autocert_driver — the ACME engine driver, run on worker 0.
  *
  * The ACME state machine (account bootstrap, order flow, renewal scheduler) is
@@ -2300,13 +2302,15 @@ ngx_autocert_runtime_marker_remove(ngx_cycle_t *cycle,
 
 /*
  * A6 persist (read side): rebuild of the requests shm zone from on-disk
- * markers. Called from ngx_autocert_driver_init_process() on first boot, and
- * from ngx_autocert_relock_handler() after a worker-0 handoff or graceful
- * reload (USR2 upgrade) takes the lock. On a SIGHUP reload this process has
- * already inherited the live shm segment, so the seed is a no-op for names
- * still present in config but re-inserts any markers whose hosts were dropped
- * from config and then auto-restored by new label events. After a USR2 upgrade
- * the new master maps a fresh shm zone, so the seed is a full rebuild there.
+ * markers. Called from ngx_autocert_driver_init_process() on every
+ * init_process (boot, and on every master+workers reload that spawns a new
+ * worker), and from ngx_autocert_relock_handler() after a worker-0 handoff or
+ * graceful reload (USR2 upgrade) takes the lock. On a SIGHUP reload this
+ * process has already inherited the live shm segment, so the seed is a no-op
+ * for names still present in config but re-inserts any markers whose hosts
+ * were dropped from config and then auto-restored by new label events. After a
+ * USR2 upgrade the new master maps a fresh shm zone, so the seed is a full
+ * rebuild there.
  *
  * For each top-level directory entry in the store container that carries the
  * marker: read the literal host, skip it if a config name now covers it (the

@@ -1,4 +1,6 @@
 /*
+ * Copyright (C) 2026 Thijs Eilander
+ * SPDX-License-Identifier: BSD-2-Clause
  * ngx_autocert_acme — outbound HTTP/1.1-over-TLS client for the ACME helper
  * (M4b).
  *

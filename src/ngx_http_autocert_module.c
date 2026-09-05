@@ -1,4 +1,6 @@
 /*
+ * Copyright (C) 2026 Thijs Eilander
+ * SPDX-License-Identifier: BSD-2-Clause
  * ngx_http_autocert_module — automatic ACME certificate provisioning.
  *
  * M0: module skeleton plus `autocert on|off [email];` (http{} global or
