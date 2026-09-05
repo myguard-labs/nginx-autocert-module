@@ -1442,7 +1442,7 @@ ngx_autocert_name_due(ngx_cycle_t *cycle, ngx_autocert_conf_t *acf,
 
         rc = ngx_http_autocert_cert_not_after((char *) path, &not_after,
                                               &stored_id, verifyp,
-                                              (char *) key_path);
+                                              (char *) key_path, cycle->log);
 
         if (rc == NGX_DECLINED) {
             ngx_log_debug1(

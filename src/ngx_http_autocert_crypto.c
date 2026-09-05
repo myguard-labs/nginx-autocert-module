@@ -1236,8 +1236,11 @@ ngx_http_autocert_no_passphrase(char *buf, int size, int rwflag, void *u)
 
 /*
  * Does the private key at `key_path` match `leaf`? Returns NGX_OK on a
- * verified match, NGX_ABORT when the key is absent, unreadable, encrypted or
- * simply does not pair with the leaf.
+ * verified match, NGX_ABORT when the key is genuinely absent, unparsable or
+ * does not pair with the leaf, and NGX_DECLINED when the open failed for a
+ * transient reason unrelated to the key's presence (e.g. a concurrent
+ * publish holding the file busy) -- the caller treats NGX_DECLINED as "skip
+ * this check for now", not as "reissue".
  *
  * Why the freshness path needs this at all: the store publishes privkey and
  * fullchain as two separate files, so a crash or a partially restored backup
@@ -1248,9 +1251,17 @@ ngx_http_autocert_no_passphrase(char *buf, int size, int rwflag, void *u)
  * the pair on every handshake and serves nothing. The vhost would stay dark
  * until the OLD chain's own notAfter finally drifted into the renew window.
  * Checking the pair here is what turns that silent outage into a reissue.
+ *
+ * Only a genuinely absent key (ENOENT/ENOTDIR) means torn. Any other errno
+ * (e.g. win32's sharing-violation errno when the freshness sweep races the
+ * publish path's per-file rename over this very file) is a transient I/O
+ * condition, not evidence the pair is torn -- forcing NGX_ABORT on it would
+ * trigger a real ACME reissue against the CA's rate limits on every such
+ * race. Log at WARN and let the caller skip the pair check for this sweep.
  */
 static ngx_int_t
-ngx_http_autocert_key_pairs_with(const char *key_path, X509 *leaf)
+ngx_http_autocert_key_pairs_with(const char *key_path, X509 *leaf,
+    ngx_log_t *log)
 {
     int        fd;
     BIO       *bio;
@@ -1259,7 +1270,14 @@ ngx_http_autocert_key_pairs_with(const char *key_path, X509 *leaf)
 
     fd = ngx_autocert_open_file_path(key_path, O_RDONLY);
     if (fd == -1) {
-        return NGX_ABORT;               /* missing/unreadable -> reissue */
+        if (errno == ENOENT || errno == ENOTDIR) {
+            return NGX_ABORT;           /* genuinely missing -> reissue */
+        }
+        ngx_log_error(NGX_LOG_WARN, log, errno,
+                      "autocert: open key \"%s\" failed transiently; "
+                      "skipping key-pair freshness check for this sweep",
+                      key_path);
+        return NGX_DECLINED;            /* transient -> skip, do not reissue */
     }
 
     bio = BIO_new_fd(fd, BIO_CLOSE);    /* BIO owns + closes fd */
@@ -1290,7 +1308,7 @@ ngx_http_autocert_key_pairs_with(const char *key_path, X509 *leaf)
 
 ngx_int_t
 ngx_http_autocert_cert_not_after(const char *path, time_t *out, int *key_id,
-    const ngx_str_t *verify_name, const char *key_path)
+    const ngx_str_t *verify_name, const char *key_path, ngx_log_t *log)
 {
     int         fd;
     BIO        *bio;
@@ -1343,16 +1361,23 @@ ngx_http_autocert_cert_not_after(const char *path, time_t *out, int *key_id,
     }
 
     /*
-     * Pair check: the stored private key must actually match this leaf. Same
-     * NGX_ABORT contract as the identity check above -- the caller reissues.
-     * Runs after the identity check so a wrong-domain leaf is still reported
-     * as such, and only when the caller asks (key_path non-NULL).
+     * Pair check: the stored private key must actually match this leaf.
+     * NGX_ABORT here has the same "caller reissues" contract as the identity
+     * check above. NGX_DECLINED from the pair check itself means the open
+     * failed transiently (not a torn pair) -- skip this check for the sweep
+     * and let the remaining freshness tests decide, rather than forcing a
+     * reissue on a passing I/O error. Runs after the identity check so a
+     * wrong-domain leaf is still reported as such, and only when the caller
+     * asks (key_path non-NULL).
      */
-    if (key_path != NULL
-        && ngx_http_autocert_key_pairs_with(key_path, leaf) != NGX_OK)
-    {
-        X509_free(leaf);
-        return NGX_ABORT;
+    if (key_path != NULL) {
+        ngx_int_t  pair_rc;
+
+        pair_rc = ngx_http_autocert_key_pairs_with(key_path, leaf, log);
+        if (pair_rc == NGX_ABORT) {
+            X509_free(leaf);
+            return NGX_ABORT;
+        }
     }
 
     ngx_memzero(&tm, sizeof(struct tm));
