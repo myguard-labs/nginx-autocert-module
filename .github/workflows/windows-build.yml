@@ -1,4 +1,4 @@
-# sync-sha: 37b579cb99950dfdbd7e86239bacec7466a4be9dd692ab00810d7bc1c8a0333f
+# sync-sha: 32cfd3d08a6819cf10cd9195a8e7c25098ce0d4c3b59290aa41379b91a588825
 name: Windows build
 
 # Native Windows port gate (W17). Proves the module compiles and links on
@@ -1422,8 +1422,29 @@ jobs:
           }
           if (-not $openssl) { throw "renewal step: openssl.exe not found" }
 
+          # Prove it RUNS, not just that it exists. A present-but-unusable
+          # openssl (missing DLL, wrong arch) makes every Get-Serial return
+          # $null, so Wait-Serial would burn its full timeout and then report
+          # "no certificate was issued" -- blaming the module for a broken
+          # tool. Fail fast and say which it was.
+          $prevEap = $ErrorActionPreference
+          $ErrorActionPreference = 'Continue'
+          $vOut = (& $openssl version 2>&1 | Out-String)
+          $vRc  = $LASTEXITCODE
+          $ErrorActionPreference = $prevEap
+          if ($vRc -ne 0) {
+            throw "renewal step: openssl at $openssl is not runnable (exit $vRc): $vOut"
+          }
+          Write-Host "using openssl at $openssl ($($vOut.Trim()))"
+
           $chain = "$root/store/$hostIp/fullchain.pem"
           $key   = "$root/store/$hostIp/privkey.pem"
+
+          # Hoisted ABOVE the outer try: the finally blocks below restore
+          # $ErrorActionPreference from $prev, and a throw BEFORE the inner
+          # assignment would leave $prev $null -- silently pinning the shell to
+          # 'Continue' for the rest of the step instead of restoring 'Stop'.
+          $prev = $ErrorActionPreference
 
           function Get-Serial([string]$path) {
             if (-not (Test-Path $path)) { return $null }
@@ -1484,7 +1505,6 @@ jobs:
             )
             Set-Content -Encoding ascii -Path "$root/conf/nginx.conf" -Value $lines
 
-            $prev = $ErrorActionPreference
             $ErrorActionPreference = 'Continue'
             $tOut = (& .\objs\nginx.exe -p $root -c conf/nginx.conf -t 2>&1 | Out-String)
             $tRc  = $LASTEXITCODE

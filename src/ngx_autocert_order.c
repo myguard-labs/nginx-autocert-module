@@ -2607,10 +2607,17 @@ static const char *ngx_autocert_store_files[] = {
 /*
  * The SAME set of files as ngx_autocert_store_files[], but in the order the
  * win32 per-file commit must publish them (see
- * ngx_autocert_order_publish_files_at). Order here IS significant: both
- * private keys are published before either fullchain, because the serve path
- * triggers a reload off fullchain.pem's mtime. The certbot-only cert.pem /
- * chain.pem are last — nothing serves from them.
+ * ngx_autocert_order_publish_files_at).
+ *
+ * Order here IS significant, and the invariant is PER SLOT: each slot's
+ * private key must be published before THAT SLOT's fullchain. The serve path
+ * keeps a per-slot cached mtime (serve.c's ngx_autocert_slot_chain_name[] and
+ * sl->mtime) and arms a reload for a slot off that slot's own chain -- the EC
+ * slot off fullchain.pem, the RSA slot off fullchain.rsa.pem -- so each slot
+ * needs its key in place before its own chain moves. Publishing both keys
+ * ahead of both chains, as the order below does, satisfies that for both
+ * slots at once; it is a sufficient ordering, not the invariant itself.
+ * The certbot-only cert.pem / chain.pem are last -- nothing serves from them.
  */
 static const char *ngx_autocert_publish_order[] = {
     "privkey.pem",      "privkey.rsa.pem",
@@ -2949,10 +2956,17 @@ ngx_autocert_order_store(ngx_autocert_order_t *order)
         return rc;
     }
 
-    ngx_autocert_order_rm_staging_at(cfd, (char *) staging);
+    /*
+     * NGX_ABORT (win32 partial publish) means some files already landed in
+     * the live dir and the rest are still in staging. Keep staging so the
+     * retry can finish; every other outcome leaves it disposable.
+     */
+    if (swap != NGX_ABORT) {
+        ngx_autocert_order_rm_staging_at(cfd, (char *) staging);
+    }
     (void) ngx_autocert_close(cfd);
 
-    if (swap == NGX_ERROR) {
+    if (swap == NGX_ERROR || swap == NGX_ABORT) {
         return NGX_ERROR;
     }
 
@@ -3221,13 +3235,14 @@ ngx_autocert_order_swap_dirs_at(ngx_autocert_order_t *order, int cfd,
  * reached, so each rename below publishes already-durable bytes and the live
  * dir is never left missing a file.
  *
- * ORDERING IS LOAD-BEARING: the private key goes first, the chain second.
- * The serve path (ngx_http_autocert_cache_reload) stats fullchain.pem and
- * returns early when its mtime is unchanged — the CHAIN is what triggers a
- * reload. Publishing the key first means that by the time the chain's mtime
- * moves and a reload is triggered, the matching key is already in place.
- * The reverse order would arm a reload against the still-old key on every
- * renewal, turning a rare race into a guaranteed one.
+ * ORDERING IS LOAD-BEARING, per slot: each slot's private key goes before
+ * that slot's chain. The serve path (ngx_http_autocert_cache_reload) stats
+ * the SLOT's chain and returns early when that slot's cached mtime is
+ * unchanged — the chain is what triggers a reload for its slot. Publishing
+ * the key first means that by the time the chain's mtime moves and a reload
+ * is armed, the matching key is already in place. The reverse order would arm
+ * a reload against the still-old key on every renewal, turning a rare race
+ * into a guaranteed one. ngx_autocert_publish_order[] encodes this.
  *
  * Residual window: between the two renames a reader can pair a NEW key with
  * an OLD chain. That is not a serving fault — serve.c's
@@ -3243,7 +3258,9 @@ ngx_autocert_order_publish_files_at(ngx_autocert_order_t *order, int cfd,
     const char *staging, const char *dir)
 {
     int          sfd, lfd, i;
+    int          landed = 0;
     const char  *name;
+    const char  *failed = NULL;
     ngx_int_t    rc = NGX_OK;
 
     sfd = ngx_autocert_openat(cfd, staging,
@@ -3280,6 +3297,7 @@ ngx_autocert_order_publish_files_at(ngx_autocert_order_t *order, int cfd,
             }
             ngx_log_error(NGX_LOG_ERR, order->log, ngx_errno,
                           "autocert: publish fstatat(\"%s\") failed", name);
+            failed = name;
             rc = NGX_ERROR;
             break;
         }
@@ -3292,13 +3310,43 @@ ngx_autocert_order_publish_files_at(ngx_autocert_order_t *order, int cfd,
             ngx_log_error(NGX_LOG_ERR, order->log, ngx_errno,
                           "autocert: publish rename(\"%s/%s\" -> \"%s/%s\") "
                           "failed", staging, name, dir, name);
+            failed = name;
             rc = NGX_ERROR;
             break;
         }
+
+        landed++;
+    }
+
+    /*
+     * A failure AFTER at least one file landed has already mutated the live
+     * dir, so this is NOT the POSIX situation where NGX_ERROR means the
+     * commit simply did not happen and staging is disposable. Report it as
+     * NGX_ABORT so the caller PRESERVES staging: the files that did not land
+     * are still sitting there and the next attempt can finish the job without
+     * a fresh ACME order. Destroying staging here would leave live torn AND
+     * burn a CA rate-limit slot re-issuing what we already hold.
+     */
+    if (rc == NGX_ERROR && landed > 0) {
+        ngx_log_error(NGX_LOG_ALERT, order->log, 0,
+                      "autocert: PARTIAL publish of \"%s\": %d file(s) "
+                      "replaced, then \"%s\" failed; the live key/chain pair "
+                      "may be mismatched. Staging \"%s\" is kept so the "
+                      "remaining files can be published on retry.",
+                      dir, landed, failed != NULL ? failed : "?", staging);
+        rc = NGX_ABORT;
     }
 
     if (rc == NGX_OK) {
-        /* Make the renames themselves durable before we report success. */
+        /*
+         * Best-effort durability barrier for the renames. NOTE: on win32
+         * ngx_autocert_fsync_dir() is an unconditional no-op (there is no
+         * portable directory-fsync there), so this does NOT make the rename
+         * metadata durable the way the POSIX path's parent-dir fsync does.
+         * What IS durable is the staging CONTENTS: every PEM was written and
+         * fsync'd by the caller before we were reached. A crash can therefore
+         * lose a rename, never a half-written file.
+         */
         rc = ngx_autocert_order_fsync_dirfd(order, lfd, dir);
     }
 
