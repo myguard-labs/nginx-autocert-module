@@ -1197,12 +1197,18 @@ ngx_http_autocert_cache_reload(ngx_autocert_cert_t *c, ngx_uint_t slot,
      * malformed intermediate, which must abort the reload (don't silently
      * accept a truncated chain). Then clear the queue either way.
      */
-    if (ERR_GET_REASON(ERR_peek_last_error()) != PEM_R_NO_START_LINE) {
-        ngx_log_error(NGX_LOG_ERR, log, 0,
-                      "autocert: malformed certificate chain in \"%s\"",
-                      chain_path);
-        ERR_clear_error();
-        goto done;
+    {
+        unsigned long err = ERR_peek_last_error();
+
+        if (ERR_GET_LIB(err) != ERR_LIB_PEM
+            || ERR_GET_REASON(err) != PEM_R_NO_START_LINE)
+        {
+            ngx_log_error(NGX_LOG_ERR, log, 0,
+                          "autocert: malformed certificate chain in \"%s\"",
+                          chain_path);
+            ERR_clear_error();
+            goto done;
+        }
     }
     ERR_clear_error();
 
@@ -1212,7 +1218,8 @@ ngx_http_autocert_cache_reload(ngx_autocert_cert_t *c, ngx_uint_t slot,
         goto done;
     }
 
-    key = PEM_read_bio_PrivateKey(bio, NULL, NULL, NULL);
+    key = PEM_read_bio_PrivateKey(bio, NULL,
+                                   ngx_http_autocert_no_passphrase_cb, NULL);
     if (key == NULL) {
         ngx_log_error(NGX_LOG_ERR, log, 0,
                       "autocert: bad private key in \"%s\"", key_path);
@@ -1261,8 +1268,14 @@ ngx_http_autocert_cache_reload(ngx_autocert_cert_t *c, ngx_uint_t slot,
                       "(store \"%V\")", verify, host);
         goto done;
     }
-    if (X509_cmp_current_time(X509_get0_notBefore(leaf)) > 0
-        || X509_cmp_current_time(X509_get0_notAfter(leaf)) < 0)
+    /*
+     * X509_cmp_current_time() returns 0 on a parse ERROR for the given time,
+     * not "equal to now" — a >0/<0-only check would silently accept a
+     * malformed notBefore/notAfter as valid. Reject that alongside an
+     * out-of-window certificate.
+     */
+    if (X509_cmp_current_time(X509_get0_notBefore(leaf)) >= 0
+        || X509_cmp_current_time(X509_get0_notAfter(leaf)) <= 0)
     {
         ngx_log_error(NGX_LOG_ERR, log, 0,
                       "autocert: certificate for \"%V\" is not currently valid",
@@ -1550,7 +1563,8 @@ ngx_http_autocert_serve_alpn_cert(ngx_connection_t *c, SSL *ssl_conn,
         goto done;
     }
 
-    key = PEM_read_bio_PrivateKey(bio, NULL, NULL, NULL);
+    key = PEM_read_bio_PrivateKey(bio, NULL,
+                                   ngx_http_autocert_no_passphrase_cb, NULL);
     if (key == NULL) {
         ngx_log_error(NGX_LOG_ERR, c->log, 0,
                       "autocert: bad tls-alpn-01 key for \"%V\"", host);

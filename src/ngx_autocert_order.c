@@ -2175,11 +2175,18 @@ ngx_autocert_order_validate_cert(ngx_autocert_order_t *order)
         }
         X509_free(x);
     }
-    if (ERR_GET_REASON(ERR_peek_last_error()) != PEM_R_NO_START_LINE) {
-        ngx_log_error(NGX_LOG_ERR, order->log, 0,
-                      "autocert: downloaded chain has a malformed certificate");
-        ERR_clear_error();
-        goto done;
+    {
+        unsigned long err = ERR_peek_last_error();
+
+        if (ERR_GET_LIB(err) != ERR_LIB_PEM
+            || ERR_GET_REASON(err) != PEM_R_NO_START_LINE)
+        {
+            ngx_log_error(NGX_LOG_ERR, order->log, 0,
+                          "autocert: downloaded chain has a malformed "
+                          "certificate");
+            ERR_clear_error();
+            goto done;
+        }
     }
     ERR_clear_error();
 
@@ -2190,7 +2197,8 @@ ngx_autocert_order_validate_cert(ngx_autocert_order_t *order)
     if (bio == NULL) {
         goto done;
     }
-    key = PEM_read_bio_PrivateKey(bio, NULL, NULL, NULL);
+    key = PEM_read_bio_PrivateKey(bio, NULL,
+                                   ngx_http_autocert_no_passphrase_cb, NULL);
     if (key == NULL) {
         ngx_log_error(NGX_LOG_ERR, order->log, 0,
                       "autocert: order private key did not parse");
@@ -2228,8 +2236,14 @@ ngx_autocert_order_validate_cert(ngx_autocert_order_t *order)
                       &order->domain);
         goto done;
     }
-    if (X509_cmp_current_time(X509_get0_notBefore(leaf)) > 0
-        || X509_cmp_current_time(X509_get0_notAfter(leaf)) < 0)
+    /*
+     * X509_cmp_current_time() returns 0 on a parse ERROR for the given time,
+     * not "equal to now" — a >0/<0-only check would silently accept a
+     * malformed notBefore/notAfter as valid. Reject that alongside an
+     * out-of-window certificate.
+     */
+    if (X509_cmp_current_time(X509_get0_notBefore(leaf)) >= 0
+        || X509_cmp_current_time(X509_get0_notAfter(leaf)) <= 0)
     {
         ngx_log_error(
             NGX_LOG_ERR, order->log, 0,

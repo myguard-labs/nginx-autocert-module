@@ -226,6 +226,106 @@ test_cert_not_after(void)
 }
 
 
+/*
+ * serve.c and order.c both gate a loaded leaf's validity window with:
+ *
+ *   if (X509_cmp_current_time(notBefore) >= 0
+ *       || X509_cmp_current_time(notAfter) <= 0)
+ *       -> reject
+ *
+ * X509_cmp_current_time() returns 0 on a parse ERROR for the ASN1_TIME, not
+ * "equal to now" -- a >0/<0-only check would silently treat a malformed
+ * notBefore/notAfter as valid.
+ *
+ * The guard itself is inline in two large static server functions this TU
+ * cannot reach, so it is mirrored here as two functions with the SHIPPED and
+ * the PRE-FIX shapes, and both are driven with the same inputs. That makes the
+ * negative control a real one: `window_pre_fix` is the code that used to ship,
+ * and the test asserts it ACCEPTS the malformed time the fixed shape rejects.
+ * If someone reverts serve.c/order.c to the >0/<0 spelling, the mirrored
+ * `window_fixed` must be reverted with it or the two disagree here.
+ */
+
+/* The shape now shipping in serve.c:1268 and order.c:2236. */
+static int
+window_fixed(int nb, int na)
+{
+    return (nb >= 0 || na <= 0) ? 0 : 1;   /* 0 = reject, 1 = accept */
+}
+
+
+/* The shape that shipped before this fix. */
+static int
+window_pre_fix(int nb, int na)
+{
+    return (nb > 0 || na < 0) ? 0 : 1;
+}
+
+
+static void
+test_cmp_current_time_zero_is_rejected(void)
+{
+    ASN1_TIME  *bad = ASN1_STRING_new();
+    ASN1_TIME  *past = ASN1_TIME_new();
+    ASN1_TIME  *future = ASN1_TIME_new();
+    int         r_bad, r_past, r_future;
+
+    CHECK(bad != NULL && past != NULL && future != NULL,
+          "allocated the ASN1_TIME probes");
+    if (bad == NULL || past == NULL || future == NULL) {
+        return;
+    }
+
+    /* Not a valid UTCTime/GeneralizedTime payload -> parse failure. */
+    ASN1_STRING_set(bad, "not-a-time", -1);
+    ASN1_TIME_set(past, (time_t) 0);            /* 1970, well in the past */
+    ASN1_TIME_set(future, (time_t) 4102444800); /* 2100, well in the future */
+
+    r_bad = X509_cmp_current_time(bad);
+    r_past = X509_cmp_current_time(past);
+    r_future = X509_cmp_current_time(future);
+
+    /* The premise the whole fix rests on: 0 means "could not parse", and a
+     * parseable time never yields 0 -- not even one equal to now. */
+    CHECK(r_bad == 0,
+          "X509_cmp_current_time returns 0 on a malformed ASN1_TIME");
+    CHECK(r_past < 0, "a past time compares < 0, never 0");
+    CHECK(r_future > 0, "a future time compares > 0, never 0");
+
+    /* A genuinely valid window (notBefore in the past, notAfter in the
+     * future) must still be ACCEPTED -- the fix must not over-reject. */
+    CHECK(window_fixed(r_past, r_future) == 1,
+          "fixed guard still accepts a valid notBefore/notAfter window");
+
+    /* A malformed notBefore is rejected by the fixed guard... */
+    CHECK(window_fixed(r_bad, r_future) == 0,
+          "fixed guard rejects a malformed notBefore");
+    CHECK(window_fixed(r_past, r_bad) == 0,
+          "fixed guard rejects a malformed notAfter");
+
+    /* ...and NEGATIVE CONTROL: the pre-fix guard accepted both, which is the
+     * exact gap this change closes. If these two go green-as-reject, the
+     * control has stopped controlling and this test is worthless. */
+    CHECK(window_pre_fix(r_bad, r_future) == 1,
+          "NEGATIVE CONTROL: pre-fix guard ACCEPTED a malformed notBefore");
+    CHECK(window_pre_fix(r_past, r_bad) == 1,
+          "NEGATIVE CONTROL: pre-fix guard ACCEPTED a malformed notAfter");
+
+    /* Both shapes must agree on unambiguous, parseable input, so the fix is
+     * a strictly narrower accept -- not a behaviour change for good certs. */
+    CHECK(window_fixed(r_past, r_future) == window_pre_fix(r_past, r_future),
+          "fixed and pre-fix guards agree on a valid window");
+    CHECK(window_fixed(r_future, r_future) == window_pre_fix(r_future, r_future),
+          "fixed and pre-fix guards agree on a not-yet-valid certificate");
+    CHECK(window_fixed(r_past, r_past) == window_pre_fix(r_past, r_past),
+          "fixed and pre-fix guards agree on an expired certificate");
+
+    ASN1_STRING_free(bad);
+    ASN1_TIME_free(past);
+    ASN1_TIME_free(future);
+}
+
+
 int
 main(void)
 {
@@ -234,6 +334,7 @@ main(void)
 
     test_timegm_vectors();
     test_cert_not_after();
+    test_cmp_current_time_zero_is_rejected();
 
     if (failures) {
         fprintf(stderr, "\n%d test(s) FAILED\n", failures);
