@@ -3179,16 +3179,54 @@ static ngx_int_t
 ngx_autocert_order_write_tmp_at(ngx_autocert_order_t *order, int sfd,
     const char *leaf, ngx_str_t *data, ngx_uint_t mode)
 {
-    int      fd;
-    size_t   off;
-    ssize_t  n;
+    int                  fd;
+    size_t               off;
+    ssize_t              n;
+    ngx_autocert_stat_t  st;
 
+    /*
+     * O_TRUNC is DEFERRED, exactly as the runtime-marker writer defers it
+     * (driver.c, "O_TRUNC is likewise deferred"): O_TRUNC acts BEFORE we can
+     * fstat the fd, so opening with it would let a hostile leaf planted in the
+     * staging dir be truncated before we ever established it is a regular
+     * file. Open without it, verify the fd, then ftruncate the pinned fd.
+     *
+     * O_EXCL is deliberately NOT used here, and must not be added: staging is
+     * seeded from the live dir by hardlink, and while seeding excludes THIS
+     * keytype's own four names (see the CRITICAL note on
+     * ngx_autocert_order_seed_staging_at), a retried or resumed order can
+     * legitimately find its own leaf already present. O_EXCL would fail those
+     * with EEXIST. The nlink check below is what actually protects the shared
+     * inode: a seeded other-keytype file has nlink > 1 and is refused, so this
+     * writer can never truncate the live cert through a hardlink.
+     */
     fd = ngx_autocert_openat_mode(sfd, leaf,
-                O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW | O_CLOEXEC,
+                O_WRONLY | O_CREAT | O_NOFOLLOW | O_CLOEXEC,
                 (ngx_autocert_mode_t) mode);
     if (fd == -1) {
         ngx_log_error(NGX_LOG_ERR, order->log, ngx_errno,
                       "autocert: open(\"%s\") failed", leaf);
+        return NGX_ERROR;
+    }
+
+    /* Only ever write into a regular file, and only one with a single link —
+     * a hard link to the live cert (or to someone else's file) must not be
+     * truncated or overwritten through this fd. */
+    if (ngx_autocert_fstat(fd, &st) == -1 || !S_ISREG(st.st_mode)
+        || st.st_nlink != 1)
+    {
+        ngx_log_error(NGX_LOG_ERR, order->log, 0,
+                      "autocert: refusing to write staging file \"%s\": "
+                      "not a single-linked regular file", leaf);
+        (void) ngx_autocert_close(fd);
+        return NGX_ERROR;
+    }
+
+    /* now that the fd is known to be a plain, single-linked regular file */
+    if (ngx_autocert_ftruncate(fd, 0) == -1) {
+        ngx_log_error(NGX_LOG_ERR, order->log, ngx_errno,
+                      "autocert: ftruncate(\"%s\") failed", leaf);
+        (void) ngx_autocert_close(fd);
         return NGX_ERROR;
     }
 
