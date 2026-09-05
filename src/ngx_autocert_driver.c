@@ -2992,9 +2992,13 @@ ngx_autocert_driver_exit_process(ngx_cycle_t *cycle)
  * the dead cycle and its pool, so a reload silently ignores new autocert config
  * and can touch freed cycle memory. init_module calls this on the
  * single-process path to tear the engine state down and re-arm it against the
- * NEW cycle. The interprocess lock is released and re-acquired: the lock file
- * lives in the store dir, so a reload that changes autocert_path must pick up
- * the correct lock file location from the new cycle's config.
+ * NEW cycle. The POSIX interprocess lock is released and re-acquired: the lock
+ * file lives in the store dir, so a reload that changes autocert_path must pick
+ * up the correct lock file location from the new cycle's config. The Win32
+ * named mutex is NOT released here — ngx_autocert_win32_driver_unlock() runs
+ * only from exit_process and the trylock error paths, so on Win32 a reload that
+ * changes autocert_path keeps the old store's mutex and skips acquiring the new
+ * one (win32_driver_trylock returns NGX_OK early while the handle is non-NULL).
  *
  * Must run inside the worker event loop (true on reload — init_module fires
  * from ngx_init_cycle() while the loop is live), since it re-arms a timer.
