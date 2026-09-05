@@ -438,8 +438,8 @@ ngx_autocert_account_save_key(ngx_autocert_account_t *acct, int dfd,
     for (off = 0; off < pem.len; /* void */) {
         ssize_t  n = ngx_autocert_write(fd, pem.data + off, pem.len - off);
 
-        if (n < 0) {
-            if (ngx_autocert_err_is_intr(ngx_errno)) {
+        if (n <= 0) {
+            if (n < 0 && ngx_autocert_err_is_intr(ngx_errno)) {
                 continue;
             }
             ngx_log_error(NGX_LOG_ERR, acct->log, ngx_errno,
