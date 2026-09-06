@@ -1952,10 +1952,12 @@ ngx_autocert_closedir(ngx_autocert_dir_t *dh)
  * renameat2 -> FILE_RENAME_INFORMATION via NtSetInformationFile.
  *
  * RENAME_EXCHANGE has no win32 primitive (DESIGN § gap 1, W1's central review
- * question): returning NGX_DECLINED here runs the existing non-Linux fallback
- * unchanged (order.c already handles NGX_DECLINED for exactly this reason —
- * the fallback is not new code written for win32, it is the same path a
- * pre-3.15 Linux kernel already exercises).
+ * question), and it cannot be emulated: NTFS cannot rename over an existing
+ * DIRECTORY at all, so no sequence of win32 calls swaps two populated dirs.
+ * We still return NGX_DECLINED here, but order.c no longer routes the win32
+ * store commit through this flag — ngx_autocert_order_swap_dirs_at() takes a
+ * win32-specific per-file publish path instead, because on POSIX declining
+ * merely defers a renewal while on win32 it would block renewal permanently.
  *
  * RENAME_NOREPLACE IS expressible: FILE_RENAME_INFORMATION's
  * ReplaceIfExists=FALSE is atomic create-or-fail against the destination,

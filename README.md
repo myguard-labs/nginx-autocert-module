@@ -422,10 +422,24 @@ The store root is `autocert_store_path` (default `autocert`, resolved against th
 prefix). On disk a domain maps to a segment: literal names use themselves; a
 wildcard `*.rest` is stored under `_wildcard_.rest`; an IPv6 address under
 `_ip6_<normalized-hex>` (IPv4 verbatim). Certificates are committed
-atomically via `renameat2` on Linux ≥ 3.15; on a filesystem lacking
-`RENAME_EXCHANGE` / `RENAME_NOREPLACE` the commit is deferred (the existing cert is
-kept and renewal retries) rather than risking a mismatched pair, so a half-written
-pair is never served. For a wildcard the cache entry, store dir, and the
+atomically via `renameat2` on Linux ≥ 3.15: the whole per-domain directory is
+swapped in one syscall, so a half-written pair is never served. On a POSIX
+filesystem lacking `RENAME_EXCHANGE` / `RENAME_NOREPLACE` the commit is
+deferred (the existing cert is kept and renewal retries) rather than risking a
+mismatched pair.
+
+On Windows there is no `RENAME_EXCHANGE`, and NTFS cannot rename over an
+existing directory at all, so the directory swap is impossible and deferring
+would break renewal permanently. There the staging pair is written and
+`fsync`ed first, then published into the live directory one file at a time —
+each individual rename is atomic on NTFS, and the private key is published
+before the chain (the serve path arms a reload off `fullchain.pem`'s mtime, so
+the matching key is already in place when it does). A reader that catches the
+brief window between the two renames sees a key/cert mismatch, which is
+rejected and retried rather than served; a crash in that window self-heals,
+because a corrupt stored cert is treated as due for reissue.
+
+For a wildcard the cache entry, store dir, and the
 ≤1 stat/sec throttle are keyed by the shared `_wildcard_.<rest>` segment — one
 entry for all subdomains, not per concrete SNI.
 
@@ -688,6 +702,15 @@ against a real `nginx.exe`, then asserts the identifier was ordered as `"ip"`
 the stored private key -- the same assertions `ci/tests/e2e/ipv4-issue.sh`
 makes on Linux, ported off Docker.
 
+A second lane covers **renewal**, which on win32 is a different commit path
+rather than the same one run twice: there is no `RENAME_EXCHANGE` and NTFS
+cannot rename over an existing directory, so the pair is published file by
+file into a live generation that already exists (see [Store
+layout](#store-layout)). The lane issues once, then issues again over that
+live generation and asserts the certificate **serial changed** — an oracle
+that fails if the second pass silently keeps the old cert instead of
+publishing the new one.
+
 ---
 
 ## CI
@@ -708,7 +731,7 @@ for one run rather than several independent ones.
 | `codeql.yml` | PR (via `ci.yml`), monthly | CodeQL over the module TU |
 | `asan.yml` | weekly (Sun 03:45 UTC), manual | 30s ASan+UBSan request-storm soak. Green since #160. Two nginx-inherent checks are off: ODR (nginx generates `ngx_module_names` into both the binary and the `.so`) and config-load leaks (the cycle pool is never freed) — see `ci/tools/lsan.supp`. Request-path leaks, UAF, overflow and all UBSan checks stay armed |
 | `ci-deep.yml` | monthly, manual | long fuzz, memcheck + helgrind soaks, security scanners, angie Pebble e2e |
-| `windows-build.yml` | PR touching `src/`, `config`, the pins or the workflow itself; push to master; manual | native win32 build gate: MSVC x64 static link against the pinned nginx, then assert the module reached `objs/ngx_modules.c` and that `nginx -t` accepts `autocert_store_path` while rejecting a bogus directive. Then **starts `nginx.exe`** and verifies the HTTP-01 challenge-serve path (exact key authorization, 404s for unknown/nested tokens, `Content-Length`, and keepalive framing after a GET-with-body), the multi-worker singleton guarantee, and full RFC 8738 IPv4-literal ACME **issuance** against a native `pebble-windows-amd64` binary (no Docker) |
+| `windows-build.yml` | PR touching `src/`, `config`, the pins or the workflow itself; push to master; manual | native win32 build gate: MSVC x64 static link against the pinned nginx, then assert the module reached `objs/ngx_modules.c` and that `nginx -t` accepts `autocert_store_path` while rejecting a bogus directive. Then **starts `nginx.exe`** and verifies the HTTP-01 challenge-serve path (exact key authorization, 404s for unknown/nested tokens, `Content-Length`, and keepalive framing after a GET-with-body), the multi-worker singleton guarantee, and full RFC 8738 IPv4-literal ACME **issuance** against a native `pebble-windows-amd64` binary (no Docker), and a second-issuance **renewal** lane that reissues over an existing live generation and requires a changed certificate serial (win32 has no `RENAME_EXCHANGE`, so the renewal commit path differs from POSIX and needs its own coverage) |
 | `bump.yml` | weekly (Mon 04:00 UTC), manual | regenerate the nginx/angie version + sha256 pins in [`.github/versions.env`](.github/versions.env) and open a PR. Not a gate — it produces a reviewable change instead of letting builds drift onto a new upstream on their own |
 
 **nginx and angie are pinned.** `.github/versions.env` is the single source of

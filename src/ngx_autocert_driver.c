@@ -1294,13 +1294,15 @@ ngx_autocert_name_due(ngx_cycle_t *cycle, ngx_autocert_conf_t *acf,
     ngx_str_t *name, ngx_uint_t key_type)
 {
     u_char      path[NGX_MAX_PATH];
+    u_char      key_path[NGX_MAX_PATH];
     u_char     *p;
-    size_t      base;
+    size_t      base, key_base;
     time_t      not_after, now;
     ngx_int_t   rc;
     ngx_uint_t  certbot;
     ngx_str_t   seg;
     ngx_str_t   chain;
+    ngx_str_t   priv;
     ngx_str_t   verify, *verifyp;
     u_char      seg_buf[NGX_AUTOCERT_DOMAIN_SEG_MAX];
     u_char      verify_buf[256];
@@ -1308,11 +1310,13 @@ ngx_autocert_name_due(ngx_cycle_t *cycle, ngx_autocert_conf_t *acf,
     /* Per-keytype fullchain leaf name: EC keeps the legacy flat name, RSA gets
      * the .rsa. variant — must match the store writer (order.c). */
     ngx_str_set(&chain, "/fullchain.pem");
+    ngx_str_set(&priv, "/privkey.pem");
     if (key_type == NGX_HTTP_AUTOCERT_KEY_RSA2048
         || key_type == NGX_HTTP_AUTOCERT_KEY_RSA3072
         || key_type == NGX_HTTP_AUTOCERT_KEY_RSA4096)
     {
         ngx_str_set(&chain, "/fullchain.rsa.pem");
+        ngx_str_set(&priv, "/privkey.rsa.pem");
     }
 
     if (acf->path.len == 0) {
@@ -1381,6 +1385,32 @@ ngx_autocert_name_due(ngx_cycle_t *cycle, ngx_autocert_conf_t *acf,
     *p = '\0';
 
     /*
+     * Sibling privkey path for the pair check, derived EXACTLY like the chain
+     * path above (same store root, same /live prefix in certbot mode, same fs
+     * segment) but with this slot's key name -- privkey.pem for EC,
+     * privkey.rsa.pem for RSA. Both must come from the same derivation or the
+     * pair check would compare a leaf against another slot's key and report a
+     * permanent false mismatch. Length is bounded separately: the key leaf is
+     * not the same length as the chain leaf, so `base` does not cover it.
+     */
+    key_base = acf->path.len + (certbot ? sizeof("/live") - 1 : 0)
+               + 1 + seg.len + priv.len + 1 /* NUL */;
+    if (key_base > NGX_MAX_PATH) {
+        ngx_log_error(NGX_LOG_ERR, cycle->log, 0,
+                      "autocert: store key path too long for \"%V\"", name);
+        return 0;
+    }
+
+    p = ngx_cpymem(key_path, acf->path.data, acf->path.len);
+    if (certbot) {
+        p = ngx_cpymem(p, "/live", sizeof("/live") - 1);
+    }
+    *p++ = '/';
+    p = ngx_cpymem(p, seg.data, seg.len);
+    p = ngx_cpymem(p, priv.data, priv.len);
+    *p = '\0';
+
+    /*
      * Identity probe for the freshness SAN check (M2). serve.c rejects a stored
      * leaf that does not cover the requested name; the scheduler must use the
      * same criterion or a wrong-domain (but right-family, unexpired) cert reads
@@ -1411,7 +1441,8 @@ ngx_autocert_name_due(ngx_cycle_t *cycle, ngx_autocert_conf_t *acf,
                            ? EVP_PKEY_RSA : EVP_PKEY_EC;
 
         rc = ngx_http_autocert_cert_not_after((char *) path, &not_after,
-                                              &stored_id, verifyp);
+                                              &stored_id, verifyp,
+                                              (char *) key_path, cycle->log);
 
         if (rc == NGX_DECLINED) {
             ngx_log_debug1(
@@ -1420,12 +1451,16 @@ ngx_autocert_name_due(ngx_cycle_t *cycle, ngx_autocert_conf_t *acf,
             return 1;                   /* no cert yet -> issue */
         }
         if (rc == NGX_ABORT) {
+            /* Either the leaf does not cover this name, or the stored
+             * private key does not pair with it (a torn or partially
+             * restored key/chain pair). Both are unserveable and both are
+             * fixed by reissuing. */
             ngx_log_error(
                 NGX_LOG_NOTICE, cycle->log, 0,
-                "autocert: \"%V\" stored cert does not cover this name "
-                "(wrong-domain leaf); reissuing",
+                "autocert: \"%V\" stored cert does not cover this name or "
+                "does not match the stored private key; reissuing",
                 name );
-            return 1;                   /* identity mismatch -> reissue */
+            return 1;                   /* identity/pair mismatch -> reissue */
         }
         if (rc != NGX_OK) {
             ngx_log_error(NGX_LOG_WARN, cycle->log, 0,

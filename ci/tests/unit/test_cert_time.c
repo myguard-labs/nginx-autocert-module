@@ -1,6 +1,6 @@
 /*
  * Unit tests for the crypto TU's certificate-expiry helpers (M8 renewal):
- *   - ngx_http_autocert_cert_not_after(path, &out, &key_id, verify_name) — read a
+ *   - ngx_http_autocert_cert_not_after(path, &out, &key_id, verify_name, &test_log) — read a
  *     leaf PEM's notAfter as a Unix epoch; ENOENT/ENOTDIR -> NGX_DECLINED, a
  *     symlinked path -> NGX_ERROR (O_NOFOLLOW), other failures -> NGX_ERROR; a
  *     non-NULL verify_name the leaf does not cover -> NGX_ABORT (M2).
@@ -37,9 +37,15 @@ ngx_log_error_core(ngx_uint_t level, ngx_log_t *log, ngx_err_t err,
 #include <string.h>
 #include <unistd.h>
 #include <time.h>
+#include <sys/stat.h>
 
 
 static int  failures;
+
+/* Minimal real ngx_log_t so ngx_log_error(...)'s (log)->log_level check
+ * dereferences a valid object instead of NULL; ngx_log_error_core above is
+ * stubbed to a no-op so nothing actually prints. */
+static ngx_log_t  test_log = { .log_level = NGX_LOG_DEBUG_ALL };
 
 #define CHECK(cond, msg)                                                      \
     do {                                                                      \
@@ -153,7 +159,7 @@ test_cert_not_after(void)
     time_t  out = 0;
     int     key_id = EVP_PKEY_NONE;
 
-    CHECK(ngx_http_autocert_cert_not_after(FIXTURE_PATH, &out, &key_id, NULL)
+    CHECK(ngx_http_autocert_cert_not_after(FIXTURE_PATH, &out, &key_id, NULL, NULL, &test_log)
               == NGX_OK
           && out == FIXTURE_EPOCH,
           "cert_not_after reads the fixture's exact notAfter epoch");
@@ -164,7 +170,7 @@ test_cert_not_after(void)
 
     /* key_id is optional: a NULL pointer must be accepted. */
     out = 0;
-    CHECK(ngx_http_autocert_cert_not_after(FIXTURE_PATH, &out, NULL, NULL) == NGX_OK
+    CHECK(ngx_http_autocert_cert_not_after(FIXTURE_PATH, &out, NULL, NULL, NULL, &test_log) == NGX_OK
           && out == FIXTURE_EPOCH,
           "cert_not_after accepts a NULL key_id out-param");
 
@@ -177,26 +183,26 @@ test_cert_not_after(void)
         ngx_str_t  empty = ngx_null_string;
 
         out = 0;
-        CHECK(ngx_http_autocert_cert_not_after(FIXTURE_PATH, &out, NULL, &good)
+        CHECK(ngx_http_autocert_cert_not_after(FIXTURE_PATH, &out, NULL, &good, NULL, &test_log)
                   == NGX_OK
               && out == FIXTURE_EPOCH,
               "cert_not_after accepts a leaf that covers verify_name");
 
         out = 0;
-        CHECK(ngx_http_autocert_cert_not_after(FIXTURE_PATH, &out, NULL, &bad)
+        CHECK(ngx_http_autocert_cert_not_after(FIXTURE_PATH, &out, NULL, &bad, NULL, &test_log)
                   == NGX_ABORT,
               "cert_not_after returns NGX_ABORT for a wrong-domain leaf");
 
         /* An empty verify_name is treated as "no check". */
         out = 0;
-        CHECK(ngx_http_autocert_cert_not_after(FIXTURE_PATH, &out, NULL, &empty)
+        CHECK(ngx_http_autocert_cert_not_after(FIXTURE_PATH, &out, NULL, &empty, NULL, &test_log)
                   == NGX_OK,
               "cert_not_after skips the identity check for an empty verify_name");
     }
 
     /* Missing file -> NGX_DECLINED (no cert stored yet). */
     out = 0;
-    CHECK(ngx_http_autocert_cert_not_after("ci/tests/unit/does-not-exist.pem", &out, NULL, NULL)
+    CHECK(ngx_http_autocert_cert_not_after("ci/tests/unit/does-not-exist.pem", &out, NULL, NULL, NULL, &test_log)
               == NGX_DECLINED,
           "cert_not_after missing file -> NGX_DECLINED");
 
@@ -213,7 +219,7 @@ test_cert_not_after(void)
                 && symlink(abs_target, link) == 0)
             {
                 out = 0;
-                CHECK(ngx_http_autocert_cert_not_after(link, &out, NULL, NULL) == NGX_ERROR,
+                CHECK(ngx_http_autocert_cert_not_after(link, &out, NULL, NULL, NULL, &test_log) == NGX_ERROR,
                       "cert_not_after refuses to follow a symlink (O_NOFOLLOW)");
                 unlink(link);
             } else {
@@ -226,6 +232,182 @@ test_cert_not_after(void)
 }
 
 
+/*
+ * Pair check (key_path): the freshness path must treat a stored chain whose
+ * private key does not match as DUE, not fresh.
+ *
+ * This is the regression guard for a silent multi-week outage: the store
+ * publishes privkey and fullchain as two files, so a crash mid-commit or a
+ * partially restored backup can leave a NEW key beside an OLD-but-valid
+ * chain. That chain parses, covers the name, has the right key family and is
+ * not yet in its renew window, so before this check every freshness test read
+ * it as fresh and no reissue was ever scheduled -- while the serve path
+ * refused the mismatched pair on every handshake and served nothing.
+ *
+ * Both PEMs are generated here rather than committed so the test carries no
+ * private key in the repo, and so the MATCHING and MISMATCHED cases come from
+ * the same generator (a committed pair could drift out of sync silently).
+ */
+static int
+write_pem_key(const char *path, EVP_PKEY *k)
+{
+    FILE *f = fopen(path, "wb");
+    int   ok;
+
+    if (f == NULL) {
+        return 0;
+    }
+    ok = PEM_write_PrivateKey(f, k, NULL, NULL, 0, NULL, NULL);
+    fclose(f);
+    return ok == 1;
+}
+
+
+static EVP_PKEY *
+gen_ec_key(void)
+{
+    EVP_PKEY *k = NULL;
+    EVP_PKEY_CTX *c = EVP_PKEY_CTX_new_id(EVP_PKEY_EC, NULL);
+
+    if (c == NULL) {
+        return NULL;
+    }
+    if (EVP_PKEY_keygen_init(c) == 1
+        && EVP_PKEY_CTX_set_ec_paramgen_curve_nid(c, NID_X9_62_prime256v1) == 1)
+    {
+        (void) EVP_PKEY_keygen(c, &k);
+    }
+    EVP_PKEY_CTX_free(c);
+    return k;
+}
+
+
+static void
+test_cert_pair_check(void)
+{
+    EVP_PKEY  *key = gen_ec_key();
+    EVP_PKEY  *other = gen_ec_key();
+    X509      *leaf = NULL;
+    char       cert_p[] = "/tmp/autocert_pair_cert_XXXXXX";
+    char       key_p[]  = "/tmp/autocert_pair_key_XXXXXX";
+    char       oth_p[]  = "/tmp/autocert_pair_oth_XXXXXX";
+    int        fd_c, fd_k, fd_o;
+    time_t     out = 0;
+    FILE      *f;
+
+    if (key == NULL || other == NULL) {
+        CHECK(0, "could not generate EC keys for the pair fixture");
+        goto cleanup;
+    }
+
+    fd_c = mkstemp(cert_p); fd_k = mkstemp(key_p); fd_o = mkstemp(oth_p);
+    if (fd_c == -1 || fd_k == -1 || fd_o == -1) {
+        CHECK(0, "could not create temp paths for the pair fixture");
+        goto cleanup;
+    }
+    close(fd_c); close(fd_k); close(fd_o);
+
+    /* Self-signed leaf bound to `key`, valid far in the future so nothing
+     * except the pair check can make it read as due. */
+    leaf = X509_new();
+    if (leaf == NULL
+        || X509_set_version(leaf, 2) != 1
+        || ASN1_INTEGER_set(X509_get_serialNumber(leaf), 1) != 1
+        || X509_gmtime_adj(X509_getm_notBefore(leaf), -3600) == NULL
+        || X509_gmtime_adj(X509_getm_notAfter(leaf), 365 * 24 * 3600) == NULL
+        || X509_set_pubkey(leaf, key) != 1
+        || X509_sign(leaf, key, EVP_sha256()) == 0)
+    {
+        CHECK(0, "could not build the self-signed pair fixture leaf");
+        goto cleanup;
+    }
+
+    f = fopen(cert_p, "wb");
+    if (f == NULL || PEM_write_X509(f, leaf) != 1) {
+        if (f != NULL) { fclose(f); }
+        CHECK(0, "could not write the pair fixture leaf");
+        goto cleanup;
+    }
+    fclose(f);
+
+    if (!write_pem_key(key_p, key) || !write_pem_key(oth_p, other)) {
+        CHECK(0, "could not write the pair fixture keys");
+        goto cleanup;
+    }
+
+    /* Matching pair: unchanged behaviour, still fresh (NGX_OK). This is the
+     * control that keeps the check from reading as due for everyone. */
+    out = 0;
+    CHECK(ngx_http_autocert_cert_not_after(cert_p, &out, NULL, NULL, key_p, &test_log)
+              == NGX_OK && out > 0,
+          "cert_not_after accepts a chain whose stored key matches");
+
+    /* Mismatched pair -> NGX_ABORT, which the scheduler routes to reissue. */
+    out = 0;
+    CHECK(ngx_http_autocert_cert_not_after(cert_p, &out, NULL, NULL, oth_p, &test_log)
+              == NGX_ABORT,
+          "cert_not_after returns NGX_ABORT for a mismatched key/chain pair");
+
+    /* Absent key beside a valid chain is equally unserveable -> reissue. */
+    out = 0;
+    CHECK(ngx_http_autocert_cert_not_after(cert_p, &out, NULL, NULL,
+                                           "/tmp/autocert-no-such-key.pem", &test_log)
+              == NGX_ABORT,
+          "cert_not_after returns NGX_ABORT when the stored key is missing");
+
+    /* A NULL key_path skips the pair check entirely (back-compat). */
+    out = 0;
+    CHECK(ngx_http_autocert_cert_not_after(cert_p, &out, NULL, NULL, NULL, &test_log)
+              == NGX_OK,
+          "cert_not_after skips the pair check when key_path is NULL");
+
+    /* A key_path that fails to open with a NON-ENOENT errno (here: EACCES
+     * from a mode-0000 file) must NOT be treated as a torn pair. Before the
+     * fix this collapsed every open() errno to NGX_ABORT, which on win32 is
+     * reachable from the publish path itself (a sharing violation while a
+     * rename is in flight) and would trigger a spurious real ACME reissue.
+     * The correct outcome is the pair check being SKIPPED, so the overall
+     * call still reports NGX_OK (the chain itself is fresh and valid). Skips
+     * gracefully when running as root, where chmod 0000 does not deny
+     * self-open. */
+    if (geteuid() == 0) {
+        fprintf(stderr,
+                "skip: running as root, chmod 0000 would not deny open() -- "
+                "non-ENOENT key_path errno test needs a non-root user\n");
+    } else {
+        char  noperm_p[] = "/tmp/autocert_pair_noperm_XXXXXX";
+        int   fd_n = mkstemp(noperm_p);
+
+        CHECK(fd_n != -1, "could not create the no-permission key fixture");
+        if (fd_n != -1) {
+            close(fd_n);
+            CHECK(chmod(noperm_p, 0000) == 0,
+                  "could not chmod the no-permission key fixture to 0000");
+
+            out = 0;
+            CHECK(ngx_http_autocert_cert_not_after(cert_p, &out, NULL, NULL,
+                                                   noperm_p, &test_log)
+                      == NGX_OK,
+                  "cert_not_after does NOT abort on a non-ENOENT (EACCES) "
+                  "key_path open failure -- the pair check is skipped, not "
+                  "treated as a torn pair");
+
+            chmod(noperm_p, 0600);
+            unlink(noperm_p);
+        }
+    }
+
+cleanup:
+    /* Below the label so an early `goto cleanup` (failed keygen, failed leaf
+     * build, failed PEM write) still removes whatever mkstemp() created. An
+     * unexpanded XXXXXX template just yields ENOENT, which is harmless. */
+    unlink(cert_p); unlink(key_p); unlink(oth_p);
+    if (leaf != NULL)  { X509_free(leaf); }
+    if (key != NULL)   { EVP_PKEY_free(key); }
+    if (other != NULL) { EVP_PKEY_free(other); }
+}
+
+
 int
 main(void)
 {
@@ -234,6 +416,7 @@ main(void)
 
     test_timegm_vectors();
     test_cert_not_after();
+    test_cert_pair_check();
 
     if (failures) {
         fprintf(stderr, "\n%d test(s) FAILED\n", failures);

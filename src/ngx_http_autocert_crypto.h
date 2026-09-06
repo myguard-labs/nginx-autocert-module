@@ -192,9 +192,23 @@ X509 *ngx_http_autocert_acme_tls_cert(EVP_PKEY *pkey, ngx_str_t *domain,
  * cover this host (X509_check_host) or the call returns NGX_ABORT — used by the
  * scheduler to treat a wrong-domain stored cert as due (M2). Pass a concrete
  * sub-label for a wildcard name so default wildcard matching applies.
+ *
+ * key_path (nullable): when non-NULL, the private key stored at this path must
+ * pair with the leaf (X509_check_private_key) or the call returns NGX_ABORT.
+ * The store writes the key and the chain as two separate files, so a crash
+ * mid-commit or a partially restored backup can leave a new key beside an old
+ * but otherwise perfectly valid chain; without this the chain reads as fresh
+ * forever while the serve path refuses the mismatched pair on every handshake.
+ * A missing, unparsable or mismatched key all report NGX_ABORT (=> reissue).
+ * A transient I/O error opening key_path (e.g. a concurrent publish holding
+ * the file busy) does NOT report NGX_ABORT: the pair check is silently
+ * skipped for this call and the remaining freshness tests decide, so a
+ * passing I/O condition never forces an ACME reissue. `log` is used only to
+ * report that skip; pass the caller's cycle/request log.
  */
 ngx_int_t ngx_http_autocert_cert_not_after(const char *path, time_t *out,
-    int *key_id, const ngx_str_t *verify_name);
+    int *key_id, const ngx_str_t *verify_name, const char *key_path,
+    ngx_log_t *log);
 
 
 /*
