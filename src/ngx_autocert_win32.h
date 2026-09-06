@@ -536,15 +536,22 @@ ngx_autocert_win32_token_sid(TOKEN_INFORMATION_CLASS cls, BYTE *buf,
 {
     HANDLE  tok;
     DWORD   need, err;
-    BYTE    raw[sizeof(TOKEN_USER) + SECURITY_MAX_SID_SIZE];
     PSID    sid;
+    /* GetTokenInformation() writes a TOKEN_USER / TOKEN_OWNER (a pointer
+     * member) followed by the SID it points into; a bare BYTE array has no
+     * alignment guarantee for that pointer read, so force the struct's. */
+    union {
+        BYTE         bytes[sizeof(TOKEN_USER) + SECURITY_MAX_SID_SIZE];
+        TOKEN_USER   align_user;
+        TOKEN_OWNER  align_owner;
+    } raw;
 
     if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &tok)) {
         return GetLastError();
     }
 
     need = 0;
-    if (!GetTokenInformation(tok, cls, raw, sizeof(raw), &need)) {
+    if (!GetTokenInformation(tok, cls, raw.bytes, sizeof(raw.bytes), &need)) {
         err = GetLastError();
         CloseHandle(tok);
         return err;
@@ -553,9 +560,9 @@ ngx_autocert_win32_token_sid(TOKEN_INFORMATION_CLASS cls, BYTE *buf,
     CloseHandle(tok);
 
     if (cls == TokenUser) {
-        sid = ((TOKEN_USER *) raw)->User.Sid;
+        sid = raw.align_user.User.Sid;
     } else if (cls == TokenOwner) {
-        sid = ((TOKEN_OWNER *) raw)->Owner;
+        sid = raw.align_owner.Owner;
     } else {
         return ERROR_INVALID_PARAMETER;
     }
