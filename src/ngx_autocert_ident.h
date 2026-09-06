@@ -1,4 +1,6 @@
 /*
+ * Copyright (C) 2026 Thijs Eilander
+ * SPDX-License-Identifier: BSD-2-Clause
  * ngx_autocert_ident — identifier classification + store-segment mapping
  * helpers, shared across the CORE and HTTP modules AND the standalone crypto
  * unit tests (M3/M8).
@@ -83,6 +85,86 @@ ngx_autocert_str_is_ip(const ngx_str_t *name, struct in6_addr *out6)
     }
 
     return 0;
+}
+
+
+/*
+ * Config-time shape check for an issuable DNS name (concrete or the sole
+ * leading-label wildcard "*.rest" ngx_http_autocert_is_wildcard already
+ * accepted). Rejects anything that would corrupt the ACME order JSON
+ * (ngx_autocert_order.c embeds the name verbatim, unescaped) or that is not a
+ * legal LDH hostname per RFC 1035/1123: total length, per-label length,
+ * leading/trailing/embedded hyphen, and the LDH charset (letters, digits,
+ * hyphen; '.' as the label separator). An IDNA/punycode label ("xn--...") is
+ * plain LDH and passes unchanged — this never decodes punycode, it only
+ * enforces the wire charset ACME itself requires. Skip entirely for an IP
+ * literal (classified by ngx_autocert_str_is_ip before this is reached) and
+ * strip a leading "*." before scanning so a wildcard's "rest" is checked like
+ * any other name.
+ *
+ * Deliberately NOT ngx_autocert_requests_normalize (ngx_autocert_requests.c):
+ * that helper is vendored verbatim, hidden-visibility, into two separate .so
+ * files under an ABI contract with nginx-label-autoconf-module and must not
+ * gain a new caller or a new accepted shape (it also hard-rejects '*', so it
+ * cannot validate a wildcard's "rest" without changing that contract).
+ */
+static ngx_inline ngx_uint_t
+ngx_autocert_dns_name_valid(const ngx_str_t *name)
+{
+    u_char      *p, *end;
+    size_t       label_len;
+
+    if (name->len >= 2 && name->data[0] == '*' && name->data[1] == '.') {
+        p = name->data + 2;
+    } else {
+        p = name->data;
+    }
+
+    end = name->data + name->len;
+
+    /*
+     * The 253-byte cap is on the WHOLE name, not on the part after a stripped
+     * "*." -- measuring only the suffix let a wildcard buy two extra bytes and
+     * accepted a 255-byte name.
+     */
+    if (p >= end || name->len > 253) {
+        return 0;
+    }
+
+    label_len = 0;
+
+    for (; p < end; p++) {
+        if (*p == '.') {
+            if (label_len == 0) {
+                return 0;               /* leading/empty/consecutive dot */
+            }
+            if (p[-1] == '-') {
+                return 0;               /* label ends in a hyphen */
+            }
+            label_len = 0;
+            continue;
+        }
+
+        if (!((*p >= 'a' && *p <= 'z') || (*p >= 'A' && *p <= 'Z')
+              || (*p >= '0' && *p <= '9') || *p == '-'))
+        {
+            return 0;                   /* not LDH */
+        }
+
+        if (*p == '-' && label_len == 0) {
+            return 0;                   /* label starts with a hyphen */
+        }
+
+        if (++label_len > 63) {
+            return 0;                   /* label too long */
+        }
+    }
+
+    if (label_len == 0 || end[-1] == '-') {
+        return 0;                       /* trailing dot, or trailing hyphen */
+    }
+
+    return 1;
 }
 
 

@@ -26,6 +26,9 @@ trap cleanup EXIT
 
 rm -rf "$PREFIX"
 mkdir -p "$PREFIX/logs" "$PREFIX/conf" "$PREFIX/store"
+# store mode must not depend on the caller's umask (the driver refuses a
+# group/other-writable store, and mkdir's mode is umask-filtered).
+chmod 0700 "$PREFIX/store"
 
 # Plant a legacy flat account key with recognizable content + 0600.
 LEGACY_CONTENT="LEGACY-ACCOUNT-KEY-$$"

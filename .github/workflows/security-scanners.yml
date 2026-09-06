@@ -1,4 +1,4 @@
-# sync-sha: 81d03920863e3fc03d598e78889aad8acea0490f548b13f49580c24d3bb882da
+# sync-sha: b2a7b53e302f26835123adafeef6f9fa7ae8d5f20a164c0eab0f6de25369504a
 name: Security scanners
 
 # Static / security scanners gate on every PR/push — flawfinder, clang-tidy
@@ -90,10 +90,13 @@ jobs:
             -I$N/src/os/unix -I$N/objs -I$N/src/http -I$N/src/http/modules -I$N/src/http/v2 \
             -I$GITHUB_WORKSPACE/src -I/usr/include"
           status=0
-          for f in \
-            "$GITHUB_WORKSPACE/src/ngx_autocert_json.c" \
-            "$GITHUB_WORKSPACE/src/ngx_autocert_acme.c" \
-            "$GITHUB_WORKSPACE/src/ngx_autocert_challenge.c"; do
+          # All 12 translation units under src/ -- was hardcoded to 3 files
+          # (ngx_autocert_json.c, ngx_autocert_acme.c, ngx_autocert_challenge.c),
+          # leaving 9 with no clang-tidy coverage at all. Verified locally
+          # (clang-tidy 19.1.7, this check set) clean on all 12 against a
+          # properly configured tree (--with-http_ssl_module, so NGX_OPENSSL
+          # is defined and the SSL-touching files parse).
+          for f in "$GITHUB_WORKSPACE"/src/*.c; do
             # shellcheck disable=SC2086
             clang-tidy "$f" \
               --checks='-*,cert-*,clang-analyzer-security.*,-clang-analyzer-security.insecureAPI.DeprecatedOrUnsafeBufferHandling' \

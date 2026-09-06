@@ -1,4 +1,6 @@
 /*
+ * Copyright (C) 2026 Thijs Eilander
+ * SPDX-License-Identifier: BSD-2-Clause
  * ngx_http_autocert_module — automatic ACME certificate provisioning.
  *
  * M0: module skeleton plus `autocert on|off [email];` (http{} global or
@@ -27,6 +29,7 @@
 #include "ngx_autocert_serve.h"
 #include "ngx_autocert_driver.h"
 #include "ngx_autocert_shared.h"
+#include "ngx_autocert_account.h" /* ngx_autocert_account_json_safe */
 
 
 #define NGX_HTTP_AUTOCERT_DEFAULT_CA \
@@ -1087,6 +1090,27 @@ ngx_http_autocert_add_name(ngx_conf_t *cf, ngx_http_autocert_main_conf_t *amcf,
     ngx_autocert_ca_entry_t  *ce;
     ngx_str_t                *slot;
 
+    /*
+     * Config-time LDH gate (audit MINOR): server_name/autocert_wildcard values
+     * land verbatim, unescaped, in the ACME newOrder JSON
+     * (ngx_autocert_order_new_order) and as a filesystem path segment
+     * (ngx_autocert_fs_segment / the serve-path lookup). Reject anything that
+     * is neither a valid IP identifier nor a legal LDH hostname (or the sole
+     * leading-label wildcard already shape-checked above) HERE, at parse time,
+     * so nginx -t catches it instead of the malformed value only surfacing
+     * later as a rejected/garbled ACME order. A punycode label ("xn--...") is
+     * plain LDH and is accepted unchanged; not decoded or IDNA-validated here.
+     */
+    if (ngx_autocert_str_is_ip(&name, NULL) == 0
+        && !ngx_autocert_dns_name_valid(&name))
+    {
+        ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+            "autocert: \"%V\" is not a valid DNS name or IP address "
+            "(bad or oversized LDH label, illegal character, or leading/"
+            "trailing hyphen)", &name);
+        return NGX_ERROR;
+    }
+
     /* Dedup: the same name may appear across vhosts. */
     for (i = 0; i < amcf->names->nelts; i++) {
         ngx_str_t  *e = &((ngx_str_t *) amcf->names->elts)[i];
@@ -1873,6 +1897,22 @@ ngx_http_autocert_contact(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
         ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
                            "invalid email \"%V\" in \"autocert_contact\"",
                            &value[1]);
+        return NGX_CONF_ERROR;
+    }
+
+    /*
+     * Audit MINOR: the account email is embedded verbatim in the newAccount
+     * JWS payload (ngx_autocert_account.c's "contact":["mailto:<email>"]).
+     * That path already runs ngx_autocert_account_json_safe() before POSTing,
+     * but only at ACME-bootstrap time — a JSON-unsafe contact previously
+     * passed `nginx -t` and failed only later, as an opaque account-bootstrap
+     * error. Run the same check here so it fails config parse instead.
+     */
+    if (!ngx_autocert_account_json_safe(&value[1])) {
+        ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                           "autocert_contact: \"%V\" contains a control "
+                           "character, '\"', or '\\' and cannot be embedded "
+                           "in the ACME account request", &value[1]);
         return NGX_CONF_ERROR;
     }
 

@@ -1,3 +1,38 @@
+Changes unreleased
+
+    *) Change: the store directory and the stored private key are refused if
+       they carry any group or other permission bits, or are not owned by the
+       worker's effective uid. A store that previously worked while group-
+       readable (0750, e.g. for a backup or monitoring group) will now fail to
+       be adopted, and issuance stops with
+       "autocert: store directory has group/other permissions (refusing to
+       adopt it)" in the error log. Fix the store rather than the module:
+       chown -R <nginx user> <autocert_path> && chmod 0700 <autocert_path>.
+       The reason is that neither path is created by us when it already
+       exists, so a directory or key pre-created or substituted by another
+       local user was previously adopted silently. The public fullchain is
+       deliberately exempt.
+
+    *) Bugfix: a staging certificate file is verified to be a single-linked
+       regular file before it is truncated, instead of being truncated by
+       O_TRUNC at open() time. A leaf still hardlinked to the live
+       certificate could previously be emptied before anything established
+       what it was.
+
+    *) Bugfix: a certificate whose notBefore or notAfter fails to parse is now
+       rejected. X509_cmp_current_time() reports a parse error as 0, which the
+       previous > 0 / < 0 comparison accepted as a valid time.
+
+    *) Bugfix: a chunked ACME response body is only considered complete when
+       the trailer section is closed by a genuine empty line. A response
+       truncated in the middle of a trailer field was previously accepted as
+       a complete body.
+
+    *) Bugfix: an encrypted private key in the store now fails to load cleanly
+       instead of blocking the worker on a console passphrase prompt it can
+       never answer.
+
+
 Changes with the nginx-autocert-module 1.3.0                     10 Aug 2026
 
     *) License: the module is now BSD-2-Clause, matching nginx and angie. It

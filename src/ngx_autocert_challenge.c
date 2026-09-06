@@ -1,4 +1,6 @@
 /*
+ * Copyright (C) 2026 Thijs Eilander
+ * SPDX-License-Identifier: BSD-2-Clause
  * ngx_autocert_challenge — shared-memory HTTP-01 token store (M5).
  * See the header for the contract. An rbtree of token->keyauth in a slab zone,
  * keyed by crc32(token) with the full token compared on collision.

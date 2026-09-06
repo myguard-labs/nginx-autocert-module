@@ -20,6 +20,9 @@
 
 set -euo pipefail
 
+# shellcheck source=ci/tests/e2e/image-pins.sh
+. "$(dirname "${BASH_SOURCE[0]}")/image-pins.sh"
+
 SERVER_BIN="${SERVER_BIN:?set SERVER_BIN to the built nginx/angie binary}"
 NGX_BUILD_DIR="${NGX_BUILD_DIR:-$(cd "$(dirname "$SERVER_BIN")/.." && pwd)}"
 
@@ -67,11 +70,11 @@ docker run -d --name "$PEBBLE_NAME" -p "${AC_PORT_14000:-14000}":14000 -p "${AC_
     -e PEBBLE_VA_NOSLEEP=1 \
     -e PEBBLE_WFE_NONCEREJECT=0 \
     -v "$PREFIX/conf/pebble-config.json:/test/config/pebble-config.json:ro" \
-    ghcr.io/letsencrypt/pebble:latest >/dev/null
+    "$PEBBLE_IMAGE" >/dev/null
 
 echo "== starting challtestsrv (resolves 'pebble' -> 127.0.0.1) =="
 docker run -d --name "$DNS_NAME" -p "${DNS_PORT}":53/udp -p "${DNS_PORT}":53/tcp \
-    ghcr.io/letsencrypt/pebble-challtestsrv:latest \
+    "$CHALLTESTSRV_IMAGE" \
     -dnsserver :53 -management :8055 \
     -http01 "" -https01 "" -tlsalpn01 "" -doh "" \
     -defaultIPv4 127.0.0.1 -defaultIPv6 "" >/dev/null
@@ -111,6 +114,9 @@ echo "== positive: register with EAB =="
 write_conf "    autocert_eab_kid \"$EAB_KID\";
     autocert_eab_hmac_key \"$EAB_HMAC\";"
 mkdir -p "$PREFIX/store"
+# store mode must not depend on the caller's umask (the driver refuses a
+# group/other-writable store, and mkdir's mode is umask-filtered).
+chmod 0700 "$PREFIX/store"
 "$SERVER_BIN" -t -p "$PREFIX" -c "$PREFIX/conf/nginx.conf"
 "$SERVER_BIN" -p "$PREFIX" -c "$PREFIX/conf/nginx.conf"
 

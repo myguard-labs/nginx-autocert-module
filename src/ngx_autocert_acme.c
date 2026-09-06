@@ -1,4 +1,6 @@
 /*
+ * Copyright (C) 2026 Thijs Eilander
+ * SPDX-License-Identifier: BSD-2-Clause
  * ngx_autocert_acme — outbound HTTP/1.1-over-TLS client (M4b). See the header
  * for the contract. Flow per request:
  *
@@ -499,6 +501,33 @@ ngx_autocert_acme_parse_url(ngx_autocert_acme_request_t *r)
  * splitter without the client type. Assumes parse_url has already populated
  * host/port.
  */
+/* Cap logged length so a hostile/misbehaving CA cannot flood the error log,
+ * and JSON-escape control bytes (CR/LF included) so it cannot forge log
+ * lines. ngx_escape_json's growth factor is bounded (worst case "\uXXXX",
+ * 6x), so the pool allocation below cannot overflow for any capped input. */
+#define NGX_AUTOCERT_LOG_MAX  256
+
+static ngx_str_t
+ngx_autocert_acme_log_safe(ngx_pool_t *pool, ngx_str_t *src)
+{
+    ngx_str_t   out;
+    size_t      cap;
+    uintptr_t   n;
+
+    cap = src->len > NGX_AUTOCERT_LOG_MAX ? NGX_AUTOCERT_LOG_MAX : src->len;
+
+    n = ngx_escape_json(NULL, src->data, cap);
+    out.data = ngx_pnalloc(pool, cap + n);
+    if (out.data == NULL) {
+        out.len = 0;
+        return out;
+    }
+    out.len = (size_t) ((u_char *) ngx_escape_json(out.data, src->data, cap)
+                         - out.data);
+    return out;
+}
+
+
 static ngx_int_t
 ngx_autocert_acme_check_origin(ngx_autocert_acme_request_t *r)
 {
@@ -513,10 +542,13 @@ ngx_autocert_acme_check_origin(ngx_autocert_acme_request_t *r)
         || r->host.len != c->origin_host.len
         || ngx_strncasecmp(r->host.data, c->origin_host.data, r->host.len) != 0)
     {
+        ngx_str_t  safe_url = ngx_autocert_acme_log_safe(r->pool, &r->url);
+
         ngx_log_error(NGX_LOG_ERR, r->log, 0,
                       "autocert: ACME URL \"%V\" leaves the configured CA "
                       "origin (host \"%V\" port %ui); refusing",
-                      &r->url, &c->origin_host, (ngx_uint_t) c->origin_port);
+                      &safe_url, &c->origin_host,
+                      (ngx_uint_t) c->origin_port);
         return NGX_ERROR;
     }
 
@@ -1231,12 +1263,26 @@ ngx_autocert_acme_parse_response(ngx_autocert_acme_request_t *r)
     size_t      total;
 
     if (!r->headers_done) {
+        size_t  scan_from;
+        size_t  back;
+
         total = b->last - b->start;
 
+        /* Resume the CRLFCRLF search where the last read event left off
+         * instead of re-scanning from b->start every time (O(N^2) across
+         * incremental reads). Back off by up to (marker length - 1) bytes so
+         * a boundary split across two reads (e.g. "...CRLF" in one read,
+         * "CRLF..." in the next) is never skipped over. */
+        back = sizeof(CRLF CRLF) - 2;
+        scan_from = r->hdr_scan_pos > back ? r->hdr_scan_pos - back : 0;
+
         /* end of headers (CRLFCRLF) */
-        hdr_end = ngx_autocert_memmem(b->start, total, CRLF CRLF,
-                                      sizeof(CRLF CRLF) - 1);
+        hdr_end = ngx_autocert_memmem(b->start + scan_from, total - scan_from,
+                                      CRLF CRLF, sizeof(CRLF CRLF) - 1);
         if (hdr_end == NULL) {
+            /* Nothing to re-examine next time except the last (marker
+             * length - 1) bytes, which the backoff above re-includes. */
+            r->hdr_scan_pos = total;
             return NGX_AGAIN;
         }
         hdr_end += sizeof(CRLF CRLF) - 1;
@@ -1503,11 +1549,29 @@ ngx_autocert_acme_dechunk(ngx_autocert_acme_request_t *r)
         p = eol + sizeof(CRLF) - 1;         /* past the size line */
 
         if (size == 0) {
-            /* last chunk; a trailing CRLF (after optional trailers) ends it. We
-             * tolerate trailers: require at least the final CRLF is present. */
-            eol = ngx_autocert_memmem(p, end - p, CRLF, sizeof(CRLF) - 1);
-            if (eol == NULL) {
-                return NGX_AGAIN;
+            /*
+             * Last chunk. RFC 7230 SS4.1.2: zero or more trailer fields, each
+             * terminated by CRLF, followed by a genuine EMPTY line (a bare
+             * CRLF) that ends the message. A naive "any following CRLF ends
+             * it" search (the pre-fix behaviour) accepts a truncated
+             * "0\r\nFoo: x\r\n" as complete: the first CRLF found is the one
+             * ending the trailer FIELD, not the empty line ending the
+             * message, so a real trailer or a genuinely incomplete stream is
+             * misread as a clean end-of-body. Walk trailer lines one at a
+             * time and require the terminator to be an EMPTY line.
+             */
+            for ( ;; ) {
+                eol = ngx_autocert_memmem(p, end - p, CRLF, sizeof(CRLF) - 1);
+                if (eol == NULL) {
+                    return NGX_AGAIN;      /* line not complete yet */
+                }
+                if (eol == p) {
+                    /* genuine empty line: end of trailers, end of message */
+                    p = eol + sizeof(CRLF) - 1;
+                    break;
+                }
+                /* a trailer field line; skip it and look for the next one */
+                p = eol + sizeof(CRLF) - 1;
             }
             break;
         }

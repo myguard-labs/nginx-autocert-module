@@ -1,4 +1,4 @@
-# sync-sha: 8dfde3ba84779700394d44e419f3bfcd9481a6ef9b98055fa9a0d9981fe06f44
+# sync-sha: 5002dc5a51cd92dcc7a92312fc5a01767fb121eeb9de580db696e897658834eb
 name: CodeQL
 
 env:
@@ -70,3 +70,54 @@ jobs:
         uses: github/codeql-action/analyze@8aad20d150bbac5944a9f9d289da16a4b0d87c1e # v4
         with:
           category: /language:c-cpp
+          output: sarif-results
+
+      # analyze@v4 always uploads to the Security tab and always exits 0 --
+      # it has no gate of its own, so an error-level finding merged silently
+      # for as long as this workflow existed. Fail the job here on any SARIF
+      # result whose rule carries security-severity or problem.severity
+      # "error" (CodeQL's own error tier, as opposed to warning/note/
+      # recommendation), so a real defect blocks the branch instead of only
+      # showing up as a Security-tab alert someone has to remember to check.
+      - name: Fail on error-level CodeQL findings
+        if: always()
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          files=(sarif-results/*.sarif)
+          if [ "${#files[@]}" -eq 0 ]; then
+            echo "::error::no SARIF output found under sarif-results/ -- analyze step did not run or output: path changed"
+            exit 1
+          fi
+          count=0
+          for f in "${files[@]}"; do
+            # A result identifies its rule by .ruleId, by .ruleIndex, or by
+            # neither (carrying an explicit .level instead) -- all three are
+            # legal in SARIF 2.1.0. Resolve .ruleId FIRST: indexing rules[]
+            # with a null .ruleIndex is a hard jq error that, under this
+            # step's set -e, fails the job and reports an error-level finding
+            # where there is none; but merely not crashing is not enough --
+            # falling straight through to "warning" would silently DROP a
+            # genuine error-level rule that was named by id alone, turning a
+            # blocking gate into a green one. Only when neither id nor index
+            # resolves do we fall back to "warning", SARIF's own default.
+            n="$(jq '[.runs[]
+                       | . as $run
+                       | .results[]
+                       | . as $r
+                       | (.level
+                          // ( ( [ $run.tool.driver.rules[]?
+                                   | select(.id == $r.ruleId) ][0]
+                                 // ($r.ruleIndex as $i
+                                     | if $i == null then null
+                                       else $run.tool.driver.rules[$i] end) )
+                               | .defaultConfiguration.level? )
+                          // "warning")
+                       | select(. == "error")] | length' "$f")"
+            count=$((count + n))
+          done
+          echo "error-level CodeQL findings: $count"
+          if [ "$count" -gt 0 ]; then
+            echo "::error::$count error-level CodeQL finding(s) -- see the Security tab for /language:c-cpp"
+            exit 1
+          fi

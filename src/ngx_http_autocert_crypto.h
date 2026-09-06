@@ -1,4 +1,6 @@
 /*
+ * Copyright (C) 2026 Thijs Eilander
+ * SPDX-License-Identifier: BSD-2-Clause
  * ngx_http_autocert_crypto — JOSE/ACME crypto primitives (M3).
  *
  * Self-contained on top of OpenSSL: ECDSA account-key generation (P-256 /
@@ -40,6 +42,18 @@ typedef enum {
 EVP_PKEY *ngx_http_autocert_key_generate(ngx_uint_t curve);
 
 void ngx_http_autocert_key_free(EVP_PKEY *pkey);
+
+
+/*
+ * PEM passphrase callback for PEM_read_bio_PrivateKey() call sites that load
+ * unattended, from-disk keys. A NULL callback makes OpenSSL fall back to its
+ * default console prompt; on an nginx worker with no controlling tty that
+ * blocks forever on a read that will never be answered. This callback always
+ * returns 0 (no passphrase available), so an encrypted key fails to load
+ * cleanly instead of hanging the worker.
+ */
+int ngx_http_autocert_no_passphrase_cb(char *buf, int size, int rwflag,
+    void *u);
 
 
 /*

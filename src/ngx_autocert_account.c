@@ -1,4 +1,6 @@
 /*
+ * Copyright (C) 2026 Thijs Eilander
+ * SPDX-License-Identifier: BSD-2-Clause
  * ngx_autocert_account — ACME account bootstrap (M4d-2). See the header for the
  * contract. Implemented as a small chained state machine over the M4b HTTPS
  * client: directory -> newNonce -> POST newAccount. Each step's completion
@@ -42,7 +44,8 @@ static ngx_uint_t ngx_autocert_account_is_bad_nonce(
     ngx_autocert_acme_request_t *req);
 static ngx_int_t ngx_autocert_account_set_nonce(ngx_autocert_account_t *acct,
     ngx_str_t *nonce);
-static ngx_uint_t ngx_autocert_account_json_safe(ngx_str_t *s);
+static ngx_str_t ngx_autocert_account_log_safe(ngx_str_t *src, u_char *buf,
+    size_t buf_size);
 static ngx_int_t ngx_autocert_account_build_eab(ngx_autocert_account_t *acct,
     ngx_str_t *jwk, ngx_str_t *out);
 static void ngx_autocert_account_finish(ngx_autocert_account_t *acct,
@@ -438,8 +441,8 @@ ngx_autocert_account_save_key(ngx_autocert_account_t *acct, int dfd,
     for (off = 0; off < pem.len; /* void */) {
         ssize_t  n = ngx_autocert_write(fd, pem.data + off, pem.len - off);
 
-        if (n < 0) {
-            if (ngx_autocert_err_is_intr(ngx_errno)) {
+        if (n <= 0) {
+            if (n < 0 && ngx_autocert_err_is_intr(ngx_errno)) {
                 continue;
             }
             ngx_log_error(NGX_LOG_ERR, acct->log, ngx_errno,
@@ -942,11 +945,16 @@ ngx_autocert_account_register_done(ngx_autocert_acme_request_t *req,
     if (ok != NGX_OK) {
         /* Surface the ACME problem document (RFC 8555 §6.7) so a CA-side
          * rejection — e.g. badNonce, malformed JWS, rejectedIdentifier — is
-         * diagnosable from the log instead of an opaque status code. */
+         * diagnosable from the log instead of an opaque status code. Bound
+         * and escape it first: it is server-controlled and unbounded. */
+        u_char     safe_buf[256];
+        ngx_str_t  safe_body = ngx_autocert_account_log_safe(
+                                    &req->body_out, safe_buf,
+                                    sizeof(safe_buf));
+
         ngx_log_error( NGX_LOG_ERR, acct->log, 0,
-                       "autocert: newAccount failed, status %ui: %*s",
-                       req->status, (size_t) req->body_out.len,
-                       req->body_out.data );
+                       "autocert: newAccount failed, status %ui: %V",
+                       req->status, &safe_body );
     }
 
     ngx_destroy_pool(req->pool);
@@ -1012,8 +1020,13 @@ static ngx_int_t ngx_autocert_account_set_nonce(ngx_autocert_account_t *acct,
  * or a backslash would corrupt the protected header or inject a field. ACME
  * tokens/URLs/nonces never legitimately contain these, so reject rather than
  * escape — a value with them is a malformed/hostile server response.
+ *
+ * Not static: ngx_http_autocert_contact() (ngx_http_autocert_module.c, same
+ * .so — see this project's config script) calls this at config-parse time so
+ * a JSON-unsafe autocert_contact value fails nginx -t instead of only
+ * surfacing as a runtime newAccount POST error.
  */
-static ngx_uint_t
+ngx_uint_t
 ngx_autocert_account_json_safe(ngx_str_t *s)
 {
     size_t  i;
@@ -1025,6 +1038,32 @@ ngx_autocert_account_json_safe(ngx_str_t *s)
         }
     }
     return 1;
+}
+
+
+/*
+ * Bound and escape server-controlled bytes (an ACME problem-document body)
+ * before they reach the error log: cap the input at buf_size / 6 (the worst
+ * case ngx_escape_json expansion, "\uXXXX" per byte) so the escaped result
+ * never overruns the caller's fixed buffer, then JSON-escape control bytes
+ * and CR/LF so a hostile ACME server cannot forge log lines or flood the
+ * log. Returns a str_t pointing into buf.
+ */
+static ngx_str_t
+ngx_autocert_account_log_safe(ngx_str_t *src, u_char *buf, size_t buf_size)
+{
+    ngx_str_t  out;
+    size_t     cap;
+
+    cap = src->len;
+    if (cap > buf_size / 6) {
+        cap = buf_size / 6;
+    }
+
+    out.data = buf;
+    out.len = (size_t) ((u_char *) ngx_escape_json(buf, src->data, cap)
+                         - buf);
+    return out;
 }
 
 

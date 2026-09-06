@@ -1,4 +1,6 @@
 /*
+ * Copyright (C) 2026 Thijs Eilander
+ * SPDX-License-Identifier: BSD-2-Clause
  * ngx_autocert_json — minimal JSON reader for ACME responses (M4c).
  * See ngx_autocert_json.h for the contract.
  *

@@ -22,6 +22,9 @@
 
 set -euo pipefail
 
+# shellcheck source=ci/tests/e2e/image-pins.sh
+. "$(dirname "${BASH_SOURCE[0]}")/image-pins.sh"
+
 SERVER_BIN="${SERVER_BIN:?set SERVER_BIN to the built nginx/angie binary}"
 NGX_BUILD_DIR="${NGX_BUILD_DIR:-$(cd "$(dirname "$SERVER_BIN")/.." && pwd)}"
 
@@ -46,6 +49,9 @@ trap cleanup EXIT
 
 rm -rf "$PREFIX"
 mkdir -p "$PREFIX/logs" "$PREFIX/conf" "$PREFIX/store/$NAME"
+# store mode must not depend on the caller's umask (the driver refuses a
+# group/other-writable store, and mkdir's mode is umask-filtered).
+chmod 0700 "$PREFIX/store"
 
 # Mock CA's own cert + a CA signing key.
 openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 \
@@ -67,7 +73,7 @@ openssl x509 -in "$PREFIX/store/$NAME/fullchain.pem" -noout -ext subjectAltName
 docker network ls >/dev/null
 docker run -d --name "$DNS_NAME" \
     -p "${DNS_PORT}":53/udp -p "${DNS_PORT}":53/tcp \
-    ghcr.io/letsencrypt/pebble-challtestsrv:latest \
+    "$CHALLTESTSRV_IMAGE" \
     -dnsserver :53 -management :8055 \
     -http01 "" -https01 "" -tlsalpn01 "" -doh "" \
     -defaultIPv4 127.0.0.1 -defaultIPv6 "" >/dev/null

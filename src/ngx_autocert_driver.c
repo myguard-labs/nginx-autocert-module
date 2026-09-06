@@ -1,4 +1,6 @@
 /*
+ * Copyright (C) 2026 Thijs Eilander
+ * SPDX-License-Identifier: BSD-2-Clause
  * ngx_autocert_driver — the ACME engine driver, run on worker 0.
  *
  * The ACME state machine (account bootstrap, order flow, renewal scheduler) is
@@ -81,8 +83,13 @@
  * can rebuild the requests shm zone from disk after a real process restart
  * (fresh shm, unlike a single-process reload which inherits the old segment).
  * Leading dot keeps it out of any directory listing a store tool might do.
+ *
+ * NGX_AUTOCERT_RUNTIME_MARKER and its open-flag contract
+ * (NGX_AUTOCERT_MARKER_OPEN_WRITE / _READ) are defined once in
+ * ngx_autocert_shared.h so ci/tests/unit/test_marker_open.c shares the exact
+ * same flags this file uses, instead of keeping its own copy that could
+ * silently drift from production.
  */
-#define NGX_AUTOCERT_RUNTIME_MARKER  ".autocert-runtime"
 
 
 /*
@@ -2247,7 +2254,7 @@ ngx_autocert_runtime_marker_write(ngx_cycle_t *cycle, ngx_autocert_conf_t *acf,
      * pinned fd.
      */
     fd = ngx_autocert_openat_mode(dfd, NGX_AUTOCERT_RUNTIME_MARKER,
-                O_WRONLY | O_CREAT | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC, 0644);
+                NGX_AUTOCERT_MARKER_OPEN_WRITE, 0644);
     (void) ngx_autocert_close(dfd);
     if (fd == -1) {
         ngx_log_error(NGX_LOG_ERR, cycle->log, ngx_errno,
@@ -2334,12 +2341,16 @@ ngx_autocert_runtime_marker_remove(ngx_cycle_t *cycle,
 
 
 /*
- * A6 persist (read side): boot-time-only rebuild of the requests shm zone from
- * on-disk markers. Called once from ngx_autocert_driver_init_process(), before
- * the singleton lock is taken by THIS process's first-ever start — never from
- * the single-process reload path (ngx_autocert_driver_reload), which already
- * inherits the live shm segment and would just re-see its own markers as a
- * no-op churn every reload.
+ * A6 persist (read side): rebuild of the requests shm zone from on-disk
+ * markers. Called from ngx_autocert_driver_init_process() on every
+ * init_process (boot, and on every master+workers reload that spawns a new
+ * worker), and from ngx_autocert_relock_handler() after a worker-0 handoff or
+ * graceful reload (USR2 upgrade) takes the lock. On a SIGHUP reload this
+ * process has already inherited the live shm segment, so the seed is a no-op
+ * for names still present in config but re-inserts any markers whose hosts
+ * were dropped from config and then auto-restored by new label events. After a
+ * USR2 upgrade the new master maps a fresh shm zone, so the seed is a full
+ * rebuild there.
  *
  * For each top-level directory entry in the store container that carries the
  * marker: read the literal host, skip it if a config name now covers it (the
@@ -2426,7 +2437,7 @@ ngx_autocert_runtime_seed(ngx_cycle_t *cycle)
          * as a possibility even before that check runs).
          */
         mfd = ngx_autocert_openat(dfd, NGX_AUTOCERT_RUNTIME_MARKER,
-                     O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
+                     NGX_AUTOCERT_MARKER_OPEN_READ);
         if (mfd == -1) {
             (void) ngx_autocert_close(dfd);
             continue; /* not a runtime dir (or config-only) */
@@ -2715,6 +2726,20 @@ ngx_autocert_driver_trylock(ngx_cycle_t *cycle)
     if (bfd == -1) {
         ngx_log_error(NGX_LOG_ERR, cycle->log, ngx_errno,
                       "autocert: cannot open/create store dir \"%s\"", path);
+        return NGX_ERROR;
+    }
+
+    /*
+     * open_dir_path() creates missing path components at 0700, but adopts an
+     * ALREADY EXISTING store directory whatever its owner or mode — a store
+     * pre-created (or substituted) by another local user under e.g. /var/tmp
+     * would otherwise be adopted silently, letting that user plant or swap
+     * certificate material underneath us. Refuse before taking the lock.
+     */
+    if (ngx_autocert_check_owner_mode(bfd, cycle->log, "store directory", 0)
+        != NGX_OK)
+    {
+        (void) ngx_autocert_close(bfd);
         return NGX_ERROR;
     }
 
@@ -3025,9 +3050,13 @@ ngx_autocert_driver_exit_process(ngx_cycle_t *cycle)
  * the dead cycle and its pool, so a reload silently ignores new autocert config
  * and can touch freed cycle memory. init_module calls this on the
  * single-process path to tear the engine state down and re-arm it against the
- * NEW cycle. The interprocess lock is intentionally kept open: this process is
- * still the sole driver, so there is no peer to hand it to and re-flock'ing
- * would only add a failure mode.
+ * NEW cycle. The POSIX interprocess lock is released and re-acquired: the lock
+ * file lives in the store dir, so a reload that changes autocert_path must pick
+ * up the correct lock file location from the new cycle's config. The Win32
+ * named mutex is NOT released here — ngx_autocert_win32_driver_unlock() runs
+ * only from exit_process and the trylock error paths, so on Win32 a reload that
+ * changes autocert_path keeps the old store's mutex and skips acquiring the new
+ * one (win32_driver_trylock returns NGX_OK early while the handle is non-NULL).
  *
  * Must run inside the worker event loop (true on reload — init_module fires
  * from ngx_init_cycle() while the loop is live), since it re-arms a timer.

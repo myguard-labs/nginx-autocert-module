@@ -1,4 +1,6 @@
 /*
+ * Copyright (C) 2026 Thijs Eilander
+ * SPDX-License-Identifier: BSD-2-Clause
  * ngx_autocert_shared — the narrow interface the CORE helper process uses to
  * read the HTTP module's configuration without depending on the HTTP module's
  * private conf struct. The helper is an NGX_CORE_MODULE; it cannot use
@@ -89,6 +91,33 @@ struct ngx_autocert_test_rename_hdr_s {
 
 #include <fcntl.h>
 #include <errno.h>
+
+
+/*
+ * A6 runtime marker: filename and open-flag contract shared between the
+ * driver (production, ngx_autocert_driver.c) and its unit test
+ * (ci/tests/unit/test_marker_open.c). Defined exactly once here so the test
+ * cannot silently drift from production by keeping its own copy — that used
+ * to be possible and made the test pass regardless of what the driver did.
+ *
+ * WRITE flags: O_NONBLOCK is REQUIRED (a planted FIFO must fail fast with
+ * ENXIO instead of blocking openat() forever) and O_TRUNC must NOT be set
+ * (truncation happens only after the fd is proven to be a regular file, via
+ * ftruncate()). O_NOFOLLOW rejects a symlinked leaf.
+ *
+ * READ flags: O_NONBLOCK for the same FIFO reason (a FIFO opened O_RDONLY
+ * with no writer would otherwise be free to hang under some conditions);
+ * O_NOFOLLOW rejects a symlinked leaf. The S_ISREG + st_nlink check at each
+ * call site is the actual type gate — these flags only remove the blocking
+ * possibility before that check runs.
+ */
+#define NGX_AUTOCERT_RUNTIME_MARKER    ".autocert-runtime"
+
+#define NGX_AUTOCERT_MARKER_OPEN_WRITE \
+    (O_WRONLY | O_CREAT | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC)
+
+#define NGX_AUTOCERT_MARKER_OPEN_READ \
+    (O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
 
 
 /*
@@ -256,14 +285,19 @@ ngx_int_t ngx_autocert_get_conf(ngx_cycle_t *cycle, ngx_autocert_conf_t *out);
  * tests unchanged.
  *
  * Split in two because a directory fd has no win32 analogue:
- * FlushFileBuffers() fails outright on a directory handle. Every dir-fsync
- * call site here is already best-effort by design (durability nicety, never
- * a correctness requirement — see the doc comments at its call sites), so
+ * FlushFileBuffers() fails outright on a directory handle. Callers differ
+ * in how much they rely on the directory fsync succeeding — account.c's key
+ * save treats it as a best-effort durability nicety (the key file itself is
+ * already fsynced + closed first), while order.c's commit-rename call sites
+ * treat it as a hard correctness requirement and abort the renewal on
+ * failure, because that fsync is what makes the just-committed rename
+ * durable — see the doc comments at each call site for which applies.
  * ngx_autocert_fsync_dir() is the seam that is allowed to be a real fsync on
- * POSIX and a documented no-op on win32; ngx_autocert_fsync() itself stays a
- * real flush on both platforms and must never be widened to swallow a
- * directory's failure too, or a genuine file-flush failure would go silently
- * unreported.
+ * POSIX and a documented no-op on win32 (win32 callers get an unconditional
+ * success since FlushFileBuffers cannot target a directory at all);
+ * ngx_autocert_fsync() itself stays a real flush on both platforms and must
+ * never be widened to swallow a directory's failure too, or a genuine
+ * file-flush failure would go silently unreported.
  */
 #if !(NGX_WIN32)
 #define ngx_autocert_fsync(fd)          fsync(fd)
@@ -1120,8 +1154,12 @@ ngx_autocert_open_file_path(const char *path, int flags)
  * all; this function can).
  *
  * Contract: the caller has already walked every ACE in the file's DACL and
- * reduced each one to a (is_owner, is_allow, is_tolerated) tuple:
- *   - is_owner:     the ACE's SID equals the file owner's SID (EqualSid).
+ * reduced each one to a (is_owner, is_allow, is_tolerated, is_write) tuple:
+ *   - is_owner:     the ACE's SID equals the file owner's SID or the
+ *                    process token user's SID (EqualSid). The two differ
+ *                    for an elevated administrator, whose objects are owned
+ *                    by BUILTIN\Administrators while the ACE names the
+ *                    account itself.
  *   - is_allow:     the ACE type is ACCESS_ALLOWED_ACE_TYPE (a DENY ACE
  *                    grants nothing and is not evidence of exposure).
  *   - is_tolerated: the ACE's SID is SYSTEM or the local Administrators
@@ -1131,16 +1169,33 @@ ngx_autocert_open_file_path(const char *path, int flags)
  *                    regardless of this DACL, so flagging them would make
  *                    the guard permanently unusable (every Windows file has
  *                    an implicit Administrators/SYSTEM grant somewhere)
- *                    without adding any real security. Nothing else is
- *                    tolerated: a non-owner, non-tolerated ALLOW ace is
- *                    exactly the exposure account.c's guard exists to catch.
+ *                    without adding any real security. CREATOR OWNER
+ *                    (S-1-3-0) is tolerated too: it is a placeholder that
+ *                    grants nothing on the object and, on a child, only to
+ *                    that child's creator. Nothing else is tolerated: a
+ *                    non-owner, non-tolerated ALLOW ace is exactly the
+ *                    exposure account.c's guard exists to catch. Inherit-only
+ *                    ACEs are NOT skipped by the caller: one naming a real
+ *                    foreign principal becomes effective on children the
+ *                    module creates without re-permissioning.
+ *   - is_write:     the ACE's access mask grants a write-ish right, as
+ *                    decided by ngx_autocert_win32_mask_is_write() below.
+ *                    A foreign ALLOW without one is a READ grant only.
  *
- * Returns the POSIX group/other bits that should be OR'd into st_mode
- * (S_IRWXG|S_IRWXO when any ACE is a non-owner, non-tolerated ALLOW; 0 when
- * every ALLOW ace is owner-only or tolerated). Callers combine this with
- * S_IFREG and the fixed owner bits (0600) the way the win32 fstat bodies
- * already build st_mode; this function decides only the group/other half,
- * which is the half account.c's guard actually reads.
+ * Returns the POSIX group/other bits that should be OR'd into st_mode:
+ *   - S_IRWXG|S_IRWXO when any ACE is a non-owner, non-tolerated ALLOW that
+ *     grants write (or when the walk is empty, below);
+ *   - S_IRGRP|S_IROTH when every such foreign ALLOW is read-only — enough
+ *     for ngx_autocert_check_owner_mode(secret=1) to refuse a readable key,
+ *     while secret=0 (the store directory, which holds public certificates)
+ *     accepts it exactly as it accepts a 0755 directory on POSIX. Before this
+ *     distinction existed a read-only inherited grant to Users was
+ *     indistinguishable from full control and every ordinary Windows store
+ *     was refused;
+ *   - 0 when every ALLOW ace is owner-only or tolerated.
+ * Callers combine this with S_IFREG/S_IFDIR and the fixed owner bits (0600 /
+ * 0700) the way the win32 fstat bodies already build st_mode; this function
+ * decides only the group/other half, which is the half the guards read.
  *
  * n == 0 (a DACL with no ACEs at all, i.e. NULL DACL / everyone denied by
  * default, or the caller passing an empty walk) is NOT "no exposure found":
@@ -1151,15 +1206,63 @@ ngx_autocert_open_file_path(const char *path, int flags)
  * rather than silently returning "safe", so it also returns the flagged
  * bits. A real owner-only DACL always has at least the owner's ACE.
  */
+
+/*
+ * The access-mask rights that let a principal plant, replace, delete or
+ * re-permission the object, spelled as literals so this decision has a Linux
+ * test oracle without <windows.h>. The win32 build static-asserts the value
+ * against the real SDK constants just below (this header includes
+ * ngx_autocert_win32.h before this point, so the SDK names are in scope
+ * here and the macro is not in scope there), so the two cannot drift apart
+ * silently.
+ *
+ *   FILE_WRITE_DATA / FILE_ADD_FILE            0x00000002
+ *   FILE_APPEND_DATA / FILE_ADD_SUBDIRECTORY   0x00000004
+ *   FILE_WRITE_EA                              0x00000010
+ *   FILE_DELETE_CHILD                          0x00000040
+ *   FILE_WRITE_ATTRIBUTES                      0x00000100
+ *   DELETE                                     0x00010000
+ *   WRITE_DAC                                  0x00040000
+ *   WRITE_OWNER                                0x00080000
+ *   GENERIC_ALL                                0x10000000
+ *   GENERIC_WRITE                              0x40000000
+ *
+ * FILE_ALL_ACCESS (0x001F01FF) and the "Modify" template (0x001301BF) both
+ * contain several of these, so they need no entry of their own. The two
+ * attribute/EA rights are included deliberately: no stock Windows template
+ * grants them without FILE_WRITE_DATA, and erring toward "write" is the
+ * fail-closed direction. GENERIC_READ / GENERIC_EXECUTE and every FILE_READ_*
+ * / FILE_EXECUTE right are read-only and stay out.
+ */
+#define NGX_AUTOCERT_WIN32_WRITE_MASK  0x500D0156u
+
+#if (NGX_WIN32)
+typedef char  ngx_autocert_win32_write_mask_check_t[
+    (NGX_AUTOCERT_WIN32_WRITE_MASK
+     == (FILE_WRITE_DATA | FILE_APPEND_DATA | FILE_WRITE_EA
+         | FILE_DELETE_CHILD | FILE_WRITE_ATTRIBUTES | DELETE | WRITE_DAC
+         | WRITE_OWNER | GENERIC_ALL | GENERIC_WRITE)) ? 1 : -1];
+#endif
+
+static ngx_inline ngx_int_t
+ngx_autocert_win32_mask_is_write(uint32_t mask)
+{
+    return (mask & NGX_AUTOCERT_WIN32_WRITE_MASK) ? 1 : 0;
+}
+
 static ngx_inline ngx_autocert_mode_t
 ngx_autocert_win32_dacl_mode(const ngx_int_t *is_owner,
-    const ngx_int_t *is_allow, const ngx_int_t *is_tolerated, ngx_uint_t n)
+    const ngx_int_t *is_allow, const ngx_int_t *is_tolerated,
+    const ngx_int_t *is_write, ngx_uint_t n)
 {
-    ngx_uint_t  i;
+    ngx_uint_t           i;
+    ngx_autocert_mode_t  bits;
 
     if (n == 0) {
         return (ngx_autocert_mode_t) (S_IRWXG | S_IRWXO);
     }
+
+    bits = 0;
 
     for (i = 0; i < n; i++) {
         if (!is_allow[i]) {
@@ -1168,10 +1271,85 @@ ngx_autocert_win32_dacl_mode(const ngx_int_t *is_owner,
         if (is_owner[i] || is_tolerated[i]) {
             continue;
         }
-        return (ngx_autocert_mode_t) (S_IRWXG | S_IRWXO);
+        if (is_write[i]) {
+            return (ngx_autocert_mode_t) (S_IRWXG | S_IRWXO);
+        }
+        bits = (ngx_autocert_mode_t) (S_IRGRP | S_IROTH);
     }
 
-    return 0;
+    return bits;
+}
+
+
+/*
+ * Refuse an already-open directory or file fd unless it is owned by our own
+ * euid and cannot be modified by anyone else. ngx_autocert_fstat()
+ * fabricates a POSIX-shaped st_mode/st_uid on both platforms (win32's side
+ * walks the real DACL via ngx_autocert_win32_dacl_mode() above), so this one
+ * check is portable without an #ifdef.
+ *
+ * Both the store directory (adopted, not created, whenever it already
+ * exists — driver.c's trylock) and the stored serving key (serve.c's cache
+ * reload) are read from a filesystem the threat model treats as
+ * attacker-writable by another local user: ngx_autocert_open_dir_path()
+ * pins every path component against a planted symlink, but says nothing
+ * about who owns the inode it lands on or what it is writable by. Without
+ * this a directory or key pre-created (or substituted) by another local
+ * user is adopted silently.
+ *
+ * `secret` picks WHICH permissions are disqualifying, and the distinction is
+ * load-bearing:
+ *
+ *   secret=1 (a private key): any group/other bit is refused, READ included.
+ *     A key another user can read is already compromised, so this matches
+ *     account.c's account-key load path exactly.
+ *
+ *   secret=0 (the store directory): only group/other WRITE is refused. The
+ *     threat this closes is another user planting or swapping certificate
+ *     material, which needs write. Refusing group/other READ as well would
+ *     reject a store directory created by a plain `mkdir -p` under the
+ *     default 0022 umask (0755) — an ordinary, safe deployment and the
+ *     shape every e2e test uses. The directory being listable is not a
+ *     vulnerability: it holds public certificates, and each private key
+ *     inside is checked in its own right with secret=1. Conflating the two
+ *     turned a hardening check into a false refusal that takes the whole
+ *     module down on a correctly-configured host.
+ *
+ * `what` names the object in the log line ("store directory", "serving
+ * key"); the caller owns and closes fd. Returns NGX_OK when the check
+ * passes, NGX_ERROR (with a log line already emitted) otherwise.
+ */
+static ngx_inline ngx_int_t
+ngx_autocert_check_owner_mode(int fd, ngx_log_t *log, const char *what,
+    ngx_uint_t secret)
+{
+    ngx_autocert_stat_t  st;
+    ngx_autocert_mode_t  bad;
+
+    if (ngx_autocert_fstat(fd, &st) == -1) {
+        ngx_log_error(NGX_LOG_ERR, log, ngx_errno,
+                      "autocert: fstat(%s) failed", what);
+        return NGX_ERROR;
+    }
+
+    bad = secret ? (S_IRWXG | S_IRWXO) : (S_IWGRP | S_IWOTH);
+
+    if (st.st_mode & bad) {
+        ngx_log_error(NGX_LOG_ERR, log, 0,
+                      "autocert: %s is %s by group/other "
+                      "(refusing to adopt it)", what,
+                      secret ? "accessible" : "writable");
+        return NGX_ERROR;
+    }
+
+    if (st.st_uid != ngx_autocert_geteuid()) {
+        ngx_log_error(NGX_LOG_ERR, log, 0,
+                      "autocert: %s is not owned by the worker euid "
+                      "(refusing to adopt it)", what);
+        return NGX_ERROR;
+    }
+
+    return NGX_OK;
 }
 
 

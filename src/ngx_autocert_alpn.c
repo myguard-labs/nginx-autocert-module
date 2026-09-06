@@ -1,4 +1,6 @@
 /*
+ * Copyright (C) 2026 Thijs Eilander
+ * SPDX-License-Identifier: BSD-2-Clause
  * ngx_autocert_alpn — shared-memory tls-alpn-01 challenge certificate store
  * (M10b). See the header for the contract. An rbtree of domain->{cert,key} PEM
  * in a slab zone, keyed by crc32(domain) with the full domain compared on

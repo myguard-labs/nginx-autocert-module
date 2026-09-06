@@ -494,6 +494,21 @@ chown -R www-data /var/lib/autocert
 chmod 0700 /var/lib/autocert
 ```
 
+This is enforced, not merely advised: the store directory is **refused** if it
+carries any group or other permission bits, or is not owned by the worker's
+effective uid, and issuance stops with
+
+```
+autocert: store directory has group/other permissions (refusing to adopt it)
+autocert: store directory is not owned by the worker euid (refusing to adopt it)
+```
+
+in the error log. The same check applies to the stored private key. A
+group-readable store (`0750`, say for a backup or monitoring group) therefore
+has to be tightened — the module will not adopt a directory another local user
+could have pre-created or substituted. The public `fullchain.pem` is exempt; it
+is meant to be servable and holds no secret.
+
 If a previous run created the store as root, fix it once with
 `chown -R <worker-user> <autocert_store_path>`. Worker 0 also holds a singleton lock at
 `<path>/.driver.lock` (`0600`).

@@ -299,6 +299,6 @@ fi
 
 if [ "$MODE" = check ]; then
     [ "$rc" -eq 0 ] && echo "sync-stamp: all $count file(s) current"
-    [ "$rc" -ne 0 ] && echo "sync-stamp: re-run tools/sync-stamp.sh to fix" >&2
+    [ "$rc" -ne 0 ] && echo "sync-stamp: re-run ci/tools/sync-stamp.sh to fix" >&2
 fi
 exit "$rc"

@@ -1,4 +1,6 @@
 /*
+ * Copyright (C) 2026 Thijs Eilander
+ * SPDX-License-Identifier: BSD-2-Clause
  * ngx_autocert_conf — accessor that lets the CORE helper module read the HTTP
  * autocert module's main configuration. Compiled INTO the CORE process module
  * (not the HTTP module), because the two ship as separate dlopen()ed .so files

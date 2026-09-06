@@ -19,6 +19,9 @@
 
 set -euo pipefail
 
+# shellcheck source=ci/tests/e2e/image-pins.sh
+. "$(dirname "${BASH_SOURCE[0]}")/image-pins.sh"
+
 SERVER_BIN="${SERVER_BIN:?set SERVER_BIN to the built nginx/angie binary}"
 # SERVER_BIN is <build>/objs/nginx; the .so files sit beside it in objs/, so
 # the build dir is two levels up from the binary.
@@ -46,11 +49,11 @@ echo "== starting Pebble =="
 docker run -d --name "$PEBBLE_NAME" -p "${AC_PORT_14000:-14000}":14000 -p "${AC_PORT_15000:-15000}":15000 \
     -e PEBBLE_VA_NOSLEEP=1 \
     -e PEBBLE_WFE_NONCEREJECT=0 \
-    ghcr.io/letsencrypt/pebble:latest >/dev/null
+    "$PEBBLE_IMAGE" >/dev/null
 
 echo "== starting challtestsrv (resolves 'pebble' -> 127.0.0.1) =="
 docker run -d --name "$DNS_NAME" -p "${DNS_PORT}":53/udp -p "${DNS_PORT}":53/tcp \
-    ghcr.io/letsencrypt/pebble-challtestsrv:latest \
+    "$CHALLTESTSRV_IMAGE" \
     -dnsserver :53 -management :8055 \
     -http01 "" -https01 "" -tlsalpn01 "" -doh "" \
     -defaultIPv4 127.0.0.1 -defaultIPv6 "" >/dev/null
@@ -85,6 +88,9 @@ http {
 EOF
 
 mkdir -p "$PREFIX/store"
+# store mode must not depend on the caller's umask (the driver refuses a
+# group/other-writable store, and mkdir's mode is umask-filtered).
+chmod 0700 "$PREFIX/store"
 
 echo "== config test =="
 "$SERVER_BIN" -t -p "$PREFIX" -c "$PREFIX/conf/nginx.conf"

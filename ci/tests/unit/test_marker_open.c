@@ -26,6 +26,11 @@
 
 #define _GNU_SOURCE
 
+#include <ngx_config.h>
+#include <ngx_core.h>
+
+#include "../../../src/ngx_autocert_shared.h"
+
 #include <errno.h>
 #include <signal.h>
 #include <fcntl.h>
@@ -38,10 +43,16 @@
 #include <unistd.h>
 
 
-/* Keep these byte-identical to src/ngx_autocert_driver.c. */
-#define MARKER_NAME        ".autocert-runtime"
-#define MARKER_OPEN_WRITE  (O_WRONLY | O_CREAT | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC)
-#define MARKER_OPEN_READ   (O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
+/*
+ * MARKER_NAME / MARKER_OPEN_WRITE / MARKER_OPEN_READ used to be this file's
+ * own copy of the driver's constants, so the test passed no matter what
+ * production's flags actually were. They now alias the single definition in
+ * ngx_autocert_shared.h that src/ngx_autocert_driver.c also consumes, so a
+ * regression in the production flags shows up here too.
+ */
+#define MARKER_NAME        NGX_AUTOCERT_RUNTIME_MARKER
+#define MARKER_OPEN_WRITE  NGX_AUTOCERT_MARKER_OPEN_WRITE
+#define MARKER_OPEN_READ   NGX_AUTOCERT_MARKER_OPEN_READ
 
 
 static int   failures;

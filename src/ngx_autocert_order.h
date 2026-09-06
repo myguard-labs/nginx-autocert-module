@@ -1,4 +1,6 @@
 /*
+ * Copyright (C) 2026 Thijs Eilander
+ * SPDX-License-Identifier: BSD-2-Clause
  * ngx_autocert_order — ACME order + authorization + issuance flow (M6a/M6b).
  *
  * Drives full RFC 8555 issuance on the helper process event loop, reusing a

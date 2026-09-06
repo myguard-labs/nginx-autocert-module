@@ -1,5 +1,7 @@
 /*
  * Copyright (C) 2026 Thijs Eilander
+ * SPDX-License-Identifier: BSD-2-Clause
+ * Copyright (C) 2026 Thijs Eilander
  *
  * ngx_autocert_win32 — win32 support skeleton for the store-IO shim.
  *
@@ -113,24 +115,36 @@ typedef unsigned int  ngx_autocert_mode_t;
  * include-order or `_WIN32_WINNT` problem; the header is simply unusable
  * here. So this struct and these macros are our own, not UCRT's.
  *
- * Five members: st_mode, st_nlink, st_size, st_mtime, st_uid are the only
- * fields any call site in this repo reads (grepped for every `\.st_[a-z]+`/
- * `->st_[a-z]+` against a `struct stat`/`ngx_autocert_stat_t` in src/ —
- * account.c's ownership check reads st_uid, ngx_http_autocert_cache_reload's
- * and ngx_http_autocert_read_file's mtime-reload logic in serve.c reads
- * st_mtime). st_size is `off_t` — nginx's own `__int64` typedef on win32 —
- * so the existing `<= 0` / `> NGX_AUTOCERT_REQUEST_NAME_MAX` checks keep
- * 64-bit semantics; a `_off_t` (32-bit on UCRT, and undefined here
- * regardless) would silently truncate them. st_mode uses
- * ngx_autocert_mode_t, matching the POSIX side. st_mtime is populated via
- * nginx's own `ngx_file_mtime()` FILETIME conversion (ngx_files.h), the same
- * one the core win32 file-info path already uses. st_uid has no win32
- * meaning, same as ngx_autocert_geteuid() above (W7): the shim bodies set it
- * to the identical placeholder ngx_autocert_geteuid() returns, so
- * account.c's `st.st_uid != ngx_autocert_geteuid()` ownership check keeps
- * compiling and takes the same "always unprivileged, always safe default"
- * branch geteuid() already documents — this is not a new privilege decision,
- * real ownership verification is still W11 (key ACL) as already noted above.
+ * Six members: st_mode, st_nlink, st_size, st_mtime, st_uid, st_ino are the
+ * only fields any call site in this repo reads (grepped for every
+ * `\.st_[a-z]+`/`->st_[a-z]+` against a `struct stat`/`ngx_autocert_stat_t`
+ * in src/ — account.c's ownership check reads st_uid,
+ * ngx_http_autocert_cache_reload's and ngx_http_autocert_read_file's
+ * freshness logic in serve.c reads st_mtime and (audit MINOR) st_ino). st_size
+ * is `off_t` — nginx's own `__int64` typedef on win32 — so the existing
+ * `<= 0` / `> NGX_AUTOCERT_REQUEST_NAME_MAX` checks keep 64-bit semantics; a
+ * `_off_t` (32-bit on UCRT, and undefined here regardless) would silently
+ * truncate them. st_mode uses ngx_autocert_mode_t, matching the POSIX side.
+ * st_mtime is populated via nginx's own `ngx_file_mtime()` FILETIME
+ * conversion (ngx_files.h), the same one the core win32 file-info path
+ * already uses — like the POSIX `time_t st_mtime`, this is WHOLE-SECOND
+ * resolution only: nginx defines no portable sub-second accessor on either
+ * platform (`ngx_file_mtime()` divides FILETIME's 100ns ticks down to whole
+ * seconds; POSIX `st_mtime` is itself second-granular, `st_mtim.tv_nsec` is
+ * a distinct, non-portable field nginx's own file-info layer never exposes).
+ * st_ino is nginx's own `ngx_file_uniq_t` (uint64_t on win32, ino_t on
+ * POSIX) — populated here from `BY_HANDLE_FILE_INFORMATION`'s
+ * nFileIndexHigh/nFileIndexLow via `ngx_file_uniq()`, the exact same macro
+ * ngx_open_file_cache already uses for this purpose. Note NTFS file IDs are
+ * not stable across a volume format-and-restore the way an inode number
+ * mostly is, but they ARE stable across the rename+replace an ACME renewal
+ * performs, which is what this guards. st_uid has no win32 meaning, same as
+ * ngx_autocert_geteuid() above (W7): the shim bodies set it to the identical
+ * placeholder ngx_autocert_geteuid() returns, so account.c's
+ * `st.st_uid != ngx_autocert_geteuid()` ownership check keeps compiling and
+ * takes the same "always unprivileged, always safe default" branch geteuid()
+ * already documents — this is not a new privilege decision, real ownership
+ * verification is still W11 (key ACL) as already noted above.
  *
  * The `S_IF*`/`S_IS*`/`S_IRWX*` macros are `#ifndef`-guarded rather than
  * defined unconditionally: MinGW-w64's own headers may already supply some
@@ -143,6 +157,7 @@ typedef struct {
     off_t                st_size;
     time_t               st_mtime;
     ngx_uid_t            st_uid;
+    ngx_file_uniq_t      st_ino;
 } ngx_autocert_stat_t;
 
 #ifndef S_IFMT
@@ -165,6 +180,25 @@ typedef struct {
 #endif
 #ifndef S_IRWXO
 #define S_IRWXO  0000007
+#endif
+/* The individual WRITE bits, needed separately from the S_IRWX* groups:
+ * ngx_autocert_check_owner_mode() refuses only group/other WRITE on a
+ * non-secret path (a store directory), while still refusing every group/other
+ * bit on a secret. MSVC's <sys/stat.h> defines neither, so both are ours. */
+#ifndef S_IWGRP
+#define S_IWGRP  0000020
+#endif
+#ifndef S_IWOTH
+#define S_IWOTH  0000002
+#endif
+/* The individual READ bits: ngx_autocert_win32_dacl_mode() maps a read-only
+ * foreign ACE to exactly these so a secret still refuses it while a store
+ * directory accepts it. MSVC defines neither. */
+#ifndef S_IRGRP
+#define S_IRGRP  0000040
+#endif
+#ifndef S_IROTH
+#define S_IROTH  0000004
 #endif
 
 
@@ -322,7 +356,9 @@ static ngx_inline int ngx_autocert_win32_errno(DWORD err);
  */
 static ngx_inline ngx_autocert_mode_t
 ngx_autocert_win32_dacl_mode(const ngx_int_t *is_owner,
-    const ngx_int_t *is_allow, const ngx_int_t *is_tolerated, ngx_uint_t n);
+    const ngx_int_t *is_allow, const ngx_int_t *is_tolerated,
+    const ngx_int_t *is_write, ngx_uint_t n);
+static ngx_inline ngx_int_t ngx_autocert_win32_mask_is_write(uint32_t mask);
 
 /*
  * W13 — flock(fd, LOCK_EX | LOCK_NB) -> LockFileEx.
@@ -467,22 +503,13 @@ ngx_autocert_fsync_dir(int fd)
  * ngx_autocert_account.c's DACL-derived mode check, which is what actually
  * verifies this on read-back).
  *
- * PROTECTED_DACL_SECURITY_INFORMATION is the load-bearing flag here, not an
- * optional hardening extra: SetSecurityInfo() without it MERGES the new DACL
- * with inherited ACEs from the parent directory rather than replacing them,
- * and a staging directory commonly has an inherited grant to Users or
- * Authenticated Users. Omitting this flag would leave the key readable by
- * exactly the principals this shim exists to lock out, while every other
- * part of the call appears to succeed. Setting it strips inheritance and
- * makes the DACL this function builds the ENTIRE effective DACL.
- *
- * Steps: resolve the fd to a HANDLE (existing shim); read the file's owner
- * SID via GetSecurityInfo (OWNER_SECURITY_INFORMATION); build a single
- * EXPLICIT_ACCESS_W ACE granting that owner SID the access mask derived from
- * `mode`'s owner bits; turn that into an ACL with SetEntriesInAclW (starting
- * from an empty existing ACL, i.e. NULL — there is nothing to merge, this
- * DACL replaces whatever was there); apply it with SetSecurityInfo using
- * DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION.
+ * The DACL itself is built by ngx_autocert_win32_build_owner_dacl() below
+ * (shared with ngx_autocert_mkdirat()'s 0700 directory arm, which hands it
+ * to the kernel at creation) and applied by
+ * ngx_autocert_win32_set_owner_dacl(): it grants the owner SID and the
+ * process token user SID and strips inheritance
+ * (PROTECTED_DACL_SECURITY_INFORMATION — see that helper for why the flag
+ * is load-bearing).
  *
  * Return convention matches fchmod(2) and the rest of this shim family: 0 on
  * success, -1 on failure with SetLastError() carrying the raw Win32 error
@@ -491,22 +518,136 @@ ngx_autocert_fsync_dir(int fd)
  * shim exists to satisfy a caller with an EWOULDBLOCK-style contract, and
  * fchmod has no such caller.
  */
-static ngx_inline int
-ngx_autocert_fchmod(int fd, ngx_autocert_mode_t mode)
+/*
+ * A SID off the process token: the token USER (win32's nearest analogue of
+ * geteuid()) or the token's default OWNER (the SID a new object will be
+ * owned by — BUILTIN\Administrators for an elevated administrator, the user
+ * itself otherwise). On Windows the OWNER of an object an administrator
+ * creates is the Administrators group, not the administrator's own account,
+ * so an ACE naming the account nginx runs as is NOT the owner's ACE and
+ * would read as a foreign grant. Both the DACL writer and the DACL reader
+ * below treat the token user as "us" alongside the owner. Fills `buf`
+ * (SECURITY_MAX_SID_SIZE bytes); returns ERROR_SUCCESS or the Win32 error,
+ * never a mapped errno.
+ */
+static ngx_inline DWORD
+ngx_autocert_win32_token_sid(TOKEN_INFORMATION_CLASS cls, BYTE *buf,
+    DWORD buf_len)
 {
-    HANDLE            h;
-    PSID              owner;
-    PSECURITY_DESCRIPTOR  owner_sd;
-    PACL              new_dacl;
-    EXPLICIT_ACCESS_W ea;
-    DWORD             mask, err;
+    HANDLE  tok;
+    DWORD   need, err;
+    PSID    sid;
+    /* GetTokenInformation() writes a TOKEN_USER / TOKEN_OWNER (a pointer
+     * member) followed by the SID it points into; a bare BYTE array has no
+     * alignment guarantee for that pointer read, so force the struct's. */
+    union {
+        BYTE         bytes[sizeof(TOKEN_USER) + SECURITY_MAX_SID_SIZE];
+        TOKEN_USER   align_user;
+        TOKEN_OWNER  align_owner;
+    } raw;
 
-    h = ngx_autocert_fd_handle(fd);
-    if (h == INVALID_HANDLE_VALUE) {
-        SetLastError(ERROR_INVALID_HANDLE);
-        errno = EBADF;
-        return -1;
+    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &tok)) {
+        return GetLastError();
     }
+
+    need = 0;
+    if (!GetTokenInformation(tok, cls, raw.bytes, sizeof(raw.bytes), &need)) {
+        err = GetLastError();
+        CloseHandle(tok);
+        return err;
+    }
+
+    CloseHandle(tok);
+
+    if (cls == TokenUser) {
+        sid = raw.align_user.User.Sid;
+    } else if (cls == TokenOwner) {
+        sid = raw.align_owner.Owner;
+    } else {
+        return ERROR_INVALID_PARAMETER;
+    }
+
+    if (sid == NULL || !IsValidSid(sid) || GetLengthSid(sid) > buf_len) {
+        return ERROR_INVALID_SID;
+    }
+
+    if (!CopySid(buf_len, (PSID) buf, sid)) {
+        return GetLastError();
+    }
+
+    return ERROR_SUCCESS;
+}
+
+
+/*
+ * Build a DACL that grants `mask` to `owner` and to the process token user
+ * (one ACE when they are the same SID, two when an administrator created the
+ * object and the owner is therefore BUILTIN\Administrators) and nothing to
+ * anyone else. `inherit` is the EXPLICIT_ACCESS inheritance word:
+ * NO_INHERITANCE for a file, SUB_CONTAINERS_AND_OBJECTS_INHERIT for a
+ * directory so what the module creates inside it starts owner-only too.
+ * *out is LocalAlloc'd; the caller LocalFree()s it. Returns ERROR_SUCCESS or
+ * the raw Win32 error.
+ */
+static ngx_inline DWORD
+ngx_autocert_win32_build_owner_dacl(PSID owner, DWORD mask, DWORD inherit,
+    PACL *out)
+{
+    PSID               user;
+    EXPLICIT_ACCESS_W  ea[2];
+    BYTE               user_buf[SECURITY_MAX_SID_SIZE];
+    ULONG              n;
+    DWORD              err;
+
+    *out = NULL;
+
+    err = ngx_autocert_win32_token_sid(TokenUser, user_buf, sizeof(user_buf));
+    if (err != ERROR_SUCCESS) {
+        return err;
+    }
+    user = (PSID) user_buf;
+
+    ngx_memzero(ea, sizeof(ea));
+    ea[0].grfAccessPermissions = mask;
+    ea[0].grfAccessMode = SET_ACCESS;
+    ea[0].grfInheritance = inherit;
+    ea[0].Trustee.TrusteeForm = TRUSTEE_IS_SID;
+    ea[0].Trustee.TrusteeType = TRUSTEE_IS_UNKNOWN;
+    ea[0].Trustee.ptstrName = (LPWSTR) owner;
+    n = 1;
+
+    if (!EqualSid(owner, user)) {
+        ea[1] = ea[0];
+        ea[1].Trustee.ptstrName = (LPWSTR) user;
+        n = 2;
+    }
+
+    return SetEntriesInAclW(n, ea, NULL, out);
+}
+
+
+/*
+ * Replace an existing object's DACL with the owner-only one above.
+ *
+ * PROTECTED_DACL_SECURITY_INFORMATION is the load-bearing flag here, not an
+ * optional hardening extra: SetSecurityInfo() without it MERGES the new DACL
+ * with inherited ACEs from the parent directory rather than replacing them,
+ * and a parent commonly carries an inherited grant to Users or Authenticated
+ * Users (every stock volume root grants Authenticated Users Modify). Omitting
+ * it would leave the object open to exactly the principals this exists to
+ * lock out, while every other part of the call appears to succeed. Setting
+ * it strips inheritance and makes the DACL built here the ENTIRE effective
+ * DACL.
+ *
+ * Returns ERROR_SUCCESS or the raw Win32 error; callers map to errno.
+ */
+static ngx_inline DWORD
+ngx_autocert_win32_set_owner_dacl(HANDLE h, DWORD mask, DWORD inherit)
+{
+    PSID                  owner;
+    PSECURITY_DESCRIPTOR  owner_sd;
+    PACL                  new_dacl;
+    DWORD                 err;
 
     owner = NULL;
     owner_sd = NULL;
@@ -514,8 +655,41 @@ ngx_autocert_fchmod(int fd, ngx_autocert_mode_t mode)
     err = GetSecurityInfo(h, SE_KERNEL_OBJECT, OWNER_SECURITY_INFORMATION,
                            &owner, NULL, NULL, NULL, &owner_sd);
     if (err != ERROR_SUCCESS) {
-        SetLastError(err);
-        errno = ngx_autocert_win32_errno(err);
+        return err;
+    }
+
+    if (owner == NULL) {
+        LocalFree(owner_sd);
+        return ERROR_INVALID_OWNER;
+    }
+
+    err = ngx_autocert_win32_build_owner_dacl(owner, mask, inherit, &new_dacl);
+    if (err != ERROR_SUCCESS) {
+        LocalFree(owner_sd);
+        return err;
+    }
+
+    err = SetSecurityInfo(h, SE_KERNEL_OBJECT,
+                DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+                NULL, NULL, new_dacl, NULL);
+
+    LocalFree(owner_sd);
+    LocalFree(new_dacl);
+
+    return err;
+}
+
+
+static ngx_inline int
+ngx_autocert_fchmod(int fd, ngx_autocert_mode_t mode)
+{
+    HANDLE  h;
+    DWORD   mask, err;
+
+    h = ngx_autocert_fd_handle(fd);
+    if (h == INVALID_HANDLE_VALUE) {
+        SetLastError(ERROR_INVALID_HANDLE);
+        errno = EBADF;
         return -1;
     }
 
@@ -541,30 +715,7 @@ ngx_autocert_fchmod(int fd, ngx_autocert_mode_t mode)
         mask |= FILE_GENERIC_EXECUTE;
     }
 
-    ngx_memzero(&ea, sizeof(EXPLICIT_ACCESS_W));
-    ea.grfAccessPermissions = mask;
-    ea.grfAccessMode = SET_ACCESS;
-    ea.grfInheritance = NO_INHERITANCE;
-    ea.Trustee.TrusteeForm = TRUSTEE_IS_SID;
-    ea.Trustee.TrusteeType = TRUSTEE_IS_UNKNOWN;
-    ea.Trustee.ptstrName = (LPWSTR) owner;
-
-    new_dacl = NULL;
-    err = SetEntriesInAclW(1, &ea, NULL, &new_dacl);
-    if (err != ERROR_SUCCESS) {
-        LocalFree(owner_sd);
-        SetLastError(err);
-        errno = ngx_autocert_win32_errno(err);
-        return -1;
-    }
-
-    err = SetSecurityInfo(h, SE_KERNEL_OBJECT,
-                DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
-                NULL, NULL, new_dacl, NULL);
-
-    LocalFree(owner_sd);
-    LocalFree(new_dacl);
-
+    err = ngx_autocert_win32_set_owner_dacl(h, mask, NO_INHERITANCE);
     if (err != ERROR_SUCCESS) {
         SetLastError(err);
         errno = ngx_autocert_win32_errno(err);
@@ -1047,8 +1198,9 @@ ngx_autocert_win32_oa(NGX_AUTOCERT_OBJECT_ATTRIBUTES *oa,
  * leaf-open incl. O_CREAT) share this without duplicating the NT call.
  */
 static ngx_inline int
-ngx_autocert_win32_ntopen(int dfd, const char *name, ULONG desired_access,
-    ULONG create_disposition, ULONG create_options_extra, int crt_flags)
+ngx_autocert_win32_ntopen_sd(int dfd, const char *name, ULONG desired_access,
+    ULONG create_disposition, ULONG create_options_extra, int crt_flags,
+    PSECURITY_DESCRIPTOR sd)
 {
     NGX_AUTOCERT_OBJECT_ATTRIBUTES  oa;
     NGX_AUTOCERT_UNICODE_STRING     us;
@@ -1074,6 +1226,12 @@ ngx_autocert_win32_ntopen(int dfd, const char *name, ULONG desired_access,
         return -1;
     }
 
+    /* A caller-supplied security descriptor is applied by the kernel AT
+     * creation, so a new directory never exists for a moment with the
+     * parent's inherited DACL (ngx_autocert_mkdirat below). NULL keeps the
+     * default: inherit from the parent. */
+    oa.SecurityDescriptor = sd;
+
     ngx_memzero(&iosb, sizeof(iosb));
 
     status = ngx_autocert_pfn_NtCreateFile(&h, desired_access, &oa, &iosb,
@@ -1098,6 +1256,17 @@ ngx_autocert_win32_ntopen(int dfd, const char *name, ULONG desired_access,
     }
 
     return fd;
+}
+
+
+static ngx_inline int
+ngx_autocert_win32_ntopen(int dfd, const char *name, ULONG desired_access,
+    ULONG create_disposition, ULONG create_options_extra, int crt_flags)
+{
+    return ngx_autocert_win32_ntopen_sd(dfd, name, desired_access,
+                                        create_disposition,
+                                        create_options_extra, crt_flags,
+                                        NULL);
 }
 
 
@@ -1158,7 +1327,13 @@ ngx_autocert_openat(int dfd, const char *name, int flags)
     crt_flags = 0;
 
     if (flags & O_DIRECTORY) {
-        desired_access |= FILE_LIST_DIRECTORY | FILE_TRAVERSE;
+        /* READ_CONTROL is required for GetSecurityInfo() to read the DACL.
+         * The file arm below gets it implicitly via GENERIC_READ; a directory
+         * handle does not, and ngx_autocert_fstat() now walks the DACL for
+         * directories too (the store-directory permission guard depends on
+         * it). Without this the walk fails with ERROR_ACCESS_DENIED and the
+         * fail-closed contract turns every store directory into a refusal. */
+        desired_access |= FILE_LIST_DIRECTORY | FILE_TRAVERSE | READ_CONTROL;
         options |= NGX_AUTOCERT_FILE_DIRECTORY_FILE
                  | NGX_AUTOCERT_FILE_OPEN_FOR_BACKUP_INTENT;
     } else {
@@ -1271,17 +1446,83 @@ ngx_autocert_openat_mode(int dfd, const char *name, int flags,
 static ngx_inline int
 ngx_autocert_mkdirat(int dfd, const char *name, ngx_autocert_mode_t mode)
 {
-    int  fd;
+    SECURITY_DESCRIPTOR   sd;
+    PSECURITY_DESCRIPTOR  psd;
+    PACL                  dacl;
+    BYTE                  owner_buf[SECURITY_MAX_SID_SIZE];
+    DWORD                 err;
+    int                   fd;
 
-    (void) mode;
+    psd = NULL;
+    dacl = NULL;
 
-    fd = ngx_autocert_win32_ntopen(dfd, name,
+    /* A 0700 mkdir on POSIX yields a directory nobody else can enter or
+     * write. NtCreateFile instead INHERITS the parent's DACL, and every stock
+     * volume root grants Authenticated Users Modify, so without this the
+     * store directory this module creates for itself would be refused by
+     * its own ngx_autocert_check_owner_mode() guard a moment later — and,
+     * worse, genuinely be plantable by any local user. Hand the kernel an
+     * owner-only, SE_DACL_PROTECTED descriptor AT creation: the directory
+     * then never exists, even for an instant, with the inherited DACL that a
+     * concurrent foreign open could have used to obtain a handle it keeps
+     * after a later re-permissioning. The owner is the token's default
+     * owner, which is what the kernel will stamp on the new object; the
+     * token user is granted alongside it (they differ for an elevated
+     * administrator). Inheritable, so what the module creates inside starts
+     * owner-only as well. Modes that grant group/other bits (the 0755
+     * `live` dir) keep the inherited DACL, which inside a 0700 store is
+     * already the owner-only one. */
+    if ((mode & (S_IRWXG | S_IRWXO)) == 0) {
+        err = ngx_autocert_win32_token_sid(TokenOwner, owner_buf,
+                                           sizeof(owner_buf));
+        if (err != ERROR_SUCCESS) {
+            SetLastError(err);
+            errno = ngx_autocert_win32_errno(err);
+            return -1;
+        }
+
+        err = ngx_autocert_win32_build_owner_dacl((PSID) owner_buf,
+                  FILE_ALL_ACCESS, SUB_CONTAINERS_AND_OBJECTS_INHERIT,
+                  &dacl);
+        if (err != ERROR_SUCCESS) {
+            SetLastError(err);
+            errno = ngx_autocert_win32_errno(err);
+            return -1;
+        }
+
+        /* SE_DACL_PROTECTED is what stops the kernel from ADDING the
+         * parent's inheritable ACEs to the explicit DACL during creation;
+         * without it the descriptor is merged, not applied, and the
+         * Authenticated Users grant is right back. */
+        if (!InitializeSecurityDescriptor(&sd, SECURITY_DESCRIPTOR_REVISION)
+            || !SetSecurityDescriptorDacl(&sd, TRUE, dacl, FALSE)
+            || !SetSecurityDescriptorControl(&sd, SE_DACL_PROTECTED,
+                                             SE_DACL_PROTECTED))
+        {
+            err = GetLastError();
+            LocalFree(dacl);
+            SetLastError(err);
+            errno = ngx_autocert_win32_errno(err);
+            return -1;
+        }
+
+        psd = &sd;
+    }
+
+    fd = ngx_autocert_win32_ntopen_sd(dfd, name,
         FILE_LIST_DIRECTORY | FILE_TRAVERSE | SYNCHRONIZE,
         NGX_AUTOCERT_FILE_CREATE,
         NGX_AUTOCERT_FILE_DIRECTORY_FILE
         | NGX_AUTOCERT_FILE_OPEN_FOR_BACKUP_INTENT,
-        _O_RDONLY);
+        _O_RDONLY, psd);
+
+    err = GetLastError();
+    if (dacl != NULL) {
+        LocalFree(dacl);
+    }
+
     if (fd == -1) {
+        SetLastError(err);
         return -1;
     }
 
@@ -1372,6 +1613,13 @@ ngx_autocert_unlinkat(int dfd, const char *name, int flags)
  * this cannot determine the truth. This is the opposite default of a normal
  * "return -1 on error" API and is deliberate; callers must not reinterpret a
  * -1 return here as "leave st_mode alone".
+ *
+ * Each ALLOW ACE's access Mask is classified too (is_write): a read-only
+ * grant to a foreign SID — the Users/Authenticated Users read ACE every
+ * directory under a stock Windows tree inherits — maps to the READ bits
+ * only, so a secret still refuses it and the store directory accepts it.
+ * Without the mask the walk could not tell a read grant from full control
+ * and refused every ordinary store.
  */
 #define NGX_AUTOCERT_DACL_WALK_MAX  32
 
@@ -1385,8 +1633,13 @@ ngx_autocert_win32_mode_from_dacl(HANDLE h, ngx_autocert_mode_t *mode_bits)
     ngx_int_t              is_owner[NGX_AUTOCERT_DACL_WALK_MAX];
     ngx_int_t              is_allow[NGX_AUTOCERT_DACL_WALK_MAX];
     ngx_int_t              is_tolerated[NGX_AUTOCERT_DACL_WALK_MAX];
+    ngx_int_t              is_write[NGX_AUTOCERT_DACL_WALK_MAX];
     BYTE                   system_buf[SECURITY_MAX_SID_SIZE];
     BYTE                   admins_buf[SECURITY_MAX_SID_SIZE];
+    BYTE                   user_buf[SECURITY_MAX_SID_SIZE];
+    BYTE                   creator_buf[SECURITY_MAX_SID_SIZE];
+    PSID                   user_sid, creator_sid;
+    DWORD                  creator_len;
     DWORD                  system_len, admins_len, i, err;
     ngx_uint_t             n;
 
@@ -1414,6 +1667,7 @@ ngx_autocert_win32_mode_from_dacl(HANDLE h, ngx_autocert_mode_t *mode_bits)
     ngx_memzero(is_owner, sizeof(is_owner));
     ngx_memzero(is_allow, sizeof(is_allow));
     ngx_memzero(is_tolerated, sizeof(is_tolerated));
+    ngx_memzero(is_write, sizeof(is_write));
 
     err = GetSecurityInfo(h, SE_KERNEL_OBJECT,
                 OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
@@ -1454,6 +1708,42 @@ ngx_autocert_win32_mode_from_dacl(HANDLE h, ngx_autocert_mode_t *mode_bits)
     }
     admins_sid = (PSID) admins_buf;
 
+    /* The process token user is "us" exactly as the owner is: an
+     * administrator's objects are owned by BUILTIN\Administrators, so the
+     * ACE that names the account nginx actually runs as is not the owner's
+     * ACE and would otherwise count as a foreign write grant on the store
+     * the module created for itself. Fail closed if the token cannot be
+     * read, like every other error on this path. */
+    err = ngx_autocert_win32_token_sid(TokenUser, user_buf, sizeof(user_buf));
+    if (err != ERROR_SUCCESS) {
+        LocalFree(sd);
+        SetLastError(err);
+        errno = ngx_autocert_win32_errno(err);
+        return -1;
+    }
+    user_sid = (PSID) user_buf;
+
+    /* CREATOR OWNER (S-1-3-0) is a placeholder, not a principal: an
+     * inherit-only ACE naming it means "whoever creates a child owns that
+     * child's copy". It grants nothing on this object and, on a child, only
+     * to the child's creator — who needed write on this directory already.
+     * Every stock directory carries one; tolerate it by SID rather than
+     * skipping inherit-only ACEs wholesale, because an inherit-only ACE for
+     * a REAL foreign principal does become effective on the children the
+     * module creates without re-permissioning them (the 0755 `live` dir),
+     * and must keep flagging the store. */
+    creator_len = sizeof(creator_buf);
+    if (!CreateWellKnownSid(WinCreatorOwnerSid, NULL, creator_buf,
+                             &creator_len))
+    {
+        err = GetLastError();
+        LocalFree(sd);
+        SetLastError(err);
+        errno = ngx_autocert_win32_errno(err);
+        return -1;
+    }
+    creator_sid = (PSID) creator_buf;
+
     ngx_memzero(&size_info, sizeof(size_info));
     if (!GetAclInformation(dacl, &size_info, sizeof(size_info),
                             AclSizeInformation))
@@ -1479,6 +1769,7 @@ ngx_autocert_win32_mode_from_dacl(HANDLE h, ngx_autocert_mode_t *mode_bits)
     for (i = 0; i < size_info.AceCount; i++) {
         ACE_HEADER  *hdr;
         PSID         ace_sid;
+        ACCESS_MASK  mask;
         int          allow;
 
         if (!GetAce(dacl, i, (LPVOID *) &hdr)) {
@@ -1493,34 +1784,40 @@ ngx_autocert_win32_mode_from_dacl(HANDLE h, ngx_autocert_mode_t *mode_bits)
          * ALLOW grants access (the exposure this guard looks for), DENY
          * grants nothing so it is never evidence of exposure. Anything else
          * (object-specific / callback ACE types) is conservatively treated
-         * as neither owner nor tolerated, so a non-owner one still flags —
-         * fail closed rather than assume a type this shim does not
-         * recognise is benign. */
+         * as neither owner nor tolerated AND as write-granting, so a
+         * non-owner one still flags with the full bits — fail closed rather
+         * than assume a type this shim does not recognise is benign. */
         if (hdr->AceType == ACCESS_ALLOWED_ACE_TYPE) {
             ace_sid = (PSID) &((ACCESS_ALLOWED_ACE *) hdr)->SidStart;
+            mask = ((ACCESS_ALLOWED_ACE *) hdr)->Mask;
             allow = 1;
         } else if (hdr->AceType == ACCESS_DENIED_ACE_TYPE) {
             ace_sid = (PSID) &((ACCESS_DENIED_ACE *) hdr)->SidStart;
+            mask = ((ACCESS_DENIED_ACE *) hdr)->Mask;
             allow = 0;
         } else {
             is_owner[n] = 0;
             is_allow[n] = 1;
             is_tolerated[n] = 0;
+            is_write[n] = 1;
             n++;
             continue;
         }
 
         is_allow[n] = allow;
-        is_owner[n] = (owner != NULL && EqualSid(ace_sid, owner)) ? 1 : 0;
+        is_owner[n] = ((owner != NULL && EqualSid(ace_sid, owner))
+                       || EqualSid(ace_sid, user_sid)) ? 1 : 0;
         is_tolerated[n] = (EqualSid(ace_sid, system_sid)
-                            || EqualSid(ace_sid, admins_sid)) ? 1 : 0;
+                            || EqualSid(ace_sid, admins_sid)
+                            || EqualSid(ace_sid, creator_sid)) ? 1 : 0;
+        is_write[n] = ngx_autocert_win32_mask_is_write((uint32_t) mask);
         n++;
     }
 
     LocalFree(sd);
 
     *mode_bits = ngx_autocert_win32_dacl_mode(is_owner, is_allow,
-                                               is_tolerated, n);
+                                               is_tolerated, is_write, n);
     return 0;
 }
 
@@ -1585,12 +1882,22 @@ static ngx_inline int ngx_autocert_fstatat( int dfd, const char *name,
 
     is_dir = (info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) ? 1 : 0;
 
-    if (!is_dir) {
-        /* Directories keep the fixed S_IFDIR|0700 approximation — the
-         * account-key guard this feeds only ever stats regular files
-         * (ngx_autocert_account.c's S_ISREG check rejects a directory before
-         * the permission check runs), so only the file case needs the real
-         * DACL walk. Read it while the handle is still open. */
+    {
+        /* Walk the DACL for DIRECTORIES TOO, not just regular files.
+         *
+         * This used to be `if (!is_dir)`, on the reasoning that the only
+         * consumer was the account-key guard, which rejects a directory via
+         * S_ISREG before ever reading the mode. That is no longer true:
+         * ngx_autocert_check_owner_mode() now stats the STORE DIRECTORY
+         * (driver.c's trylock) to refuse one that group/other can write.
+         * With the fixed S_IFDIR|0700 approximation those bits were never
+         * set on win32, so that check passed unconditionally and a store
+         * directory another local user could write was adopted silently —
+         * exactly the case the guard exists to stop.
+         *
+         * The fail-closed contract carries over unchanged: on any error
+         * mode_from_dacl() sets (S_IRWXG|S_IRWXO), which contains the write
+         * bits, so an undeterminable DACL refuses rather than accepts. */
         if (ngx_autocert_win32_mode_from_dacl(h, &dacl_bits) == -1) {
             DWORD  err = GetLastError();
             _close(fd);
@@ -1598,20 +1905,22 @@ static ngx_inline int ngx_autocert_fstatat( int dfd, const char *name,
             errno = ngx_autocert_win32_errno(err);
             return -1;
         }
-    } else {
-        dacl_bits = 0;
     }
 
     _close(fd);
 
     ngx_memzero(st, sizeof(*st));
-    st->st_mode = is_dir ? (ngx_autocert_mode_t) (S_IFDIR | 0700)
-                          : (ngx_autocert_mode_t) (S_IFREG | 0600 | dacl_bits);
+    /* dacl_bits now comes from the real DACL for BOTH kinds, so a
+     * group/other-writable directory is visible to the store-directory
+     * guard instead of being masked by a hardcoded 0700. */
+    st->st_mode = (ngx_autocert_mode_t)
+                  ((is_dir ? (S_IFDIR | 0700) : (S_IFREG | 0600)) | dacl_bits);
     st->st_nlink = (short) (info.nNumberOfLinks > 0
                              ? info.nNumberOfLinks : 1);
     st->st_size = ngx_file_size(&info);
     st->st_mtime = ngx_file_mtime(&info);
     st->st_uid = ngx_autocert_geteuid();
+    st->st_ino = ngx_file_uniq(&info);
 
     return 0;
 }
@@ -1646,23 +1955,26 @@ ngx_autocert_fstat(int fd, ngx_autocert_stat_t *st)
 
     is_dir = (info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) ? 1 : 0;
 
-    if (!is_dir) {
-        if (ngx_autocert_win32_mode_from_dacl(h, &dacl_bits) == -1) {
-            errno = ngx_autocert_win32_errno(GetLastError());
-            return -1;
-        }
-    } else {
-        dacl_bits = 0;
+    /* Directories walk the DACL too — see the matching comment in
+     * ngx_autocert_fstat() above for why the old `if (!is_dir)` made the
+     * store-directory guard vacuous on win32. */
+    if (ngx_autocert_win32_mode_from_dacl(h, &dacl_bits) == -1) {
+        errno = ngx_autocert_win32_errno(GetLastError());
+        return -1;
     }
 
     ngx_memzero(st, sizeof(*st));
-    st->st_mode = is_dir ? (ngx_autocert_mode_t) (S_IFDIR | 0700)
-                          : (ngx_autocert_mode_t) (S_IFREG | 0600 | dacl_bits);
+    /* dacl_bits now comes from the real DACL for BOTH kinds, so a
+     * group/other-writable directory is visible to the store-directory
+     * guard instead of being masked by a hardcoded 0700. */
+    st->st_mode = (ngx_autocert_mode_t)
+                  ((is_dir ? (S_IFDIR | 0700) : (S_IFREG | 0600)) | dacl_bits);
     st->st_nlink = (short) (info.nNumberOfLinks > 0
                              ? info.nNumberOfLinks : 1);
     st->st_size = ngx_file_size(&info);
     st->st_mtime = ngx_file_mtime(&info);
     st->st_uid = ngx_autocert_geteuid();
+    st->st_ino = ngx_file_uniq(&info);
 
     return 0;
 }

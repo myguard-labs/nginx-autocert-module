@@ -1,4 +1,4 @@
-# sync-sha: 8a00d132a3e11f87f2d885b33ac92b7bbe2683db3d36243d8ff9eec214143391
+# sync-sha: be0e18d34e0b1c318e0a924d749a72417d0009a1fac7b534949f91629ecb2d22
 name: Windows build
 
 # Native Windows port gate (W17). Proves the module compiles and links on
@@ -494,7 +494,7 @@ jobs:
           $keyauth = "$token.9jg46WB3rR_AHD-EBXdN7cBkH1WOu0tA3M9fm21mqTI"
 
           New-Item -ItemType Directory -Force `
-            -Path conf, logs, temp, temp/store | Out-Null
+            -Path conf, logs, temp | Out-Null
 
           # ABSOLUTE store path, with forward slashes. A relative one is
           # resolved against the CONFIG FILE's directory, not the -p prefix, so
@@ -508,7 +508,14 @@ jobs:
           # The directive-table step above gets away with "temp/store" because
           # nginx -t never opens the store; this is the first step that runs
           # the server for real.
-          $store = ((Resolve-Path temp/store).Path -replace '\\', '/')
+          #
+          # The store itself is NOT pre-created: the module creates it with an
+          # owner-only DACL, which is the deployment shape a Windows admin
+          # gets by pointing autocert_store_path at a fresh directory. A
+          # directory pre-created here would inherit the workspace ACL, and
+          # every stock volume root grants Authenticated Users Modify, so the
+          # driver would (correctly) refuse to adopt it.
+          $store = ((Resolve-Path temp).Path -replace '\\', '/') + '/store'
 
           # worker_processes 1: this test is about the challenge-serve path.
           # The N>1 singleton assertion is W19 and needs its own config.
@@ -709,11 +716,133 @@ jobs:
               Write-Host "== error.log =="
               Get-Content logs/error.log | Select-Object -Last 40 | Write-Host
             }
+            # The store's effective DACL, for when the driver refuses to
+            # adopt it: the guard's one-line error cannot say which ACE.
+            if (Test-Path $store) {
+              Write-Host "== icacls $store =="
+              icacls $store | Write-Host
+            }
           }
 
           # -s stop's exit status is irrelevant to the verdict; the assertions
           # above already threw on failure. Clear it so the step exits on its
           # own result (W28).
+          exit 0
+
+      # W11: the store-directory guard on real NTFS. Two runs. (a) With no
+      # store pre-created the module creates it, and its DACL must be the
+      # owner-only, inheritable, protected one mkdirat(0700) hands the kernel:
+      # no Users / Authenticated Users / Everyone grant, and the driver arms.
+      # (b) A store pre-created with an explicit Authenticated Users Modify
+      # grant (what a plain New-Item inherits from every stock volume root,
+      # granted explicitly here so the run does not depend on the runner's
+      # workspace ACL) must be refused with the guard's exact message, and
+      # the driver must NOT arm. The Linux unit oracle covers the decision
+      # core as pure logic; only this run sees a real ACE walk and a real
+      # NtCreateFile security descriptor.
+      - name: Runtime store-DACL test (owner-only create, inherited refuse)
+        shell: pwsh
+        working-directory: nginx-${{ env.NGINX_VERSION }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $prev = $ErrorActionPreference
+
+          function Start-Store([string] $root, [bool] $preCreate) {
+            Remove-Item -Recurse -Force $root -ErrorAction SilentlyContinue
+            New-Item -ItemType Directory -Force `
+              -Path $root, "$root/conf", "$root/logs", "$root/temp" | Out-Null
+            $store = ((Resolve-Path $root).Path -replace '\\', '/') + '/store'
+            if ($preCreate) {
+              New-Item -ItemType Directory -Force -Path $store | Out-Null
+              # S-1-5-11 is Authenticated Users; M is Modify.
+              icacls $store /grant '*S-1-5-11:(OI)(CI)M' | Out-Null
+            }
+            $lines = @(
+              'error_log logs/error.log notice;',
+              'events { worker_connections 64; }',
+              'http {',
+              "    autocert_store_path $store;",
+              '    autocert_ca https://127.0.0.1:1/directory;',
+              '    server {',
+              '        listen 8110;',
+              '        server_name a.example.com;',
+              '        autocert on;',
+              '    }',
+              '}'
+            )
+            Set-Content -Encoding ascii -Value $lines -Path "$root/conf/nginx.conf"
+            $proc = Start-Process -FilePath (Resolve-Path .\objs\nginx.exe) `
+                      -ArgumentList '-p', $root, '-c', 'conf/nginx.conf' `
+                      -PassThru -NoNewWindow
+            # Wait for the driver to decide either way; both outcomes are
+            # logged by the worker within its init_process.
+            $log = "$root/logs/error.log"
+            $deadline = (Get-Date).AddSeconds(30)
+            while ((Get-Date) -lt $deadline) {
+              if ((Test-Path $log) -and
+                  (Select-String -Path $log -Quiet -SimpleMatch `
+                     -Pattern 'ACME driver armed', 'refusing to adopt it'))
+              {
+                break
+              }
+              Start-Sleep -Milliseconds 250
+            }
+            return @{ proc = $proc; store = $store; log = $log }
+          }
+
+          function Stop-Store($t) {
+            $ErrorActionPreference = 'Continue'
+            if ($t.proc -and -not $t.proc.HasExited) {
+              Stop-Process -Id $t.proc.Id -Force -ErrorAction SilentlyContinue
+            }
+            Get-Process -Name nginx -ErrorAction SilentlyContinue |
+              Stop-Process -Force -ErrorAction SilentlyContinue
+            $ErrorActionPreference = $prev
+          }
+
+          # --- (a) module-created store ---
+          $t = Start-Store 'w11a' $false
+          try {
+            $text = if (Test-Path $t.log) { Get-Content $t.log -Raw } else { '' }
+            Write-Host "== (a) error.log =="; Write-Host $text
+            if (-not (Test-Path $t.store)) {
+              throw "(a) the module did not create the store directory"
+            }
+            $acl = (icacls $t.store | Out-String)
+            Write-Host "== (a) icacls =="; Write-Host $acl
+            if ($text -notmatch 'ACME driver armed') {
+              throw "(a) driver did not arm on a module-created store"
+            }
+            if ($text -match 'refusing to adopt it') {
+              throw "(a) guard refused the store the module created itself"
+            }
+            foreach ($bad in @('Authenticated Users', 'BUILTIN\Users',
+                               'Everyone', 'S-1-5-11', 'S-1-1-0')) {
+              if ($acl -match [regex]::Escape($bad)) {
+                throw "(a) module-created store DACL still grants '$bad'"
+              }
+            }
+            if ($acl -notmatch '\(OI\)\(CI\)') {
+              throw "(a) module-created store DACL is not inheritable"
+            }
+            Write-Host "OK (a) module-created store is owner-only and armed"
+          } finally { Stop-Store $t }
+
+          # --- (b) pre-created store granting Authenticated Users Modify ---
+          $t = Start-Store 'w11b' $true
+          try {
+            $text = if (Test-Path $t.log) { Get-Content $t.log -Raw } else { '' }
+            Write-Host "== (b) error.log =="; Write-Host $text
+            Write-Host "== (b) icacls =="; icacls $t.store | Write-Host
+            if ($text -notmatch 'store directory is writable by group/other') {
+              throw "(b) guard did not refuse a store writable by Authenticated Users"
+            }
+            if ($text -match 'ACME driver armed') {
+              throw "(b) driver armed on a store writable by Authenticated Users"
+            }
+            Write-Host "OK (b) inherited-grant store refused, driver not armed"
+          } finally { Stop-Store $t }
+
           exit 0
 
       # W19: the ACME engine must run in exactly ONE process. On POSIX that is
@@ -743,13 +872,12 @@ jobs:
           $root = 'w19'
           Remove-Item -Recurse -Force $root -ErrorAction SilentlyContinue
           New-Item -ItemType Directory -Force `
-            -Path $root, "$root/conf", "$root/logs", "$root/temp", `
-                  "$root/store" | Out-Null
+            -Path $root, "$root/conf", "$root/logs", "$root/temp" | Out-Null
 
           # Absolute, forward-slashed, for the same reason as the HTTP-01 step:
           # a relative store path resolves against the config file's directory,
           # not -p, and the driver then fails to open it.
-          $store = ((Resolve-Path "$root/store").Path -replace '\\', '/')
+          $store = ((Resolve-Path $root).Path -replace '\\', '/') + '/store' # module-created
 
           # worker_processes 2 is the whole point: win32 spawns that many real
           # processes (ngx_start_worker_processes loops ngx_spawn_process at
@@ -911,7 +1039,7 @@ jobs:
           # which reads like a config error but is a missing directory.
           New-Item -ItemType Directory -Force `
             -Path $root, "$root/conf", "$root/logs", "$root/temp", `
-                  "$root/store", "$root/pebble" | Out-Null
+                  "$root/pebble" | Out-Null
 
           # --- fetch Pebble (native windows/amd64, no Docker, no build) ---
           # sha256-pinned like every other download in this workflow (see the
@@ -1034,7 +1162,7 @@ jobs:
 
             # --- config: the IP literal is the server_name; the listener
             # binds it on the VA's httpPort so the http-01 GET lands. ---
-            $store = ((Resolve-Path "$root/store").Path -replace '\\', '/')
+            $store = ((Resolve-Path $root).Path -replace '\\', '/') + '/store' # module-created
             $ca    = ((Resolve-Path "$root/ca.pem").Path -replace '\\', '/')
             $lines = @(
               'error_log logs/error.log info;',
@@ -1341,8 +1469,7 @@ jobs:
 
           Remove-Item -Recurse -Force $root -ErrorAction SilentlyContinue
           New-Item -ItemType Directory -Force `
-            -Path $root, "$root/conf", "$root/logs", "$root/temp", `
-                  "$root/store" | Out-Null
+            -Path $root, "$root/conf", "$root/logs", "$root/temp" | Out-Null
 
           # Reuse the Pebble binary and PEMs the issuance step already fetched
           # and sha256-verified into w18b/. Re-downloading would double the
@@ -1492,7 +1619,7 @@ jobs:
               throw "Pebble did not come up"
             }
 
-            $store = ((Resolve-Path "$root/store").Path -replace '\\', '/')
+            $store = ((Resolve-Path $root).Path -replace '\\', '/') + '/store' # module-created
             $ca    = ((Resolve-Path "$root/ca.pem").Path -replace '\\', '/')
             $lines = @(
               'error_log logs/error.log info;',

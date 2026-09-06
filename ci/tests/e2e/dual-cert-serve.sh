@@ -36,6 +36,9 @@ trap cleanup EXIT
 
 rm -rf "$PREFIX"
 mkdir -p "$PREFIX/logs" "$PREFIX/conf" "$PREFIX/store/$DOMAIN"
+# store mode must not depend on the caller's umask (the driver refuses a
+# group/other-writable store, and mkdir's mode is umask-filtered).
+chmod 0700 "$PREFIX/store"
 
 # Self-signed EC P-384 pair into the flat (slot 0) names.
 gen_ec() {

@@ -1,4 +1,6 @@
 /*
+ * Copyright (C) 2026 Thijs Eilander
+ * SPDX-License-Identifier: BSD-2-Clause
  * ngx_http_autocert_conf — the autocert HTTP module's config struct
  * definitions, shared between the HTTP module itself and the small accessor TU
  * (ngx_autocert_conf.c) that the CORE helper module links in.

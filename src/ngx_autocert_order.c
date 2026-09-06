@@ -1,4 +1,6 @@
 /*
+ * Copyright (C) 2026 Thijs Eilander
+ * SPDX-License-Identifier: BSD-2-Clause
  * ngx_autocert_order — ACME order + authorization + issuance flow (M6a/M6b).
  * See the header for the contract. A chained state machine over the live
  * account's kid-signed POST primitive (ngx_autocert_account_post) plus one
@@ -1193,10 +1195,35 @@ ngx_autocert_dns_hook_spawn(ngx_autocert_order_t *order, ngx_str_t *hook,
 
     if (pid == 0) {
         long  maxfd, fd;
+        int   nullfd;
         extern char **environ;
 
         (void) sigprocmask(SIG_SETMASK, &order->dns_hook_sigmask, NULL);
         (void) setpgid(0, 0);
+
+        /*
+         * Redirect stdin and stdout to /dev/null before the close-everything
+         * loop below: without this the hook inherits this worker's real
+         * stdin/stdout (whatever nginx was started against — a log pipe, a
+         * terminal, or nothing at all), and an arbitrary operator-configured
+         * hook program has no business reading or writing either. stderr
+         * (fd 2) is deliberately LEFT connected to the worker's stderr: the
+         * win32 arm of this same hook only reports an exit code (see its
+         * comment above), so fd 2 is the one channel a hook has to surface a
+         * diagnostic, and nginx's own stderr is already whatever the admin
+         * chose it to be (typically the error log or /dev/null), not a
+         * secret. A failed open()/dup2() here aborts the child via _exit()
+         * rather than silently running with the wrong stdio.
+         */
+        nullfd = open("/dev/null", O_RDWR);
+        if (nullfd < 0 || dup2(nullfd, STDIN_FILENO) < 0
+            || dup2(nullfd, STDOUT_FILENO) < 0)
+        {
+            _exit(127);
+        }
+        if (nullfd > STDOUT_FILENO) {
+            (void) ngx_autocert_close(nullfd);
+        }
 #if defined(__linux__) && defined(SYS_close_range)
         if (syscall(SYS_close_range, 3, ~0U, 0) != 0)
 #endif
@@ -1316,7 +1343,9 @@ ngx_autocert_order_dns_hook_timer(ngx_event_t *ev)
     int                     status;
 
     order = ev->data;
-    w = waitpid(order->dns_hook_pid, &status, WNOHANG);
+    do {
+        w = waitpid(order->dns_hook_pid, &status, WNOHANG);
+    } while (w == -1 && ngx_autocert_err_is_intr(ngx_errno));
     if (w == 0) {
         ngx_add_timer(ev, 20);
         return;
@@ -2178,11 +2207,18 @@ ngx_autocert_order_validate_cert(ngx_autocert_order_t *order)
         }
         X509_free(x);
     }
-    if (ERR_GET_REASON(ERR_peek_last_error()) != PEM_R_NO_START_LINE) {
-        ngx_log_error(NGX_LOG_ERR, order->log, 0,
-                      "autocert: downloaded chain has a malformed certificate");
-        ERR_clear_error();
-        goto done;
+    {
+        unsigned long err = ERR_peek_last_error();
+
+        if (ERR_GET_LIB(err) != ERR_LIB_PEM
+            || ERR_GET_REASON(err) != PEM_R_NO_START_LINE)
+        {
+            ngx_log_error(NGX_LOG_ERR, order->log, 0,
+                          "autocert: downloaded chain has a malformed "
+                          "certificate");
+            ERR_clear_error();
+            goto done;
+        }
     }
     ERR_clear_error();
 
@@ -2193,7 +2229,8 @@ ngx_autocert_order_validate_cert(ngx_autocert_order_t *order)
     if (bio == NULL) {
         goto done;
     }
-    key = PEM_read_bio_PrivateKey(bio, NULL, NULL, NULL);
+    key = PEM_read_bio_PrivateKey(bio, NULL,
+                                   ngx_http_autocert_no_passphrase_cb, NULL);
     if (key == NULL) {
         ngx_log_error(NGX_LOG_ERR, order->log, 0,
                       "autocert: order private key did not parse");
@@ -2231,8 +2268,14 @@ ngx_autocert_order_validate_cert(ngx_autocert_order_t *order)
                       &order->domain);
         goto done;
     }
-    if (X509_cmp_current_time(X509_get0_notBefore(leaf)) > 0
-        || X509_cmp_current_time(X509_get0_notAfter(leaf)) < 0)
+    /*
+     * X509_cmp_current_time() returns 0 on a parse ERROR for the given time,
+     * not "equal to now" — a >0/<0-only check would silently accept a
+     * malformed notBefore/notAfter as valid. Reject that alongside an
+     * out-of-window certificate.
+     */
+    if (X509_cmp_current_time(X509_get0_notBefore(leaf)) >= 0
+        || X509_cmp_current_time(X509_get0_notAfter(leaf)) <= 0)
     {
         ngx_log_error(
             NGX_LOG_ERR, order->log, 0,
@@ -2976,18 +3019,39 @@ ngx_autocert_order_store(ngx_autocert_order_t *order)
 }
 
 
-/* fsync an open directory fd so a preceding rename/create in it is durable.
- * Does not close the fd (caller owns it). */
+/*
+ * fsync an open directory fd so a preceding rename/create in it is durable.
+ * Does not close the fd (caller owns it). NOT best-effort: every caller here
+ * treats a failure as a hard NGX_ERROR (see NGX_AUTOCERT_STORE_FAIL() and the
+ * renewal-commit callers above) because this fsync is what makes the commit
+ * rename durable -- reporting success here when the directory entry never
+ * hit disk would let a renewal claim durability it does not have.
+ *
+ * EINTR is retried in a bounded loop: a signal interrupting fsync(2) is not
+ * a real failure, just an interruption, and POSIX.1-2001 leaves it
+ * unspecified whether the fsync was still performed, so retrying is the
+ * only way to know the directory entry is actually durable. The loop is
+ * bounded so a signal storm cannot hang a renewal; a genuine I/O error
+ * (e.g. EIO) still returns NGX_ERROR on the first non-EINTR failure.
+ */
 static ngx_int_t
 ngx_autocert_order_fsync_dirfd(ngx_autocert_order_t *order, int fd,
     const char *label)
 {
-    if (ngx_autocert_fsync_dir(fd) == -1) {
-        ngx_log_error(NGX_LOG_ERR, order->log, ngx_errno,
-                      "autocert: fsync(\"%s\") failed", label);
-        return NGX_ERROR;
+    int  tries;
+
+    for (tries = 0; tries < 8; tries++) {
+        if (ngx_autocert_fsync_dir(fd) != -1) {
+            return NGX_OK;
+        }
+        if (!ngx_autocert_err_is_intr(ngx_errno)) {
+            break;
+        }
     }
-    return NGX_OK;
+
+    ngx_log_error(NGX_LOG_ERR, order->log, ngx_errno,
+                  "autocert: fsync(\"%s\") failed", label);
+    return NGX_ERROR;
 }
 
 
@@ -3359,16 +3423,54 @@ static ngx_int_t
 ngx_autocert_order_write_tmp_at(ngx_autocert_order_t *order, int sfd,
     const char *leaf, ngx_str_t *data, ngx_uint_t mode)
 {
-    int      fd;
-    size_t   off;
-    ssize_t  n;
+    int                  fd;
+    size_t               off;
+    ssize_t              n;
+    ngx_autocert_stat_t  st;
 
+    /*
+     * O_TRUNC is DEFERRED, exactly as the runtime-marker writer defers it
+     * (driver.c, "O_TRUNC is likewise deferred"): O_TRUNC acts BEFORE we can
+     * fstat the fd, so opening with it would let a hostile leaf planted in the
+     * staging dir be truncated before we ever established it is a regular
+     * file. Open without it, verify the fd, then ftruncate the pinned fd.
+     *
+     * O_EXCL is deliberately NOT used here, and must not be added: staging is
+     * seeded from the live dir by hardlink, and while seeding excludes THIS
+     * keytype's own four names (see the CRITICAL note on
+     * ngx_autocert_order_seed_staging_at), a retried or resumed order can
+     * legitimately find its own leaf already present. O_EXCL would fail those
+     * with EEXIST. The nlink check below is what actually protects the shared
+     * inode: a seeded other-keytype file has nlink > 1 and is refused, so this
+     * writer can never truncate the live cert through a hardlink.
+     */
     fd = ngx_autocert_openat_mode(sfd, leaf,
-                O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW | O_CLOEXEC,
+                O_WRONLY | O_CREAT | O_NOFOLLOW | O_CLOEXEC,
                 (ngx_autocert_mode_t) mode);
     if (fd == -1) {
         ngx_log_error(NGX_LOG_ERR, order->log, ngx_errno,
                       "autocert: open(\"%s\") failed", leaf);
+        return NGX_ERROR;
+    }
+
+    /* Only ever write into a regular file, and only one with a single link —
+     * a hard link to the live cert (or to someone else's file) must not be
+     * truncated or overwritten through this fd. */
+    if (ngx_autocert_fstat(fd, &st) == -1 || !S_ISREG(st.st_mode)
+        || st.st_nlink != 1)
+    {
+        ngx_log_error(NGX_LOG_ERR, order->log, 0,
+                      "autocert: refusing to write staging file \"%s\": "
+                      "not a single-linked regular file", leaf);
+        (void) ngx_autocert_close(fd);
+        return NGX_ERROR;
+    }
+
+    /* now that the fd is known to be a plain, single-linked regular file */
+    if (ngx_autocert_ftruncate(fd, 0) == -1) {
+        ngx_log_error(NGX_LOG_ERR, order->log, ngx_errno,
+                      "autocert: ftruncate(\"%s\") failed", leaf);
+        (void) ngx_autocert_close(fd);
         return NGX_ERROR;
     }
 
@@ -3523,9 +3625,21 @@ ngx_autocert_order_free(ngx_autocert_order_t *order)
     }
 #else
     if (order->dns_hook_pid > 0) {
+        pid_t  w;
+        int    status;
+
         if (kill(-order->dns_hook_pid, SIGKILL) != 0) {
             (void) kill(order->dns_hook_pid, SIGKILL);
         }
+
+        /* Reap now: the timers below are about to be deleted, so the async
+         * waitpid() in ngx_autocert_order_dns_hook_timer() will never run
+         * again for this pid. Skipping this reap leaves a zombie behind and
+         * order (which holds dns_hook_pid) is about to be freed regardless. */
+        do {
+            w = waitpid(order->dns_hook_pid, &status, 0);
+        } while (w == -1 && ngx_autocert_err_is_intr(ngx_errno));
+
         (void) sigprocmask(SIG_SETMASK, &order->dns_hook_sigmask, NULL);
         order->dns_hook_pid = NGX_INVALID_PID;
     }

@@ -25,6 +25,18 @@
 
 set -uo pipefail
 
+# Every script below creates its store directory with a plain `mkdir -p`, so
+# the mode comes from the AMBIENT umask. The driver refuses a store directory
+# that group/other can WRITE (that is what would let another local user plant
+# certificate material under it), so on a 0002 umask — a common developer and
+# CI-image default — a 0775 store is correctly refused and the suite's result
+# would otherwise depend on who runs it.
+#
+# Pin it here, once, rather than in each of the ~40 scripts. A test that wants
+# to assert the driver's behaviour on a deliberately loose directory should
+# chmod that directory explicitly rather than rely on the umask.
+umask 0022
+
 SERVER_BIN="${SERVER_BIN:?set SERVER_BIN to the built nginx/angie binary}"
 NGX_BUILD_DIR="${NGX_BUILD_DIR:?set NGX_BUILD_DIR to the unpacked build dir}"
 FLAVOR="${FLAVOR:-$(basename "$SERVER_BIN")}"
@@ -160,6 +172,14 @@ run_one() {
     if [ "$rc" -eq 0 ]; then
         echo "✓ ${label} (${elapsed}s)"
         PASS+=("$label")
+    elif [ "$rc" -eq 77 ]; then
+        # 77 = the automake convention for "this test does not apply here"
+        # (a capability the build genuinely lacks), as opposed to 0 "it
+        # passed" or anything else "it failed". A script that exits 0 to
+        # opt out is indistinguishable from one that ran and passed, which
+        # is how a suite silently stops testing what it claims to.
+        echo "- ${label} skipped (${elapsed}s)"
+        SKIP+=("$label (not applicable)")
     else
         echo "::error::e2e ${FLAVOR}: ${label} failed (exit ${rc}, ${elapsed}s)"
         FAIL+=("$label")
@@ -218,14 +238,20 @@ chmod +x "$SERVER_BIN" 2>/dev/null || true
 # below can be a plain pool over a flat array instead of two near-identical
 # loops. Skips are decided here, before any slot is spent on them.
 TASK_LABEL=(); TASK_MODE=(); TASK_PATH=(); TASK_ENV=()
+MISSING=()
 
 for entry in "${SCRIPTS[@]}"; do
     script="${entry%%:*}"
     mode="${entry#"$script"}"; mode="${mode#:}"   # "sudo" or ""
     path="$HERE/$script"
     if [ ! -f "$path" ]; then
-        echo "::warning::missing e2e script $script — skipping"
-        SKIP+=("$script (missing)")
+        # A script named in SCRIPTS that is not on disk is a BUG in the suite
+        # (renamed, deleted, or a typo), not a condition to skip past: the
+        # suite would report green while silently testing less than it
+        # declares. A genuinely inapplicable test exits 77 from inside the
+        # script; it never goes missing.
+        echo "::error::e2e script declared in SCRIPTS but not found: $script"
+        MISSING+=("$script")
         continue
     fi
     TASK_LABEL+=("$script"); TASK_MODE+=("${mode:-nosudo}")
@@ -240,8 +266,8 @@ if [ -f "$cvr" ]; then
         TASK_PATH+=("$cvr");                             TASK_ENV+=("CERT_CASE=$case")
     done
 else
-    echo "::warning::cert-validate-reject.sh missing — skipping"
-    SKIP+=("cert-validate-reject.sh (missing)")
+    echo "::error::e2e script declared but not found: cert-validate-reject.sh"
+    MISSING+=("cert-validate-reject.sh")
 fi
 
 # Concurrency. Default 1 = the historical sequential behaviour, so this is inert
@@ -317,7 +343,18 @@ else
             run_one "${TASK_LABEL[$i]}" "$slot" \
                 invoke "${TASK_MODE[$i]}" "${TASK_PATH[$i]}" ${TASK_ENV[$i]:+"${TASK_ENV[$i]}"}
             # Subshell: report the verdict through the filesystem.
-            printf '%s\t%s\t%s\n' "${#FAIL[@]}" "${DURATIONS[0]%%	*}" "${TASK_LABEL[$i]}" \
+            #
+            # The VERDICT is written, not the fail-count. Folding on
+            # "${#FAIL[@]}" alone cannot represent a skip: a task that exits
+            # 77 leaves FAIL empty and would be folded back as a PASS -- the
+            # exact "opting out is indistinguishable from passing" bug the
+            # 77 convention exists to prevent, reintroduced on the
+            # concurrent path only.
+            if   [ "${#FAIL[@]}" -gt 0 ]; then verdict=fail
+            elif [ "${#SKIP[@]}" -gt 0 ]; then verdict=skip
+            else                               verdict=pass
+            fi
+            printf '%s\t%s\t%s\n' "$verdict" "${DURATIONS[0]%%	*}" "${TASK_LABEL[$i]}" \
                 > "$RESULT_DIR/$i"
         ) &
         SLOT_OF_PID[$!]="$slot"
@@ -327,16 +364,37 @@ else
     # Fold the per-task verdicts back into the parent's arrays. A task whose
     # result file is missing (killed, disk full, subshell died before the write)
     # counts as a FAILURE, never as a pass - silence must not read as success.
-    PASS=(); FAIL=(); DURATIONS=()
+    PASS=(); FAIL=(); SKIP=(); DURATIONS=()
     for i in "${!TASK_LABEL[@]}"; do
         if [ ! -s "$RESULT_DIR/$i" ]; then
             echo "::error::e2e ${FLAVOR}: ${TASK_LABEL[$i]} produced no result (worker died?)"
             FAIL+=("${TASK_LABEL[$i]} (no result)")
             continue
         fi
-        IFS=$'\t' read -r nfail secs label < "$RESULT_DIR/$i"
+        IFS=$'\t' read -r verdict secs label < "$RESULT_DIR/$i"
+        # A recognised verdict is not enough: a worker killed mid-write can
+        # leave a file holding just "pass" with no duration and no label,
+        # which would otherwise be folded in as a passing test under a blank
+        # name. Require the WHOLE record -- verdict, numeric duration, label
+        # -- before the verdict is trusted at all.
+        if [ -z "$secs" ] || [ -z "$label" ] || case "$secs" in
+                                                    ''|*[!0-9]*) true ;;
+                                                    *) false ;;
+                                                esac
+        then
+            echo "::error::e2e ${FLAVOR}: ${TASK_LABEL[$i]} wrote an incomplete result record"
+            FAIL+=("${TASK_LABEL[$i]} (incomplete result)")
+            continue
+        fi
         DURATIONS+=("${secs}	${label}")
-        if [ "$nfail" -eq 0 ]; then PASS+=("$label"); else FAIL+=("$label"); fi
+        # Anything that is not a recognised verdict counts as a FAILURE:
+        # a corrupt or truncated result file must never read as success.
+        case "$verdict" in
+            pass) PASS+=("$label") ;;
+            skip) SKIP+=("$label (not applicable)") ;;
+            fail) FAIL+=("$label") ;;
+            *)    FAIL+=("$label (unreadable result)") ;;
+        esac
     done
 fi
 
@@ -345,11 +403,15 @@ echo "==================== e2e summary (${FLAVOR}) ===================="
 printf 'passed:  %d\n' "${#PASS[@]}"
 printf 'failed:  %d\n' "${#FAIL[@]}"
 printf 'skipped: %d\n' "${#SKIP[@]}"
+printf 'missing: %d\n' "${#MISSING[@]}"
 if [ "${#FAIL[@]}" -gt 0 ]; then
     printf '  FAIL: %s\n' "${FAIL[@]}"
 fi
 if [ "${#SKIP[@]}" -gt 0 ]; then
     printf '  SKIP: %s\n' "${SKIP[@]}"
+fi
+if [ "${#MISSING[@]}" -gt 0 ]; then
+    printf '  MISSING: %s\n' "${MISSING[@]}"
 fi
 
 # Slowest-first, because the only actionable question here is "what is the long
@@ -368,4 +430,6 @@ if [ "${#DURATIONS[@]}" -gt 0 ]; then
 fi
 echo "================================================================"
 
-[ "${#FAIL[@]}" -eq 0 ]
+# A declared-but-absent script fails the suite just like a failing one: it
+# means the suite ran less than it says it runs.
+[ "${#FAIL[@]}" -eq 0 ] && [ "${#MISSING[@]}" -eq 0 ]

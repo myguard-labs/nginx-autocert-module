@@ -142,7 +142,8 @@ gcc -Wall -Wextra -Werror $CORE_INC \
 # opened O_WRONLY without O_NONBLOCK blocks in openat() until a reader
 # appears, which wedged the sole ACME driver loop (and its worker) after a
 # successful runtime issuance; O_NOFOLLOW does not stop it.
-gcc -Wall -Wextra -Werror \
+# shellcheck disable=SC2086
+gcc -Wall -Wextra -Werror $CORE_INC \
 	"$WORKSPACE/ci/tests/unit/test_marker_open.c" \
 	-o test_marker_open
 ./test_marker_open
@@ -162,6 +163,20 @@ gcc -D_GNU_SOURCE -Wall -Wextra -Werror $CORE_INC \
 	"$WORKSPACE/ci/tests/unit/test_store_open.c" \
 	"$NGX/objs/src/core/ngx_string.o" -o test_store_open
 ./test_store_open
+
+# Store-directory / serving-key ownership guard (ngx_autocert_check_owner_mode,
+# ngx_autocert_shared.h): driver.c's trylock and serve.c's cache reload both
+# adopt filesystem state (a store directory, a serving key) that a hostile
+# co-tenant could have pre-created or substituted. open_dir_path()/open_file_
+# path() pin every ancestor against a planted symlink, but say nothing about
+# who owns the inode or what it is writable by -- this guard closes that gap.
+# Exercises real owner-only / group-writable / world-readable dirs and files
+# in a temp tree.
+# shellcheck disable=SC2086
+gcc -D_GNU_SOURCE -Wall -Wextra -Werror $CORE_INC \
+	"$WORKSPACE/ci/tests/unit/test_owner_mode.c" \
+	"$NGX/objs/src/core/ngx_string.o" -o test_owner_mode
+./test_owner_mode
 
 # win32 root-splitting classifier (ngx_autocert_win32_classify_root, W5g):
 # drive-absolute / UNC / relative root recognition, both \ and / separators,
@@ -226,8 +241,8 @@ gcc -D_GNU_SOURCE -Wall -Wextra -Werror $CORE_INC \
 # real on win32 instead of a tautology -- before W11 the fabricated st_mode
 # was a constant S_IFREG|0600 regardless of the file's actual DACL, so a
 # world-readable account key always passed the guard on win32. Given the
-# caller's (is_owner, is_allow, is_tolerated) walk of a file's real DACL,
-# this decides whether the group/other bits that guard checks should be set.
+# caller's (is_owner, is_allow, is_tolerated, is_write) walk of a file's
+# real DACL, this decides whether the group/other bits that guard checks should be set.
 # No win32-header dependency (plain ngx_int_t arrays), same reasoning as
 # test_win32_mutex_verdict.c above: this runs the real production function
 # on Linux.
@@ -278,12 +293,52 @@ gcc -D_GNU_SOURCE -Wall -Wextra -Werror $CORE_INC -o "$BUILD_DIR/test_cert_time"
 	$INET_OBJS -lssl -lcrypto
 "$BUILD_DIR/test_cert_time"
 
-# Slice just ngx_autocert_account_json_safe from the shipped account
-# source — the function depends only on ngx_str_t, so no nginx objects
-# are linked.
+# Slice ngx_autocert_account_json_safe + ngx_autocert_account_log_safe from
+# the shipped account source. json_safe depends only on ngx_str_t; log_safe
+# calls nginx core's ngx_escape_json (ngx_string.o) but never touches a pool
+# or ngx_cycle itself — those are only pulled in because ngx_string.o is
+# linked as a whole object and OTHER functions in it reference ngx_cycle /
+# ngx_log_error_core / ngx_pnalloc. Same stub-link idiom as test_ratecap.c.
 bash ci/tests/unit/extract_jsonsafe.sh
 # shellcheck disable=SC2086
 gcc -Wall -Wextra -Werror -Ici/tests/unit $CORE_INC \
 	-o "$BUILD_DIR/test_account_jsonsafe" \
-	"$WORKSPACE/ci/tests/unit/test_account_jsonsafe.c"
+	"$WORKSPACE/ci/tests/unit/test_account_jsonsafe.c" \
+	"$NGX/objs/src/core/ngx_string.o" \
+	"$NGX/objs/src/core/ngx_palloc.o" \
+	"$NGX/objs/src/os/unix/ngx_alloc.o"
 "$BUILD_DIR/test_account_jsonsafe"
+
+# Cert-cache freshness key (audit MINOR): mtime alone is whole-second
+# resolution and blind to an atomic rename landing a different file with a
+# coincidentally equal mtime, or two renewals inside one second. Slices the
+# slot struct + sentinel + ngx_autocert_slot_fresh() from the shipped
+# ngx_autocert_serve.c (too heavy to include-shim whole: SSL cert_cb + PEM
+# parse + ngx_http_ssl_module.h/v2/v3) and drives it against real temp files
+# via ngx_autocert_fstat, so the mtime/size/inode values are genuine kernel
+# output, not hand-built fixtures.
+bash "$WORKSPACE/ci/tests/unit/extract_slotfresh.sh"
+# shellcheck disable=SC2086
+gcc -D_GNU_SOURCE -Wall -Wextra -Werror -Ici/tests/unit -I"$WORKSPACE" \
+	$CORE_INC \
+	-o "$BUILD_DIR/test_slot_fresh" \
+	"$WORKSPACE/ci/tests/unit/test_slot_fresh.c"
+"$BUILD_DIR/test_slot_fresh"
+
+# Config-time name/contact validation (audit MINOR): server_name/
+# autocert_wildcard values land verbatim, unescaped, in the ACME newOrder
+# JSON and as a filesystem path segment; autocert_contact's email is
+# json_safe-checked today only at ACME-bootstrap time. Both gates now run at
+# `nginx -t` (ngx_http_autocert_add_name / ngx_http_autocert_contact in
+# ngx_http_autocert_module.c). ngx_autocert_dns_name_valid is header-only
+# (ngx_autocert_ident.h, same file test_ipident.c already exercises this
+# way); ngx_autocert_account_json_safe is sliced by the same
+# extract_jsonsafe.sh test_account_jsonsafe uses above. A wildcard
+# ("*.example.com") and a punycode label ("xn--...") MUST still be accepted
+# -- an over-strict gate here breaks a working config, which is worse than
+# the bug this closes.
+# shellcheck disable=SC2086
+gcc -Wall -Wextra -Werror -Ici/tests/unit -I"$WORKSPACE" $HTTP_INC \
+	-o "$BUILD_DIR/test_name_valid" \
+	"$WORKSPACE/ci/tests/unit/test_name_valid.c" -lssl -lcrypto
+"$BUILD_DIR/test_name_valid"
