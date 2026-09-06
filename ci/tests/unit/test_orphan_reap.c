@@ -51,7 +51,15 @@
 #include "generated_orphan.inc"
 
 
-volatile ngx_cycle_t  *ngx_cycle;
+/* The reap loop logs an unexpected waitpid errno through ngx_cycle->log, and
+ * ngx_log_error() reads log->log_level BEFORE reaching the stub below. A NULL
+ * ngx_cycle therefore turns any such errno into a segfault that MASKS whatever
+ * assertion was being proven -- observed while mutation-testing this file.
+ * Give the slice a real cycle and log so that branch is survivable. */
+static ngx_log_t    test_log;
+static ngx_cycle_t  test_cycle;
+
+volatile ngx_cycle_t  *ngx_cycle = &test_cycle;
 
 void ngx_log_error_core(ngx_uint_t level, ngx_log_t *log, ngx_err_t err,
     const char *fmt, ...);
@@ -111,6 +119,10 @@ fake_waitpid(pid_t pid, int *status, int options)
         fprintf(stderr, "  FAIL waitpid() called WITHOUT WNOHANG for pid %d "
                         "-- the reap would block the event loop\n", (int) pid);
         failures++;
+        /* ECHILD, not a bare -1: the reaper logs any other errno through
+         * ngx_cycle->log, and reporting this failure must not also crash the
+         * run in a way that hides it. */
+        errno = ECHILD;
         return -1;
     }
 
@@ -162,6 +174,9 @@ table_len(void)
 int
 main(void)
 {
+    test_log.log_level = NGX_LOG_ERR;
+    test_cycle.log = &test_log;
+
     sigset_t    empty, blocked, now;
     ngx_uint_t  i, live;
 
