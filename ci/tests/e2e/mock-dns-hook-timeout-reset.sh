@@ -11,11 +11,25 @@
 #
 #   add-hook invoked -> sleeps past autocert_dns_hook_timeout -> nginx SIGKILLs
 #   the child group and sets order->dns_hook_timed_out=1 -> add hook reported
-#   failed -> order aborted -> remove-hook invoked for cleanup -> the reset at
-#   the top of ngx_autocert_order_dns_hook() clears dns_hook_timed_out before
-#   the remove-hook's own spawn -> remove-hook exits 0 and is NOT misreported
-#   as timed out -> exactly one "hook timed out" line, exactly one add-hook
-#   invocation, exactly one remove-hook invocation, no leaked hook process.
+#   failed -> order aborted -> remove-hook invoked for cleanup -> remove-hook
+#   exits 0 and is NOT misreported as failed -> exactly one "hook timed out"
+#   line, exactly one add-hook invocation, exactly one remove-hook invocation,
+#   no leaked hook process.
+#
+# SCOPE -- what this test does and does NOT prove (VERIFIED 2026-09-06):
+#   It proves the POSIX add-timeout -> remove-success flow end to end. It does
+#   NOT prove the `order->dns_hook_timed_out = 0` reset at
+#   ngx_autocert_order.c:1512, and no POSIX test can: the flag's ONLY reader is
+#   at :1332, which sits inside the `#if (NGX_WIN32)` arm opened at :1296 and
+#   closed by `#else` at :1340. On POSIX the flag is written and never read --
+#   a timed-out hook is detected instead by `!WIFEXITED(status)` at :1360,
+#   entirely independently of it. Confirmed by mutation: deleting the :1512
+#   reset leaves this test green, because nothing on POSIX observes the flag.
+#   The reset therefore matters only on win32, which has no behavioral lane
+#   here (no Windows host / Pebble-on-Windows). Until such a lane exists,
+#   ci/tests/unit/assert_dns_hook_timeout_reset.sh -- weak as a source-text
+#   assertion is -- stays as the only guard on the win32-relevant invariant,
+#   and must NOT be dropped on the strength of this file.
 #
 # A deterministic mock ACME CA stands in for Pebble (same technique as
 # mock-order-poll-retry.sh): it serves exactly one authorization fetch (the
