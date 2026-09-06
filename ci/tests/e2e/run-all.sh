@@ -106,6 +106,7 @@ SCRIPTS=(
   account-migration.sh
   dns01-order.sh
   dns01-exec-hook.sh
+  mock-dns-hook-timeout-reset.sh:sudo
   wildcard-issue.sh
   wildcard-shared.sh
   runtime-issue.sh
