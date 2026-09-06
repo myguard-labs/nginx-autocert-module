@@ -1155,7 +1155,11 @@ ngx_autocert_open_file_path(const char *path, int flags)
  *
  * Contract: the caller has already walked every ACE in the file's DACL and
  * reduced each one to a (is_owner, is_allow, is_tolerated, is_write) tuple:
- *   - is_owner:     the ACE's SID equals the file owner's SID (EqualSid).
+ *   - is_owner:     the ACE's SID equals the file owner's SID or the
+ *                    process token user's SID (EqualSid). The two differ
+ *                    for an elevated administrator, whose objects are owned
+ *                    by BUILTIN\Administrators while the ACE names the
+ *                    account itself.
  *   - is_allow:     the ACE type is ACCESS_ALLOWED_ACE_TYPE (a DENY ACE
  *                    grants nothing and is not evidence of exposure).
  *   - is_tolerated: the ACE's SID is SYSTEM or the local Administrators
@@ -1165,9 +1169,15 @@ ngx_autocert_open_file_path(const char *path, int flags)
  *                    regardless of this DACL, so flagging them would make
  *                    the guard permanently unusable (every Windows file has
  *                    an implicit Administrators/SYSTEM grant somewhere)
- *                    without adding any real security. Nothing else is
- *                    tolerated: a non-owner, non-tolerated ALLOW ace is
- *                    exactly the exposure account.c's guard exists to catch.
+ *                    without adding any real security. CREATOR OWNER
+ *                    (S-1-3-0) is tolerated too: it is a placeholder that
+ *                    grants nothing on the object and, on a child, only to
+ *                    that child's creator. Nothing else is tolerated: a
+ *                    non-owner, non-tolerated ALLOW ace is exactly the
+ *                    exposure account.c's guard exists to catch. Inherit-only
+ *                    ACEs are NOT skipped by the caller: one naming a real
+ *                    foreign principal becomes effective on children the
+ *                    module creates without re-permissioning.
  *   - is_write:     the ACE's access mask grants a write-ish right, as
  *                    decided by ngx_autocert_win32_mask_is_write() below.
  *                    A foreign ALLOW without one is a READ grant only.

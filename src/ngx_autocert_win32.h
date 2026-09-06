@@ -503,9 +503,11 @@ ngx_autocert_fsync_dir(int fd)
  * ngx_autocert_account.c's DACL-derived mode check, which is what actually
  * verifies this on read-back).
  *
- * The DACL itself is built and applied by ngx_autocert_win32_set_owner_dacl()
- * below, shared with ngx_autocert_mkdirat()'s 0700 directory arm: it grants
- * the owner SID and the process token user SID and strips inheritance
+ * The DACL itself is built by ngx_autocert_win32_build_owner_dacl() below
+ * (shared with ngx_autocert_mkdirat()'s 0700 directory arm, which hands it
+ * to the kernel at creation) and applied by
+ * ngx_autocert_win32_set_owner_dacl(): it grants the owner SID and the
+ * process token user SID and strips inheritance
  * (PROTECTED_DACL_SECURITY_INFORMATION — see that helper for why the flag
  * is load-bearing).
  *
@@ -517,28 +519,32 @@ ngx_autocert_fsync_dir(int fd)
  * fchmod has no such caller.
  */
 /*
- * The process token's user SID — win32's nearest analogue of geteuid(). On
- * Windows the OWNER of an object an administrator creates is the
- * BUILTIN\Administrators group, not the administrator's own account, so an
- * ACE naming the account nginx runs as is NOT the owner's ACE and would read
- * as a foreign grant. Both the DACL writer and the DACL reader below treat
- * this SID as "us" alongside the owner. Fills `buf` (SECURITY_MAX_SID_SIZE
- * bytes); returns ERROR_SUCCESS or the Win32 error, never a mapped errno.
+ * A SID off the process token: the token USER (win32's nearest analogue of
+ * geteuid()) or the token's default OWNER (the SID a new object will be
+ * owned by — BUILTIN\Administrators for an elevated administrator, the user
+ * itself otherwise). On Windows the OWNER of an object an administrator
+ * creates is the Administrators group, not the administrator's own account,
+ * so an ACE naming the account nginx runs as is NOT the owner's ACE and
+ * would read as a foreign grant. Both the DACL writer and the DACL reader
+ * below treat the token user as "us" alongside the owner. Fills `buf`
+ * (SECURITY_MAX_SID_SIZE bytes); returns ERROR_SUCCESS or the Win32 error,
+ * never a mapped errno.
  */
 static ngx_inline DWORD
-ngx_autocert_win32_token_user_sid(BYTE *buf, DWORD buf_len)
+ngx_autocert_win32_token_sid(TOKEN_INFORMATION_CLASS cls, BYTE *buf,
+    DWORD buf_len)
 {
-    HANDLE       tok;
-    DWORD        need, err;
-    BYTE         raw[sizeof(TOKEN_USER) + SECURITY_MAX_SID_SIZE];
-    TOKEN_USER  *tu;
+    HANDLE  tok;
+    DWORD   need, err;
+    BYTE    raw[sizeof(TOKEN_USER) + SECURITY_MAX_SID_SIZE];
+    PSID    sid;
 
     if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &tok)) {
         return GetLastError();
     }
 
     need = 0;
-    if (!GetTokenInformation(tok, TokenUser, raw, sizeof(raw), &need)) {
+    if (!GetTokenInformation(tok, cls, raw, sizeof(raw), &need)) {
         err = GetLastError();
         CloseHandle(tok);
         return err;
@@ -546,14 +552,19 @@ ngx_autocert_win32_token_user_sid(BYTE *buf, DWORD buf_len)
 
     CloseHandle(tok);
 
-    tu = (TOKEN_USER *) raw;
-    if (tu->User.Sid == NULL || !IsValidSid(tu->User.Sid)
-        || GetLengthSid(tu->User.Sid) > buf_len)
-    {
+    if (cls == TokenUser) {
+        sid = ((TOKEN_USER *) raw)->User.Sid;
+    } else if (cls == TokenOwner) {
+        sid = ((TOKEN_OWNER *) raw)->Owner;
+    } else {
+        return ERROR_INVALID_PARAMETER;
+    }
+
+    if (sid == NULL || !IsValidSid(sid) || GetLengthSid(sid) > buf_len) {
         return ERROR_INVALID_SID;
     }
 
-    if (!CopySid(buf_len, (PSID) buf, tu->User.Sid)) {
+    if (!CopySid(buf_len, (PSID) buf, sid)) {
         return GetLastError();
     }
 
@@ -562,54 +573,29 @@ ngx_autocert_win32_token_user_sid(BYTE *buf, DWORD buf_len)
 
 
 /*
- * Replace the object's DACL with one that grants `mask` to the object's
- * OWNER and to the process token user (one ACE when they are the same SID,
- * two when an administrator created the object and the owner is therefore
- * BUILTIN\Administrators) and nothing to anyone else. `inherit` is the
- * EXPLICIT_ACCESS inheritance word: NO_INHERITANCE for a file,
- * SUB_CONTAINERS_AND_OBJECTS_INHERIT for a directory so what the module
- * creates inside it starts owner-only too.
- *
- * PROTECTED_DACL_SECURITY_INFORMATION is the load-bearing flag here, not an
- * optional hardening extra: SetSecurityInfo() without it MERGES the new DACL
- * with inherited ACEs from the parent directory rather than replacing them,
- * and a parent commonly carries an inherited grant to Users or Authenticated
- * Users (every stock volume root grants Authenticated Users Modify). Omitting
- * it would leave the object open to exactly the principals this exists to
- * lock out, while every other part of the call appears to succeed. Setting
- * it strips inheritance and makes the DACL built here the ENTIRE effective
- * DACL.
- *
- * Returns ERROR_SUCCESS or the raw Win32 error; callers map to errno.
+ * Build a DACL that grants `mask` to `owner` and to the process token user
+ * (one ACE when they are the same SID, two when an administrator created the
+ * object and the owner is therefore BUILTIN\Administrators) and nothing to
+ * anyone else. `inherit` is the EXPLICIT_ACCESS inheritance word:
+ * NO_INHERITANCE for a file, SUB_CONTAINERS_AND_OBJECTS_INHERIT for a
+ * directory so what the module creates inside it starts owner-only too.
+ * *out is LocalAlloc'd; the caller LocalFree()s it. Returns ERROR_SUCCESS or
+ * the raw Win32 error.
  */
 static ngx_inline DWORD
-ngx_autocert_win32_set_owner_dacl(HANDLE h, DWORD mask, DWORD inherit)
+ngx_autocert_win32_build_owner_dacl(PSID owner, DWORD mask, DWORD inherit,
+    PACL *out)
 {
-    PSID                  owner, user;
-    PSECURITY_DESCRIPTOR  owner_sd;
-    PACL                  new_dacl;
-    EXPLICIT_ACCESS_W     ea[2];
-    BYTE                  user_buf[SECURITY_MAX_SID_SIZE];
-    ULONG                 n;
-    DWORD                 err;
+    PSID               user;
+    EXPLICIT_ACCESS_W  ea[2];
+    BYTE               user_buf[SECURITY_MAX_SID_SIZE];
+    ULONG              n;
+    DWORD              err;
 
-    owner = NULL;
-    owner_sd = NULL;
+    *out = NULL;
 
-    err = GetSecurityInfo(h, SE_KERNEL_OBJECT, OWNER_SECURITY_INFORMATION,
-                           &owner, NULL, NULL, NULL, &owner_sd);
+    err = ngx_autocert_win32_token_sid(TokenUser, user_buf, sizeof(user_buf));
     if (err != ERROR_SUCCESS) {
-        return err;
-    }
-
-    if (owner == NULL) {
-        LocalFree(owner_sd);
-        return ERROR_INVALID_OWNER;
-    }
-
-    err = ngx_autocert_win32_token_user_sid(user_buf, sizeof(user_buf));
-    if (err != ERROR_SUCCESS) {
-        LocalFree(owner_sd);
         return err;
     }
     user = (PSID) user_buf;
@@ -629,8 +615,48 @@ ngx_autocert_win32_set_owner_dacl(HANDLE h, DWORD mask, DWORD inherit)
         n = 2;
     }
 
-    new_dacl = NULL;
-    err = SetEntriesInAclW(n, ea, NULL, &new_dacl);
+    return SetEntriesInAclW(n, ea, NULL, out);
+}
+
+
+/*
+ * Replace an existing object's DACL with the owner-only one above.
+ *
+ * PROTECTED_DACL_SECURITY_INFORMATION is the load-bearing flag here, not an
+ * optional hardening extra: SetSecurityInfo() without it MERGES the new DACL
+ * with inherited ACEs from the parent directory rather than replacing them,
+ * and a parent commonly carries an inherited grant to Users or Authenticated
+ * Users (every stock volume root grants Authenticated Users Modify). Omitting
+ * it would leave the object open to exactly the principals this exists to
+ * lock out, while every other part of the call appears to succeed. Setting
+ * it strips inheritance and makes the DACL built here the ENTIRE effective
+ * DACL.
+ *
+ * Returns ERROR_SUCCESS or the raw Win32 error; callers map to errno.
+ */
+static ngx_inline DWORD
+ngx_autocert_win32_set_owner_dacl(HANDLE h, DWORD mask, DWORD inherit)
+{
+    PSID                  owner;
+    PSECURITY_DESCRIPTOR  owner_sd;
+    PACL                  new_dacl;
+    DWORD                 err;
+
+    owner = NULL;
+    owner_sd = NULL;
+
+    err = GetSecurityInfo(h, SE_KERNEL_OBJECT, OWNER_SECURITY_INFORMATION,
+                           &owner, NULL, NULL, NULL, &owner_sd);
+    if (err != ERROR_SUCCESS) {
+        return err;
+    }
+
+    if (owner == NULL) {
+        LocalFree(owner_sd);
+        return ERROR_INVALID_OWNER;
+    }
+
+    err = ngx_autocert_win32_build_owner_dacl(owner, mask, inherit, &new_dacl);
     if (err != ERROR_SUCCESS) {
         LocalFree(owner_sd);
         return err;
@@ -1165,8 +1191,9 @@ ngx_autocert_win32_oa(NGX_AUTOCERT_OBJECT_ATTRIBUTES *oa,
  * leaf-open incl. O_CREAT) share this without duplicating the NT call.
  */
 static ngx_inline int
-ngx_autocert_win32_ntopen(int dfd, const char *name, ULONG desired_access,
-    ULONG create_disposition, ULONG create_options_extra, int crt_flags)
+ngx_autocert_win32_ntopen_sd(int dfd, const char *name, ULONG desired_access,
+    ULONG create_disposition, ULONG create_options_extra, int crt_flags,
+    PSECURITY_DESCRIPTOR sd)
 {
     NGX_AUTOCERT_OBJECT_ATTRIBUTES  oa;
     NGX_AUTOCERT_UNICODE_STRING     us;
@@ -1192,6 +1219,12 @@ ngx_autocert_win32_ntopen(int dfd, const char *name, ULONG desired_access,
         return -1;
     }
 
+    /* A caller-supplied security descriptor is applied by the kernel AT
+     * creation, so a new directory never exists for a moment with the
+     * parent's inherited DACL (ngx_autocert_mkdirat below). NULL keeps the
+     * default: inherit from the parent. */
+    oa.SecurityDescriptor = sd;
+
     ngx_memzero(&iosb, sizeof(iosb));
 
     status = ngx_autocert_pfn_NtCreateFile(&h, desired_access, &oa, &iosb,
@@ -1216,6 +1249,17 @@ ngx_autocert_win32_ntopen(int dfd, const char *name, ULONG desired_access,
     }
 
     return fd;
+}
+
+
+static ngx_inline int
+ngx_autocert_win32_ntopen(int dfd, const char *name, ULONG desired_access,
+    ULONG create_disposition, ULONG create_options_extra, int crt_flags)
+{
+    return ngx_autocert_win32_ntopen_sd(dfd, name, desired_access,
+                                        create_disposition,
+                                        create_options_extra, crt_flags,
+                                        NULL);
 }
 
 
@@ -1390,49 +1434,89 @@ ngx_autocert_openat_mode(int dfd, const char *name, int flags,
  * create-or-EEXIST, matching mkdirat()'s contract (callers here test
  * ngx_errno == NGX_EEXIST on failure, never fall through on a pre-existing
  * dir). No handle is kept open — the directory is created, not opened for
- * later use, so it is closed immediately after the DACL below is applied.
+ * later use, so it is closed immediately.
  */
 static ngx_inline int
 ngx_autocert_mkdirat(int dfd, const char *name, ngx_autocert_mode_t mode)
 {
-    HANDLE  h;
-    DWORD   err;
-    int     fd;
+    SECURITY_DESCRIPTOR   sd;
+    PSECURITY_DESCRIPTOR  psd;
+    PACL                  dacl;
+    BYTE                  owner_buf[SECURITY_MAX_SID_SIZE];
+    DWORD                 err;
+    int                   fd;
 
-    fd = ngx_autocert_win32_ntopen(dfd, name,
-        FILE_LIST_DIRECTORY | FILE_TRAVERSE | SYNCHRONIZE
-        | READ_CONTROL | WRITE_DAC,
-        NGX_AUTOCERT_FILE_CREATE,
-        NGX_AUTOCERT_FILE_DIRECTORY_FILE
-        | NGX_AUTOCERT_FILE_OPEN_FOR_BACKUP_INTENT,
-        _O_RDONLY);
-    if (fd == -1) {
-        return -1;
-    }
+    psd = NULL;
+    dacl = NULL;
 
     /* A 0700 mkdir on POSIX yields a directory nobody else can enter or
      * write. NtCreateFile instead INHERITS the parent's DACL, and every stock
      * volume root grants Authenticated Users Modify, so without this the
      * store directory this module creates for itself would be refused by
      * its own ngx_autocert_check_owner_mode() guard a moment later — and,
-     * worse, genuinely be plantable by any local user. Replace the DACL
-     * with an owner-only one, inheritable so files and subdirectories the
-     * module creates inside start owner-only as well. Modes that grant
-     * group/other bits (the 0755 `live` dir) keep the inherited DACL, which
-     * inside a 0700 store is already the owner-only one. Failure here is a
-     * failed mkdir: a directory left with the inherited DACL is exactly the
-     * exposure the guard exists to catch, so do not report success and let
-     * the guard's error explain it less precisely. */
+     * worse, genuinely be plantable by any local user. Hand the kernel an
+     * owner-only, SE_DACL_PROTECTED descriptor AT creation: the directory
+     * then never exists, even for an instant, with the inherited DACL that a
+     * concurrent foreign open could have used to obtain a handle it keeps
+     * after a later re-permissioning. The owner is the token's default
+     * owner, which is what the kernel will stamp on the new object; the
+     * token user is granted alongside it (they differ for an elevated
+     * administrator). Inheritable, so what the module creates inside starts
+     * owner-only as well. Modes that grant group/other bits (the 0755
+     * `live` dir) keep the inherited DACL, which inside a 0700 store is
+     * already the owner-only one. */
     if ((mode & (S_IRWXG | S_IRWXO)) == 0) {
-        h = ngx_autocert_fd_handle(fd);
-        err = ngx_autocert_win32_set_owner_dacl(h,
-                  FILE_ALL_ACCESS, SUB_CONTAINERS_AND_OBJECTS_INHERIT);
+        err = ngx_autocert_win32_token_sid(TokenOwner, owner_buf,
+                                           sizeof(owner_buf));
         if (err != ERROR_SUCCESS) {
-            _close(fd);
             SetLastError(err);
             errno = ngx_autocert_win32_errno(err);
             return -1;
         }
+
+        err = ngx_autocert_win32_build_owner_dacl((PSID) owner_buf,
+                  FILE_ALL_ACCESS, SUB_CONTAINERS_AND_OBJECTS_INHERIT,
+                  &dacl);
+        if (err != ERROR_SUCCESS) {
+            SetLastError(err);
+            errno = ngx_autocert_win32_errno(err);
+            return -1;
+        }
+
+        /* SE_DACL_PROTECTED is what stops the kernel from ADDING the
+         * parent's inheritable ACEs to the explicit DACL during creation;
+         * without it the descriptor is merged, not applied, and the
+         * Authenticated Users grant is right back. */
+        if (!InitializeSecurityDescriptor(&sd, SECURITY_DESCRIPTOR_REVISION)
+            || !SetSecurityDescriptorDacl(&sd, TRUE, dacl, FALSE)
+            || !SetSecurityDescriptorControl(&sd, SE_DACL_PROTECTED,
+                                             SE_DACL_PROTECTED))
+        {
+            err = GetLastError();
+            LocalFree(dacl);
+            SetLastError(err);
+            errno = ngx_autocert_win32_errno(err);
+            return -1;
+        }
+
+        psd = &sd;
+    }
+
+    fd = ngx_autocert_win32_ntopen_sd(dfd, name,
+        FILE_LIST_DIRECTORY | FILE_TRAVERSE | SYNCHRONIZE,
+        NGX_AUTOCERT_FILE_CREATE,
+        NGX_AUTOCERT_FILE_DIRECTORY_FILE
+        | NGX_AUTOCERT_FILE_OPEN_FOR_BACKUP_INTENT,
+        _O_RDONLY, psd);
+
+    err = GetLastError();
+    if (dacl != NULL) {
+        LocalFree(dacl);
+    }
+
+    if (fd == -1) {
+        SetLastError(err);
+        return -1;
     }
 
     _close(fd);
@@ -1546,7 +1630,9 @@ ngx_autocert_win32_mode_from_dacl(HANDLE h, ngx_autocert_mode_t *mode_bits)
     BYTE                   system_buf[SECURITY_MAX_SID_SIZE];
     BYTE                   admins_buf[SECURITY_MAX_SID_SIZE];
     BYTE                   user_buf[SECURITY_MAX_SID_SIZE];
-    PSID                   user_sid;
+    BYTE                   creator_buf[SECURITY_MAX_SID_SIZE];
+    PSID                   user_sid, creator_sid;
+    DWORD                  creator_len;
     DWORD                  system_len, admins_len, i, err;
     ngx_uint_t             n;
 
@@ -1621,7 +1707,7 @@ ngx_autocert_win32_mode_from_dacl(HANDLE h, ngx_autocert_mode_t *mode_bits)
      * ACE and would otherwise count as a foreign write grant on the store
      * the module created for itself. Fail closed if the token cannot be
      * read, like every other error on this path. */
-    err = ngx_autocert_win32_token_user_sid(user_buf, sizeof(user_buf));
+    err = ngx_autocert_win32_token_sid(TokenUser, user_buf, sizeof(user_buf));
     if (err != ERROR_SUCCESS) {
         LocalFree(sd);
         SetLastError(err);
@@ -1629,6 +1715,27 @@ ngx_autocert_win32_mode_from_dacl(HANDLE h, ngx_autocert_mode_t *mode_bits)
         return -1;
     }
     user_sid = (PSID) user_buf;
+
+    /* CREATOR OWNER (S-1-3-0) is a placeholder, not a principal: an
+     * inherit-only ACE naming it means "whoever creates a child owns that
+     * child's copy". It grants nothing on this object and, on a child, only
+     * to the child's creator — who needed write on this directory already.
+     * Every stock directory carries one; tolerate it by SID rather than
+     * skipping inherit-only ACEs wholesale, because an inherit-only ACE for
+     * a REAL foreign principal does become effective on the children the
+     * module creates without re-permissioning them (the 0755 `live` dir),
+     * and must keep flagging the store. */
+    creator_len = sizeof(creator_buf);
+    if (!CreateWellKnownSid(WinCreatorOwnerSid, NULL, creator_buf,
+                             &creator_len))
+    {
+        err = GetLastError();
+        LocalFree(sd);
+        SetLastError(err);
+        errno = ngx_autocert_win32_errno(err);
+        return -1;
+    }
+    creator_sid = (PSID) creator_buf;
 
     ngx_memzero(&size_info, sizeof(size_info));
     if (!GetAclInformation(dacl, &size_info, sizeof(size_info),
@@ -1666,16 +1773,6 @@ ngx_autocert_win32_mode_from_dacl(HANDLE h, ngx_autocert_mode_t *mode_bits)
             return -1;
         }
 
-        /* An inherit-only ACE exists to be copied onto children and grants
-         * nothing on THIS object (the CREATOR OWNER full-control ACE every
-         * stock directory carries is the common one); it is not evidence
-         * about this object's exposure either way, so it is skipped rather
-         * than counted. Skipping keeps n honest: a DACL of only inherit-only
-         * ACEs walks to n == 0 and is flagged by the decision core. */
-        if (hdr->AceFlags & INHERIT_ONLY_ACE) {
-            continue;
-        }
-
         /* Only the two ACE types this DACL can actually contain matter:
          * ALLOW grants access (the exposure this guard looks for), DENY
          * grants nothing so it is never evidence of exposure. Anything else
@@ -1704,7 +1801,8 @@ ngx_autocert_win32_mode_from_dacl(HANDLE h, ngx_autocert_mode_t *mode_bits)
         is_owner[n] = ((owner != NULL && EqualSid(ace_sid, owner))
                        || EqualSid(ace_sid, user_sid)) ? 1 : 0;
         is_tolerated[n] = (EqualSid(ace_sid, system_sid)
-                            || EqualSid(ace_sid, admins_sid)) ? 1 : 0;
+                            || EqualSid(ace_sid, admins_sid)
+                            || EqualSid(ace_sid, creator_sid)) ? 1 : 0;
         is_write[n] = ngx_autocert_win32_mask_is_write((uint32_t) mask);
         n++;
     }
