@@ -181,6 +181,16 @@ typedef struct {
 #ifndef S_IRWXO
 #define S_IRWXO  0000007
 #endif
+/* The individual WRITE bits, needed separately from the S_IRWX* groups:
+ * ngx_autocert_check_owner_mode() refuses only group/other WRITE on a
+ * non-secret path (a store directory), while still refusing every group/other
+ * bit on a secret. MSVC's <sys/stat.h> defines neither, so both are ours. */
+#ifndef S_IWGRP
+#define S_IWGRP  0000020
+#endif
+#ifndef S_IWOTH
+#define S_IWOTH  0000002
+#endif
 
 
 /*

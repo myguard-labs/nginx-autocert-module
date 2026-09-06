@@ -1,4 +1,4 @@
-# sync-sha: 64228d6f058a954a3aaf7649158d9473382c7391d77f713353d94d20843fb725
+# sync-sha: ccbc872245ae36268ac5c6597ff082924a21d23f51cf0613cfd1d924069c5a77
 name: Build module + load/serve tests
 description: >
   Fetch one flavor (nginx | angie), configure + build the autocert dynamic
@@ -105,6 +105,14 @@ runs:
         BIN="$SERVER_BIN"
         MOD="$PWD/objs/ngx_http_autocert_module.so"
         PREFIX=/tmp/ngx-test
+        # rm first: this is a FIXED path on a persistent self-hosted runner, so
+        # $PREFIX/store survives between jobs. The driver creates its own store
+        # at 0700, but it ADOPTS one that already exists — and a leftover from a
+        # runner whose umask is 0002 is 0775, which the driver then refuses as
+        # group-writable ("store directory is writable by group/other"). The
+        # refusal is correct; the stale directory is the bug. Starting clean
+        # also keeps the assertions below from reading a previous run's state.
+        rm -rf "$PREFIX"
         mkdir -p "$PREFIX/logs" "$PREFIX/conf"
         cat > "$PREFIX/conf/nginx.conf" <<EOF
         load_module $MOD;
@@ -161,6 +169,7 @@ runs:
         BIN="$SERVER_BIN"
         MOD="$PWD/objs/ngx_http_autocert_module.so"
         PREFIX=/tmp/ngx-bad
+        rm -rf "$PREFIX"          # fixed path, persistent runner — see above
         mkdir -p "$PREFIX/logs" "$PREFIX/conf"
 
         # Each case: a description, the http{} body, and the substring the

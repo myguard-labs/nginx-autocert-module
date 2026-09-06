@@ -26,16 +26,15 @@
 set -uo pipefail
 
 # Every script below creates its store directory with a plain `mkdir -p`, so
-# the mode it lands on comes from the AMBIENT umask. The driver refuses a
-# store directory that group/other can write (another local user could plant
-# certificate material under it), which makes the whole suite's result depend
-# on who runs it: 0022 gives an acceptable 0755, while 0002 — a common
-# developer and CI-image default — gives 0775 and every store-using test
-# fails with "store directory is writable by group/other".
+# the mode comes from the AMBIENT umask. The driver refuses a store directory
+# that group/other can WRITE (that is what would let another local user plant
+# certificate material under it), so on a 0002 umask — a common developer and
+# CI-image default — a 0775 store is correctly refused and the suite's result
+# would otherwise depend on who runs it.
 #
-# Pin it here, once, rather than in each of the ~40 scripts. Tests that need
+# Pin it here, once, rather than in each of the ~40 scripts. A test that wants
 # to assert the driver's behaviour on a deliberately loose directory should
-# chmod that directory explicitly rather than relying on the umask.
+# chmod that directory explicitly rather than rely on the umask.
 umask 0022
 
 SERVER_BIN="${SERVER_BIN:?set SERVER_BIN to the built nginx/angie binary}"
