@@ -325,6 +325,26 @@ gcc -D_GNU_SOURCE -Wall -Wextra -Werror -Ici/tests/unit -I"$WORKSPACE" \
 	"$WORKSPACE/ci/tests/unit/test_slot_fresh.c"
 "$BUILD_DIR/test_slot_fresh"
 
+# dns-01 orphan-reap table (audit MAJOR/Robustness): ngx_autocert_order_free()
+# used to reap the SIGKILLed dns-01 hook child with a BLOCKING waitpid(), which
+# parks the worker event loop when the child is wedged in uninterruptible
+# kernel I/O (hung NFS/FUSE under the hook binary) and SIGKILL does not land.
+# The pid is now handed to a module-scoped table reaped by a standalone
+# WNOHANG timer. The table is static inside ngx_autocert_order.c -- the ACME
+# order state machine, far too heavy to include-shim -- so extract_orphan.sh
+# slices just the table, add() and reap() out of the shipped source. waitpid is
+# injected, so "child that never exits" is modelled exactly, and the fake
+# waitpid FAILS the run if the reaper ever asks for a blocking wait. No nginx
+# objects: the slice touches only ngx_str/ngx_log declarations, and this TU
+# stubs ngx_log_error_core/ngx_cycle itself (same idiom as test_ratecap.c).
+bash "$WORKSPACE/ci/tests/unit/extract_orphan.sh"
+# shellcheck disable=SC2086
+gcc -D_GNU_SOURCE -Wall -Wextra -Werror -Ici/tests/unit -I"$WORKSPACE" \
+	$CORE_INC \
+	-o "$BUILD_DIR/test_orphan_reap" \
+	"$WORKSPACE/ci/tests/unit/test_orphan_reap.c"
+"$BUILD_DIR/test_orphan_reap"
+
 # Config-time name/contact validation (audit MINOR): server_name/
 # autocert_wildcard values land verbatim, unescaped, in the ACME newOrder
 # JSON and as a filesystem path segment; autocert_contact's email is
