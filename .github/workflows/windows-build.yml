@@ -1,4 +1,4 @@
-# sync-sha: 66fbe18632e9fec278cd89f506f5a63ad2fb6dd326aee396d9805b43cdd0a2ad
+# sync-sha: 8a00d132a3e11f87f2d885b33ac92b7bbe2683db3d36243d8ff9eec214143391
 name: Windows build
 
 # Native Windows port gate (W17). Proves the module compiles and links on
@@ -1285,6 +1285,341 @@ jobs:
               if (-not $proc.WaitForExit(10000)) {
                 Write-Host "nginx did not exit on -s stop; killing"
                 Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+              }
+              Get-Process -Name nginx -ErrorAction SilentlyContinue |
+                Stop-Process -Force -ErrorAction SilentlyContinue
+              $ErrorActionPreference = $prev
+            }
+          }
+          finally {
+            if ($pebbleProc -and -not $pebbleProc.HasExited) {
+              Stop-Process -Id $pebbleProc.Id -Force -ErrorAction SilentlyContinue
+              $pebbleProc.WaitForExit(10000) | Out-Null
+            }
+            Get-Process -Name 'pebble*' -ErrorAction SilentlyContinue |
+              Stop-Process -Force -ErrorAction SilentlyContinue
+          }
+
+          exit 0
+
+      # ---------------------------------------------------------------------
+      # SECOND ISSUANCE / RENEWAL.
+      #
+      # The issuance step above only ever issues ONCE, against an empty store.
+      # That exercises the first-issuance commit branch in
+      # ngx_autocert_order_store_pair() (no live dir -> a single
+      # RENAME_NOREPLACE), and NOTHING else. The renewal branch -- replacing an
+      # EXISTING live <seg> dir -- was completely uncovered on win32, which is
+      # how a permanently broken win32 renewal shipped: NTFS cannot rename over
+      # an existing directory, so the RENAME_EXCHANGE path is unreachable there
+      # and every renewal failed while first issuance kept passing CI.
+      #
+      # Method (mirrors ci/tests/e2e/renewal.sh):
+      #   - Pebble issues SHORT-lived certs (profiles.default.validityPeriod 3600 =
+      #     1h) and autocert_renew_before is 2h. 2h > 1h means a freshly issued
+      #     cert is ALWAYS already inside its renew window, so the next scan
+      #     reissues it. No clock skew, no waiting.
+      #   - Issue once, record the serial, restart, and require a DIFFERENT
+      #     serial in the same store path.
+      #
+      # The serial is the oracle: it is chosen by the CA and differs on every
+      # issuance, so a changed serial at the same path proves a SECOND
+      # certificate was issued AND published over the first. Asserting merely
+      # that the files exist would pass against the unfixed code, because the
+      # FIRST cert is still sitting there -- that is exactly the vacuous
+      # assertion this step must avoid.
+      - name: Runtime ACME renewal test (second issuance replaces the live cert)
+        shell: pwsh
+        working-directory: nginx-${{ env.NGINX_VERSION }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          $root   = 'w18r'
+          $hostIp = '127.0.0.1'
+          $httpPort   = 5012
+          $pebblePort = 14010
+
+          Remove-Item -Recurse -Force $root -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Force `
+            -Path $root, "$root/conf", "$root/logs", "$root/temp", `
+                  "$root/store" | Out-Null
+
+          # Reuse the Pebble binary and PEMs the issuance step already fetched
+          # and sha256-verified into w18b/. Re-downloading would double the
+          # network surface and the pin maintenance for no extra coverage.
+          $srcRoot = 'w18b'
+          $pebbleExe = Get-ChildItem -Path "$srcRoot/pebble" -Filter 'pebble*.exe' `
+            -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $pebbleExe) {
+            throw "renewal step: pebble.exe not found under $srcRoot/pebble (did the issuance step run?)"
+          }
+          foreach ($f in @('ca.pem', 'pebble-cert.pem', 'pebble-key.pem')) {
+            if (-not (Test-Path "$srcRoot/$f")) {
+              throw "renewal step: missing $srcRoot/$f (did the issuance step run?)"
+            }
+            Copy-Item "$srcRoot/$f" "$root/$f" -Force
+          }
+          $pebbleCert = Get-Item "$root/pebble-cert.pem"
+          $pebbleKey  = Get-Item "$root/pebble-key.pem"
+
+          # The profile validityPeriod is what makes renew_before 2h bite: a 1h
+          # cert is inside a 2h renew window the moment it is issued.
+          $pebbleConfig = @{
+            pebble = @{
+              listenAddress               = "0.0.0.0:$pebblePort"
+              managementListenAddress     = '0.0.0.0:15010'
+              certificate                 = $pebbleCert.FullName -replace '\\', '/'
+              privateKey                  = $pebbleKey.FullName -replace '\\', '/'
+              httpPort                    = $httpPort
+              tlsPort                     = 5998
+              ocspResponderURL            = ''
+              externalAccountBindingRequired = $false
+              # Validity comes from the PROFILE, not the legacy top-level
+              # certificateValidityPeriod key -- this Pebble reads profiles and
+              # silently ignores the old key even under -strict, which made the
+              # lane issue 90d certs and never renew. Matches
+              # ci/tests/e2e/renewal.sh.
+              profiles                    = @{
+                default = @{
+                  description    = 'short-lived certs so renew_before forces a renewal'
+                  validityPeriod = 3600
+                }
+              }
+            }
+          } | ConvertTo-Json -Depth 5
+          Set-Content -Encoding ascii -Path "$root/pebble-config.json" -Value $pebbleConfig
+
+          $prevNoSleep     = $env:PEBBLE_VA_NOSLEEP
+          $prevNonceReject = $env:PEBBLE_WFE_NONCEREJECT
+          $env:PEBBLE_VA_NOSLEEP = '1'
+          $env:PEBBLE_WFE_NONCEREJECT = '0'
+          $pebbleOut = "$root/pebble-stdout.log"
+          $pebbleErr = "$root/pebble-stderr.log"
+          $pebbleProc = Start-Process -FilePath $pebbleExe.FullName `
+            -ArgumentList '-config', (Resolve-Path "$root/pebble-config.json").Path, `
+                           '-strict' `
+            -RedirectStandardOutput $pebbleOut -RedirectStandardError $pebbleErr `
+            -PassThru -NoNewWindow
+          $env:PEBBLE_VA_NOSLEEP = $prevNoSleep
+          $env:PEBBLE_WFE_NONCEREJECT = $prevNonceReject
+          Start-Sleep -Seconds 2
+          if ($pebbleProc.HasExited) {
+            Get-Content $pebbleOut, $pebbleErr -ErrorAction SilentlyContinue | Write-Host
+            throw "pebble.exe exited immediately with $($pebbleProc.ExitCode)"
+          }
+
+          # Locate openssl.exe once, same candidate order as the issuance step.
+          $cmd = Get-Command openssl -ErrorAction SilentlyContinue
+          $candidates = @(
+            $(if ($cmd) { $cmd.Source }),
+            "$env:OPENSSL_STAGE\openssl\tools\openssl\openssl.exe",
+            "$env:OPENSSL_ROOT\tools\openssl\openssl.exe",
+            'C:\vcpkg\installed\x64-windows\tools\openssl\openssl.exe',
+            'C:\Program Files\OpenSSL-Win64\bin\openssl.exe'
+          ) | Where-Object { $_ }
+          $openssl = $null
+          foreach ($c in $candidates) { if (Test-Path $c) { $openssl = $c; break } }
+          if (-not $openssl) {
+            foreach ($searchRoot in @("$env:OPENSSL_ROOT", "$env:OPENSSL_STAGE",
+                                 'C:\vcpkg\installed\x64-windows',
+                                 'C:\Program Files\OpenSSL-Win64')) {
+              if ($searchRoot -and (Test-Path $searchRoot)) {
+                $hit = Get-ChildItem -Path $searchRoot -Recurse -Filter 'openssl.exe' `
+                         -ErrorAction SilentlyContinue | Select-Object -First 1
+                if ($hit) { $openssl = $hit.FullName; break }
+              }
+            }
+          }
+          if (-not $openssl) { throw "renewal step: openssl.exe not found" }
+
+          # Prove it RUNS, not just that it exists. A present-but-unusable
+          # openssl (missing DLL, wrong arch) makes every Get-Serial return
+          # $null, so Wait-Serial would burn its full timeout and then report
+          # "no certificate was issued" -- blaming the module for a broken
+          # tool. Fail fast and say which it was.
+          $prevEap = $ErrorActionPreference
+          $ErrorActionPreference = 'Continue'
+          $vOut = (& $openssl version 2>&1 | Out-String)
+          $vRc  = $LASTEXITCODE
+          $ErrorActionPreference = $prevEap
+          if ($vRc -ne 0) {
+            throw "renewal step: openssl at $openssl is not runnable (exit $vRc): $vOut"
+          }
+          Write-Host "using openssl at $openssl ($($vOut.Trim()))"
+
+          $chain = "$root/store/$hostIp/fullchain.pem"
+          $key   = "$root/store/$hostIp/privkey.pem"
+
+          # Hoisted ABOVE the outer try: the finally blocks below restore
+          # $ErrorActionPreference from $prev, and a throw BEFORE the inner
+          # assignment would leave $prev $null -- silently pinning the shell to
+          # 'Continue' for the rest of the step instead of restoring 'Stop'.
+          $prev = $ErrorActionPreference
+
+          function Get-Serial([string]$path) {
+            if (-not (Test-Path $path)) { return $null }
+            try {
+              $out = & $openssl x509 -in $path -noout -serial 2>$null
+              if ($LASTEXITCODE -ne 0) { return $null }
+              return ($out -join '').Trim()
+            } catch { return $null }
+          }
+
+          # Wait for the store to hold a cert whose serial differs from
+          # $notSerial (pass $null for "any cert at all"). Returns the serial.
+          function Wait-Serial([string]$notSerial, [int]$tries = 90) {
+            foreach ($i in 1..$tries) {
+              $s = Get-Serial $chain
+              if ($s -and ($null -eq $notSerial -or $s -ne $notSerial)) { return $s }
+              Start-Sleep -Milliseconds 500
+            }
+            return $null
+          }
+
+          try {
+            Write-Host "== wait for Pebble directory =="
+            $up = $false
+            foreach ($i in 1..30) {
+              try {
+                Invoke-WebRequest -Uri "https://${hostIp}:${pebblePort}/dir" `
+                  -SkipCertificateCheck -UseBasicParsing `
+                  -ConnectionTimeoutSeconds 5 -OperationTimeoutSeconds 5 | Out-Null
+                $up = $true; break
+              } catch { Start-Sleep -Seconds 1 }
+            }
+            if (-not $up) {
+              Get-Content $pebbleOut, $pebbleErr -ErrorAction SilentlyContinue | Write-Host
+              throw "Pebble did not come up"
+            }
+
+            $store = ((Resolve-Path "$root/store").Path -replace '\\', '/')
+            $ca    = ((Resolve-Path "$root/ca.pem").Path -replace '\\', '/')
+            $lines = @(
+              'error_log logs/error.log info;',
+              'events {}',
+              'http {',
+              '    autocert on;',
+              '    autocert_contact admin@example.com;',
+              "    autocert_ca https://${hostIp}:${pebblePort}/dir;",
+              "    autocert_ca_trusted_certificate $ca;",
+              "    autocert_store_path $store;",
+              '    autocert_challenge http-01;',
+              # 2h > the 1h Pebble lifetime => always inside the renew window.
+              '    autocert_renew_before 2h;',
+              '    server {',
+              "        listen $httpPort;",
+              "        server_name ${hostIp};",
+              '        autocert on;',
+              '    }',
+              '}'
+            )
+            Set-Content -Encoding ascii -Path "$root/conf/nginx.conf" -Value $lines
+
+            $ErrorActionPreference = 'Continue'
+            $tOut = (& .\objs\nginx.exe -p $root -c conf/nginx.conf -t 2>&1 | Out-String)
+            $tRc  = $LASTEXITCODE
+            $ErrorActionPreference = $prev
+            Write-Host $tOut
+            if ($tRc -ne 0) { throw "nginx -t rejected the renewal config" }
+
+            # ---------- pass 1: first issuance (empty store) ----------
+            Write-Host "== pass 1: first issuance =="
+            $proc = Start-Process -FilePath (Resolve-Path .\objs\nginx.exe) `
+                      -ArgumentList '-p', $root, '-c', 'conf/nginx.conf' `
+                      -PassThru -NoNewWindow
+            $serial1 = $null
+            try {
+              Start-Sleep -Seconds 2
+              if ($proc.HasExited) {
+                Get-Content "$root/logs/error.log" -ErrorAction SilentlyContinue | Write-Host
+                throw "nginx.exe exited immediately with $($proc.ExitCode)"
+              }
+              $serial1 = Wait-Serial $null
+              if (-not $serial1) {
+                Get-Content "$root/logs/error.log" -Tail 60 -ErrorAction SilentlyContinue | Write-Host
+                Get-Content $pebbleOut, $pebbleErr -ErrorAction SilentlyContinue |
+                  Select-Object -Last 40 | Write-Host
+                throw "pass 1: no certificate was issued"
+              }
+              Write-Host "OK pass 1 issued: $serial1"
+            }
+            finally {
+              $ErrorActionPreference = 'Continue'
+              & .\objs\nginx.exe -p $root -c conf/nginx.conf -s stop 2>&1 | Out-String | Write-Host
+              if (-not $proc.WaitForExit(10000)) {
+                Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+              }
+              Get-Process -Name nginx -ErrorAction SilentlyContinue |
+                Stop-Process -Force -ErrorAction SilentlyContinue
+              $ErrorActionPreference = $prev
+            }
+
+            # ---------- pass 2: renewal over the EXISTING live dir ----------
+            # A fresh nginx rescans the store, finds the 1h cert inside the 2h
+            # renew window, and reissues. THIS is the commit path that was
+            # broken on win32: the live <seg> dir now exists, so the store
+            # takes the replace-an-existing-generation branch.
+            Write-Host "== pass 2: renewal (live cert already present) =="
+            if (-not (Test-Path $chain)) { throw "pass 2: pass-1 chain vanished" }
+            Move-Item "$root/logs/error.log" "$root/logs/error.pass1.log" -Force `
+              -ErrorAction SilentlyContinue
+
+            $proc2 = Start-Process -FilePath (Resolve-Path .\objs\nginx.exe) `
+                       -ArgumentList '-p', $root, '-c', 'conf/nginx.conf' `
+                       -PassThru -NoNewWindow
+            try {
+              Start-Sleep -Seconds 2
+              if ($proc2.HasExited) {
+                Get-Content "$root/logs/error.log" -ErrorAction SilentlyContinue | Write-Host
+                throw "nginx.exe exited immediately with $($proc2.ExitCode)"
+              }
+
+              $serial2 = Wait-Serial $serial1
+              if (-not $serial2) {
+                Write-Host "== nginx error.log (pass 2, last 80 lines) =="
+                Get-Content "$root/logs/error.log" -Tail 80 -ErrorAction SilentlyContinue | Write-Host
+                Get-Content $pebbleOut, $pebbleErr -ErrorAction SilentlyContinue |
+                  Select-Object -Last 40 | Write-Host
+                throw ("RENEWAL FAILED: the stored certificate still has the " +
+                       "pass-1 serial $serial1 -- the second issuance never " +
+                       "replaced the live generation")
+              }
+              Write-Host "OK pass 2 renewed: $serial1 -> $serial2"
+
+              # The renewed pair must be internally consistent: a torn commit
+              # that published a new chain beside the old key would show up
+              # here as a pubkey mismatch.
+              $certPub = & $openssl x509 -in $chain -noout -pubkey 2>$null
+              $keyPub  = & $openssl pkey -in $key -pubout 2>$null
+              if (($certPub -join "`n") -ne ($keyPub -join "`n")) {
+                throw "renewed certificate pubkey != stored private key (torn commit)"
+              }
+              Write-Host "OK renewed key/chain pair is consistent"
+
+              # The staging dir must not survive a successful commit.
+              if (Test-Path "$root/store/$hostIp.tmp") {
+                Get-ChildItem "$root/store/$hostIp.tmp" | Write-Host
+                throw "staging dir $hostIp.tmp left behind after the renewal commit"
+              }
+              Write-Host "OK no staging directory left behind"
+
+              # Nothing may have logged the defer-renewal path.
+              $errLog = Get-Content "$root/logs/error.log" -Raw -ErrorAction SilentlyContinue
+              if ($errLog -and ($errLog -match 'lacks RENAME_EXCHANGE' -or
+                                $errLog -match 'deferring renewal')) {
+                Write-Host "== nginx error.log (last 80 lines) =="
+                Get-Content "$root/logs/error.log" -Tail 80 | Write-Host
+                throw "the store commit took the defer-renewal path on win32"
+              }
+              Write-Host "OK the commit did not defer"
+
+              Write-Host "win32 renewal verified end-to-end (second issuance replaced the live generation)"
+            }
+            finally {
+              $ErrorActionPreference = 'Continue'
+              & .\objs\nginx.exe -p $root -c conf/nginx.conf -s stop 2>&1 | Out-String | Write-Host
+              if (-not $proc2.WaitForExit(10000)) {
+                Stop-Process -Id $proc2.Id -Force -ErrorAction SilentlyContinue
               }
               Get-Process -Name nginx -ErrorAction SilentlyContinue |
                 Stop-Process -Force -ErrorAction SilentlyContinue
