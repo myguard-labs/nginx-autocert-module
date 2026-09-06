@@ -43,6 +43,15 @@ cleanup() {
 trap cleanup EXIT
 
 rm -rf "$P"; mkdir -p "$P/logs" "$P/conf" "$STORE"
+
+# The driver refuses a store directory that group/other can WRITE, since that
+# is what would let another local user plant certificate material under it.
+# mkdir's mode comes from the ambient umask, so this test's result would
+# otherwise depend on who runs it: 0022 (CI) gives an acceptable 0755, while
+# 0002 (a common developer default) gives 0775 and the driver correctly
+# refuses to arm. Pin the mode so the test asserts the driver's behaviour
+# rather than the caller's umask.
+chmod 0755 "$STORE"
 cat > "$P/conf/nginx.conf" <<EOF
 load_module $HTTP_SO;
 pid $P/logs/nginx.pid;

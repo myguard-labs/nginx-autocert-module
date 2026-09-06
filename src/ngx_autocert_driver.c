@@ -2701,7 +2701,7 @@ ngx_autocert_driver_trylock(ngx_cycle_t *cycle)
      * would otherwise be adopted silently, letting that user plant or swap
      * certificate material underneath us. Refuse before taking the lock.
      */
-    if (ngx_autocert_check_owner_mode(bfd, cycle->log, "store directory")
+    if (ngx_autocert_check_owner_mode(bfd, cycle->log, "store directory", 0)
         != NGX_OK)
     {
         (void) ngx_autocert_close(bfd);

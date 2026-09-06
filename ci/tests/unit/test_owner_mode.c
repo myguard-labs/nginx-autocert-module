@@ -12,11 +12,19 @@
  * this guard, a store directory or serving key pre-created (or substituted)
  * by another local user was adopted silently.
  *
+ * The guard takes a `secret` flag that picks which permissions disqualify,
+ * and both halves are exercised here because collapsing them is exactly the
+ * bug this file guards against: a private key must refuse group/other READ,
+ * while the store DIRECTORY refuses only group/other WRITE (it holds public
+ * certificates, and a plain `mkdir -p` under the default umask is 0755).
+ *
  * These tests exercise the shared guard directly against real files/dirs in
  * a temp tree:
  *   - an owner-only (0700/0600), self-owned path is accepted,
- *   - a group-writable path is refused,
- *   - an other-readable path is refused,
+ *   - a group-writable or world-writable directory is refused,
+ *   - a world-readable, non-writable directory is ACCEPTED (secret=0),
+ *   - a group-readable path is still refused when checked as a secret,
+ *   - a world-readable key file is refused (secret=1),
  *   - (best-effort, skipped when not root) a path owned by a different uid
  *     is refused.
  *
@@ -95,7 +103,7 @@ main(void)
         perror("open store-ok");
         return 2;
     }
-    CHECK(ngx_autocert_check_owner_mode(fd, &log, "store directory") == NGX_OK,
+    CHECK(ngx_autocert_check_owner_mode(fd, &log, "store directory", 0) == NGX_OK,
           "owner-only (0700) self-owned directory accepted");
     (void) close(fd);
 
@@ -118,25 +126,80 @@ main(void)
         perror("open store-group");
         return 2;
     }
-    CHECK(ngx_autocert_check_owner_mode(fd, &log, "store directory")
+    CHECK(ngx_autocert_check_owner_mode(fd, &log, "store directory", 0)
           == NGX_ERROR,
           "group-writable (0770) directory refused");
     (void) close(fd);
 
-    /* 3. World-readable directory: refused. */
-    snprintf(path, sizeof(path), "%s/store-other", base);
-    if (mkdir(path, 0705) == -1) {
-        perror("mkdir store-other");
+    /* 3. World-WRITABLE directory: refused. This is the bit that actually
+     * lets another local user plant or swap certificate material. */
+    snprintf(path, sizeof(path), "%s/store-other-w", base);
+    if (mkdir(path, 0700) == -1) {
+        perror("mkdir store-other-w");
+        return 2;
+    }
+    if (chmod(path, 0707) == -1) {          /* not umask-filtered */
+        perror("chmod store-other-w");
         return 2;
     }
     fd = open(path, O_RDONLY | O_DIRECTORY);
     if (fd == -1) {
-        perror("open store-other");
+        perror("open store-other-w");
         return 2;
     }
-    CHECK(ngx_autocert_check_owner_mode(fd, &log, "store directory")
+    CHECK(ngx_autocert_check_owner_mode(fd, &log, "store directory", 0)
           == NGX_ERROR,
-          "world-readable (0705) directory refused");
+          "world-writable (0707) directory refused");
+    (void) close(fd);
+
+    /* 3b. World-READABLE but not writable (0755): ACCEPTED.
+     *
+     * The negative-space case, and the one that matters most in practice: a
+     * plain `mkdir -p` under the default 0022 umask produces exactly this,
+     * so refusing it takes the module down on an ordinary, safe deployment.
+     * It is not a vulnerability — the directory holds public certificates,
+     * nobody else can write it, and each private key inside is checked in
+     * its own right with secret=1 (cases 4 and 5 below). An earlier revision
+     * refused this and broke every e2e lane; keep this test as the guard
+     * against re-tightening it. */
+    snprintf(path, sizeof(path), "%s/store-other-r", base);
+    if (mkdir(path, 0700) == -1) {
+        perror("mkdir store-other-r");
+        return 2;
+    }
+    if (chmod(path, 0755) == -1) {
+        perror("chmod store-other-r");
+        return 2;
+    }
+    fd = open(path, O_RDONLY | O_DIRECTORY);
+    if (fd == -1) {
+        perror("open store-other-r");
+        return 2;
+    }
+    CHECK(ngx_autocert_check_owner_mode(fd, &log, "store directory", 0)
+          == NGX_OK,
+          "world-readable but non-writable (0755) directory accepted "
+          "(the plain `mkdir -p` shape)");
+    (void) close(fd);
+
+    /* 3c. A group/other-READABLE path is still refused for a SECRET, so the
+     * two modes cannot silently collapse into one. */
+    snprintf(path, sizeof(path), "%s/secret-dir-r", base);
+    if (mkdir(path, 0700) == -1) {
+        perror("mkdir secret-dir-r");
+        return 2;
+    }
+    if (chmod(path, 0750) == -1) {
+        perror("chmod secret-dir-r");
+        return 2;
+    }
+    fd = open(path, O_RDONLY | O_DIRECTORY);
+    if (fd == -1) {
+        perror("open secret-dir-r");
+        return 2;
+    }
+    CHECK(ngx_autocert_check_owner_mode(fd, &log, "secret", 1) == NGX_ERROR,
+          "group-readable (0750) path refused when checked as a secret");
     (void) close(fd);
 
     /* 4. Owner-only (0600) self-owned FILE (the serving-key shape): accepted.
@@ -153,7 +216,7 @@ main(void)
         perror("open privkey.pem");
         return 2;
     }
-    CHECK(ngx_autocert_check_owner_mode(fd, &log, "serving key") == NGX_OK,
+    CHECK(ngx_autocert_check_owner_mode(fd, &log, "serving key", 1) == NGX_OK,
           "owner-only (0600) self-owned serving key accepted");
     (void) close(fd);
 
@@ -172,7 +235,7 @@ main(void)
         perror("open privkey-loose.pem");
         return 2;
     }
-    CHECK(ngx_autocert_check_owner_mode(fd, &log, "serving key") == NGX_ERROR,
+    CHECK(ngx_autocert_check_owner_mode(fd, &log, "serving key", 1) == NGX_ERROR,
           "world-readable (0644) serving key refused");
     (void) close(fd);
 

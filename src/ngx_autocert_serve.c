@@ -1434,7 +1434,7 @@ ngx_http_autocert_read_file(ngx_pool_t *pool, u_char *path, ngx_str_t *out,
     }
 
     if (check_owner
-        && ngx_autocert_check_owner_mode(fd, log, "serving key") != NGX_OK)
+        && ngx_autocert_check_owner_mode(fd, log, "serving key", 1) != NGX_OK)
     {
         ngx_autocert_close(fd);
         return NGX_ERROR;

@@ -25,6 +25,19 @@
 
 set -uo pipefail
 
+# Every script below creates its store directory with a plain `mkdir -p`, so
+# the mode it lands on comes from the AMBIENT umask. The driver refuses a
+# store directory that group/other can write (another local user could plant
+# certificate material under it), which makes the whole suite's result depend
+# on who runs it: 0022 gives an acceptable 0755, while 0002 — a common
+# developer and CI-image default — gives 0775 and every store-using test
+# fails with "store directory is writable by group/other".
+#
+# Pin it here, once, rather than in each of the ~40 scripts. Tests that need
+# to assert the driver's behaviour on a deliberately loose directory should
+# chmod that directory explicitly rather than relying on the umask.
+umask 0022
+
 SERVER_BIN="${SERVER_BIN:?set SERVER_BIN to the built nginx/angie binary}"
 NGX_BUILD_DIR="${NGX_BUILD_DIR:?set NGX_BUILD_DIR to the unpacked build dir}"
 FLAVOR="${FLAVOR:-$(basename "$SERVER_BIN")}"

@@ -1211,7 +1211,7 @@ ngx_autocert_win32_dacl_mode(const ngx_int_t *is_owner,
 
 /*
  * Refuse an already-open directory or file fd unless it is owned by our own
- * euid and carries no group/other permission bits. ngx_autocert_fstat()
+ * euid and cannot be modified by anyone else. ngx_autocert_fstat()
  * fabricates a POSIX-shaped st_mode/st_uid on both platforms (win32's side
  * walks the real DACL via ngx_autocert_win32_dacl_mode() above), so this one
  * check is portable without an #ifdef.
@@ -1223,18 +1223,36 @@ ngx_autocert_win32_dacl_mode(const ngx_int_t *is_owner,
  * pins every path component against a planted symlink, but says nothing
  * about who owns the inode it lands on or what it is writable by. Without
  * this a directory or key pre-created (or substituted) by another local
- * user is adopted silently — the same asymmetry account.c's account-key
- * load path (`ngx_autocert_account.c`, S_ISREG + group/other + owner check)
- * already closes for the account key.
+ * user is adopted silently.
+ *
+ * `secret` picks WHICH permissions are disqualifying, and the distinction is
+ * load-bearing:
+ *
+ *   secret=1 (a private key): any group/other bit is refused, READ included.
+ *     A key another user can read is already compromised, so this matches
+ *     account.c's account-key load path exactly.
+ *
+ *   secret=0 (the store directory): only group/other WRITE is refused. The
+ *     threat this closes is another user planting or swapping certificate
+ *     material, which needs write. Refusing group/other READ as well would
+ *     reject a store directory created by a plain `mkdir -p` under the
+ *     default 0022 umask (0755) — an ordinary, safe deployment and the
+ *     shape every e2e test uses. The directory being listable is not a
+ *     vulnerability: it holds public certificates, and each private key
+ *     inside is checked in its own right with secret=1. Conflating the two
+ *     turned a hardening check into a false refusal that takes the whole
+ *     module down on a correctly-configured host.
  *
  * `what` names the object in the log line ("store directory", "serving
  * key"); the caller owns and closes fd. Returns NGX_OK when the check
  * passes, NGX_ERROR (with a log line already emitted) otherwise.
  */
 static ngx_inline ngx_int_t
-ngx_autocert_check_owner_mode(int fd, ngx_log_t *log, const char *what)
+ngx_autocert_check_owner_mode(int fd, ngx_log_t *log, const char *what,
+    ngx_uint_t secret)
 {
     ngx_autocert_stat_t  st;
+    ngx_autocert_mode_t  bad;
 
     if (ngx_autocert_fstat(fd, &st) == -1) {
         ngx_log_error(NGX_LOG_ERR, log, ngx_errno,
@@ -1242,10 +1260,13 @@ ngx_autocert_check_owner_mode(int fd, ngx_log_t *log, const char *what)
         return NGX_ERROR;
     }
 
-    if (st.st_mode & (S_IRWXG | S_IRWXO)) {
+    bad = secret ? (S_IRWXG | S_IRWXO) : (S_IWGRP | S_IWOTH);
+
+    if (st.st_mode & bad) {
         ngx_log_error(NGX_LOG_ERR, log, 0,
-                      "autocert: %s has group/other permissions "
-                      "(refusing to adopt it)", what);
+                      "autocert: %s is %s by group/other "
+                      "(refusing to adopt it)", what,
+                      secret ? "accessible" : "writable");
         return NGX_ERROR;
     }
 
