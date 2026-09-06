@@ -3022,9 +3022,16 @@ ngx_autocert_driver_exit_process(ngx_cycle_t *cycle)
 {
     (void) cycle;
 
-    ngx_autocert_driver_cancel_timers();
+    /* Order matters: drop_order() -> ngx_autocert_order_free() re-arms the
+     * dns-01 orphan reap timer when a hook child was still outstanding, so
+     * cancelling first would leave that timer in the retiring cycle's rbtree.
+     * Cancelling LAST leaves no driver timer behind. Neither drop_order() nor
+     * drop_ca_states() yields to the event loop, so no handler can fire in
+     * between. (The reload path deliberately keeps the opposite order: there
+     * the re-arm is against the new cycle and is wanted.) */
     ngx_autocert_driver_drop_order();
     ngx_autocert_driver_drop_ca_states();
+    ngx_autocert_driver_cancel_timers();
 
     /* Release the singleton lock (kernel drops it on close) so the next
      * generation's worker 0 can take over immediately. */

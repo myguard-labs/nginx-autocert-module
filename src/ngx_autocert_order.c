@@ -3617,19 +3617,26 @@ ngx_autocert_order_finish(ngx_autocert_order_t *order, ngx_int_t rc)
  * waitpid(pid, &st, 0) there therefore parks the whole worker event loop and
  * wedges reload and shutdown.
  *
- * So the pid OUTLIVES its ngx_autocert_order_t: _free() hands {pid, saved
- * sigmask} to this module-scoped table and returns immediately. A standalone
- * timer WNOHANG-reaps the table on the same 20ms cadence the per-order hook
- * timer uses (20ms is already the module's "a child may have exited" poll
- * interval; keeping one cadence avoids a second tuning knob, and the table is
- * empty in every normal run so the timer is not armed at all).
+ * So the pid OUTLIVES its ngx_autocert_order_t: _free() hands the pid to this
+ * module-scoped table and returns immediately. A standalone timer WNOHANG-reaps
+ * the table on the same 20ms cadence the per-order hook timer uses (20ms is
+ * already the module's "a child may have exited" poll interval; keeping one
+ * cadence avoids a second tuning knob, and the table is empty in every normal
+ * run so the timer is not armed at all).
  *
- * The sigmask is deliberately NOT restored at handoff. SIGCHLD is blocked for
- * the lifetime of a raw hook child (see ngx_autocert_dns_hook_spawn()'s comment
- * above) precisely so nginx's generic reaper cannot consume the status before
- * our waitpid() sees it; unblocking at handoff would reopen exactly that race
- * for the orphan. Each entry's saved mask is restored only once THAT entry is
- * reaped.
+ * SIGCHLD stays blocked for as long as ANY entry is outstanding. It is blocked
+ * for the lifetime of a raw hook child (see ngx_autocert_dns_hook_spawn()'s
+ * comment above) precisely so nginx's generic reaper cannot consume the status
+ * before our waitpid() sees it; unblocking while an orphan is still outstanding
+ * would reopen exactly that race for it.
+ *
+ * No per-entry sigmask is stored, and none is replayed. The masks saved by
+ * individual spawns are PRE-BLOCK snapshots and are not interchangeable across
+ * concurrently-outstanding children: replaying one with SIG_SETMASK when its
+ * own child is reaped can clobber the block a second, still-outstanding orphan
+ * depends on. Instead the reaper unblocks exactly SIGCHLD, with SIG_UNBLOCK
+ * (a per-signal operation that composes regardless of reap order), and only
+ * once the table has fully drained.
  *
  * Storage is a fixed static array, not a pool allocation: order->pool is being
  * destroyed by the caller, and a cycle pool is freed by ngx_clean_old_cycles()
@@ -3648,7 +3655,6 @@ ngx_autocert_order_finish(ngx_autocert_order_t *order, ngx_int_t rc)
 
 typedef struct {
     ngx_pid_t   pid;        /* NGX_INVALID_PID == free slot */
-    sigset_t    sigmask;
 } ngx_autocert_orphan_t;
 
 
@@ -3682,13 +3688,13 @@ ngx_autocert_orphans_reset(void)
 
 
 /*
- * Take ownership of pid + its saved sigmask. Returns NGX_OK when the entry was
- * stored, NGX_DECLINED when the table is full (the caller must then fall back
- * to reaping the pid itself — a full table means several children are already
+ * Take ownership of pid. Returns NGX_OK when the entry was stored,
+ * NGX_DECLINED when the table is full (the caller must then fall back to
+ * reaping the pid itself — a full table means several children are already
  * wedged, which is a far rarer failure than the one this exists to avoid).
  */
 static ngx_int_t
-ngx_autocert_orphan_add(ngx_pid_t pid, const sigset_t *sigmask)
+ngx_autocert_orphan_add(ngx_pid_t pid)
 {
     ngx_uint_t  i;
 
@@ -3699,7 +3705,6 @@ ngx_autocert_orphan_add(ngx_pid_t pid, const sigset_t *sigmask)
     for (i = 0; i < NGX_AUTOCERT_ORPHAN_MAX; i++) {
         if (ngx_autocert_orphans[i].pid == NGX_INVALID_PID) {
             ngx_autocert_orphans[i].pid = pid;
-            ngx_autocert_orphans[i].sigmask = *sigmask;
             return NGX_OK;
         }
     }
@@ -3715,9 +3720,9 @@ ngx_autocert_orphan_add(ngx_pid_t pid, const sigset_t *sigmask)
  * An entry is dropped when waitpid() reports the child (w == pid) AND when it
  * fails with ECHILD — "no such child" means somebody already reaped it (or it
  * was never ours), and keeping the slot would leak it forever. EINTR retries.
- * w == 0 (still running) keeps the entry. Every dropped entry restores its own
- * saved sigmask, which is the point at which SIGCHLD may safely be unblocked
- * for that child.
+ * w == 0 (still running) keeps the entry. SIGCHLD is unblocked only once the
+ * whole table has drained: while any entry remains, nginx's generic reaper
+ * must not be allowed to consume its status.
  */
 static ngx_uint_t
 ngx_autocert_orphan_reap(ngx_autocert_waitpid_pt wp)
@@ -3755,8 +3760,17 @@ ngx_autocert_orphan_reap(ngx_autocert_waitpid_pt wp)
                           ngx_autocert_orphans[i].pid);
         }
 
-        (void) sigprocmask(SIG_SETMASK, &ngx_autocert_orphans[i].sigmask, NULL);
         ngx_autocert_orphans[i].pid = NGX_INVALID_PID;
+    }
+
+    if (live == 0) {
+        sigset_t  chld;
+
+        /* Table drained: no outstanding child's status can be stolen any
+         * more, so release exactly the signal this module blocked. */
+        sigemptyset(&chld);
+        sigaddset(&chld, SIGCHLD);
+        (void) sigprocmask(SIG_UNBLOCK, &chld, NULL);
     }
 
     return live;
@@ -3818,20 +3832,19 @@ ngx_autocert_order_orphan_hook(ngx_autocert_order_t *order)
          * blocking. ngx_autocert_order_free() deletes the hook timers right
          * after this call, so the async waitpid() in
          * ngx_autocert_order_dns_hook_timer() will never run again for this
-         * pid, and `order` (which owns dns_hook_pid and
-         * dns_hook_sigmask) is about to be freed — but a blocking reap here
-         * parks the worker event loop for as long as the child stays wedged
-         * in uninterruptible kernel I/O, where SIGKILL does not land. The
-         * orphan reaper owns the pid and the saved sigmask from here on; do
-         * NOT restore the mask on this path (see the table's comment above).
+         * pid, and `order` (which owns dns_hook_pid) is about to be freed —
+         * but a blocking reap here parks the worker event loop for as long as
+         * the child stays wedged in uninterruptible kernel I/O, where SIGKILL
+         * does not land. The orphan reaper owns the pid from here on, and
+         * SIGCHLD stays blocked until the table drains; do NOT restore a saved
+         * mask on this path (see the table's comment above).
          *
          * A full table is the only case that still reaps inline, and even
          * then WNOHANG: several children are already wedged, so blocking is
-         * exactly what must not happen. A survivor is left to init. */
-        if (ngx_autocert_orphan_add(order->dns_hook_pid,
-                                    &order->dns_hook_sigmask)
-            == NGX_OK)
-        {
+         * exactly what must not happen. A survivor is left to init — and
+         * because the table is non-empty in that case, SIGCHLD must stay
+         * blocked here too. */
+        if (ngx_autocert_orphan_add(order->dns_hook_pid) == NGX_OK) {
             ngx_autocert_orphan_arm();
 
         } else {
@@ -3841,8 +3854,6 @@ ngx_autocert_order_orphan_hook(ngx_autocert_order_t *order)
             do {
                 w = waitpid(order->dns_hook_pid, &status, WNOHANG);
             } while (w == -1 && ngx_autocert_err_is_intr(ngx_errno));
-
-            (void) sigprocmask(SIG_SETMASK, &order->dns_hook_sigmask, NULL);
         }
 
         order->dns_hook_pid = NGX_INVALID_PID;

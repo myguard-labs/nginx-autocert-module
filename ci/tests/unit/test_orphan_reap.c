@@ -9,16 +9,20 @@
  * and then reap it with a BLOCKING waitpid(pid, &status, 0). A child wedged in
  * uninterruptible kernel I/O (a hung NFS/FUSE mount under the operator's hook
  * binary) does not die on SIGKILL, so that reap parked the worker event loop
- * and wedged reload and shutdown. The fix hands {pid, saved sigmask} to a
- * module-scoped table whose standalone timer WNOHANG-reaps it, so the pid
- * outlives ngx_autocert_order_t and _free() never blocks.
+ * and wedged reload and shutdown. The fix hands the pid to a module-scoped
+ * table whose standalone timer WNOHANG-reaps it, so the pid outlives
+ * ngx_autocert_order_t and _free() never blocks.
  *
  * WHAT THIS COVERS: the table logic — add stores an entry, a still-running
  * child (waitpid -> 0) keeps its entry and reports work outstanding, a reaped
- * child (waitpid -> pid) drops its entry and restores THAT entry's saved
- * sigmask, ECHILD also drops the entry (already reaped elsewhere: keeping it
- * would leak the slot forever), a permanently-stuck child is polled and never
- * blocks, EINTR retries, and add reports NGX_DECLINED once the table is full.
+ * child (waitpid -> pid) drops its entry, SIGCHLD stays blocked while ANY
+ * entry is outstanding and is unblocked exactly once the table drains (no
+ * per-entry mask is stored or replayed: a PRE-BLOCK snapshot replayed with
+ * SIG_SETMASK would clobber the block a second, still-outstanding orphan
+ * depends on), ECHILD also drops the entry (already reaped elsewhere: keeping
+ * it would leak the slot forever), a permanently-stuck child is polled and
+ * never blocks, EINTR retries, and add reports NGX_DECLINED once the table is
+ * full.
  * waitpid is injected (ngx_autocert_waitpid_pt), so a "stuck" child is modelled
  * exactly — no real process needs to be hung to test it.
  *
@@ -195,7 +199,7 @@ main(void)
 
     /* --- 1. handoff stores the entry; it is NOT reaped at add time ------- */
     reset_all();
-    CHECK(ngx_autocert_orphan_add(11, &empty) == NGX_OK,
+    CHECK(ngx_autocert_orphan_add(11) == NGX_OK,
           "add() accepts a pid into an empty table");
     CHECK(table_len() == 1, "the handed-off pid is held in the table");
     CHECK(fake_calls[11] == 0, "add() does not wait on the child at all");
@@ -203,7 +207,7 @@ main(void)
     /* --- 2. a permanently-stuck child never blocks and stays held -------- */
     reset_all();
     fake_state[12] = FAKE_RUNNING;
-    (void) ngx_autocert_orphan_add(12, &empty);
+    (void) ngx_autocert_orphan_add(12);
     for (i = 0; i < 5; i++) {
         live = ngx_autocert_orphan_reap(fake_waitpid);
         CHECK(live == 1, "a stuck child keeps the reaper armed");
@@ -214,7 +218,7 @@ main(void)
     /* --- 3. an exited child is dropped ---------------------------------- */
     reset_all();
     fake_state[13] = FAKE_EXITED;
-    (void) ngx_autocert_orphan_add(13, &empty);
+    (void) ngx_autocert_orphan_add(13);
     CHECK(ngx_autocert_orphan_reap(fake_waitpid) == 0,
           "reaping the last child leaves nothing outstanding");
     CHECK(table_len() == 0, "the reaped entry is removed from the table");
@@ -222,7 +226,7 @@ main(void)
     /* --- 4. ECHILD drops the entry (no forever-leak on that path) -------- */
     reset_all();
     fake_state[14] = FAKE_ECHILD;
-    (void) ngx_autocert_orphan_add(14, &empty);
+    (void) ngx_autocert_orphan_add(14);
     CHECK(ngx_autocert_orphan_reap(fake_waitpid) == 0,
           "ECHILD counts as done, not as outstanding work");
     CHECK(table_len() == 0, "an ECHILD entry is dropped, never leaked");
@@ -230,39 +234,50 @@ main(void)
     /* --- 5. EINTR is retried inside one sweep --------------------------- */
     reset_all();
     fake_state[15] = FAKE_EINTR_ONCE;
-    (void) ngx_autocert_orphan_add(15, &empty);
+    (void) ngx_autocert_orphan_add(15);
     CHECK(ngx_autocert_orphan_reap(fake_waitpid) == 0,
           "an EINTR is retried and the child still reaped in one sweep");
     CHECK(fake_calls[15] == 2, "EINTR caused exactly one retry");
 
-    /* --- 6. the sigmask is restored on reap, not on handoff ------------- */
+    /* --- 6. SIGCHLD is unblocked only once the table has DRAINED --------
+     * Two orphans with the block established between their handoffs, reaped
+     * OUT OF SPAWN ORDER. Restoring any per-entry PRE-BLOCK snapshot with
+     * SIG_SETMASK when the first one is reaped unblocks SIGCHLD process-wide
+     * while the second is still outstanding, letting nginx's generic reaper
+     * steal its status. This must not happen. */
     reset_all();
     CHECK(sigprocmask(SIG_SETMASK, &empty, NULL) == 0,
-          "test starts from an empty signal mask");
-    fake_state[16] = FAKE_RUNNING;
-    (void) ngx_autocert_orphan_add(16, &blocked);
-    /* Model what the spawn path leaves in place: SIGCHLD blocked while the
-     * child is outstanding, so nginx's generic reaper cannot steal the
-     * status. The saved mask handed to the table is the PRE-spawn one. */
+          "test starts from an empty signal mask (SIGCHLD unblocked)");
+    fake_state[16] = FAKE_EXITED;    /* A: handed off first, exits first */
+    fake_state[17] = FAKE_RUNNING;   /* B: handed off second, still wedged */
+    (void) ngx_autocert_orphan_add(16);
+    (void) ngx_autocert_orphan_add(17);
+    /* Model what the spawn path leaves in place: SIGCHLD blocked while a
+     * child is outstanding, so nginx's generic reaper cannot steal a status. */
     CHECK(sigprocmask(SIG_BLOCK, &blocked, NULL) == 0, "block SIGCHLD");
-    (void) ngx_autocert_orphan_reap(fake_waitpid);
+    CHECK(ngx_autocert_orphan_reap(fake_waitpid) == 1,
+          "reaping A leaves B outstanding");
     CHECK(sigprocmask(SIG_BLOCK, NULL, &now) == 0, "read mask back");
     CHECK(sigismember(&now, SIGCHLD) == 1,
-          "a still-running orphan keeps SIGCHLD blocked");
-    fake_state[16] = FAKE_EXITED;
-    (void) ngx_autocert_orphan_reap(fake_waitpid);
-    CHECK(sigprocmask(SIG_BLOCK, NULL, &now) == 0, "read mask back after reap");
-    CHECK(sigismember(&now, SIGCHLD) == 1,
-          "the reaped entry's own saved mask is restored (SIGCHLD in it)");
+          "SIGCHLD stays blocked while another orphan is still outstanding");
+
+    /* Positive control for the drain-time unblock: once B goes too, the block
+     * this module installed is released. */
+    fake_state[17] = FAKE_EXITED;
+    CHECK(ngx_autocert_orphan_reap(fake_waitpid) == 0,
+          "reaping B drains the table");
+    CHECK(sigprocmask(SIG_BLOCK, NULL, &now) == 0, "read mask back after drain");
+    CHECK(sigismember(&now, SIGCHLD) == 0,
+          "SIGCHLD is unblocked once the table has fully drained");
 
     /* --- 7. a full table declines rather than overwriting --------------- */
     reset_all();
     for (i = 0; i < NGX_AUTOCERT_ORPHAN_MAX; i++) {
         fake_state[20 + i] = FAKE_RUNNING;
-        CHECK(ngx_autocert_orphan_add((ngx_pid_t) (20 + i), &empty) == NGX_OK,
+        CHECK(ngx_autocert_orphan_add((ngx_pid_t) (20 + i)) == NGX_OK,
               "add() fills every slot");
     }
-    CHECK(ngx_autocert_orphan_add(99, &empty) == NGX_DECLINED,
+    CHECK(ngx_autocert_orphan_add(99) == NGX_DECLINED,
           "add() declines once the table is full");
     CHECK(table_len() == NGX_AUTOCERT_ORPHAN_MAX,
           "a declined add does not evict a held pid");
@@ -272,9 +287,9 @@ main(void)
     fake_state[30] = FAKE_RUNNING;
     fake_state[31] = FAKE_EXITED;
     fake_state[32] = FAKE_RUNNING;
-    (void) ngx_autocert_orphan_add(30, &empty);
-    (void) ngx_autocert_orphan_add(31, &empty);
-    (void) ngx_autocert_orphan_add(32, &empty);
+    (void) ngx_autocert_orphan_add(30);
+    (void) ngx_autocert_orphan_add(31);
+    (void) ngx_autocert_orphan_add(32);
     CHECK(ngx_autocert_orphan_reap(fake_waitpid) == 2,
           "a mixed sweep reports exactly the still-running entries");
     CHECK(table_len() == 2, "only the exited entry was dropped");
