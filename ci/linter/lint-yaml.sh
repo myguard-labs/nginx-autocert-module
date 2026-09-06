@@ -50,7 +50,12 @@ rc=0
 
 need yamllint "apt-get install yamllint"
 say "yamllint"
-yamllint "${FILES[@]}" || rc=1
+# yamllint exit codes: 0 clean, 1 error-level findings, 2 warnings only. Some
+# builds (the runner's pipx yamllint) return 2 where the local Debian package
+# returns 0, so `|| rc=1` turned repo-wide WARNINGS into a red gate. Warnings
+# stay visible but do not fail, matching the "no --strict" note above; only
+# exit 1 (errors) blocks.
+yamllint "${FILES[@]}" || { yrc=$?; [ "$yrc" -eq 2 ] || rc=1; }
 
 mapfile -t WF < <(printf '%s\n' "${FILES[@]}" | grep -E '^\.github/workflows/' || true)
 if [ "${#WF[@]}" -gt 0 ]; then
