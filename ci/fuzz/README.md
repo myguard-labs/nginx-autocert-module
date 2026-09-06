@@ -90,7 +90,7 @@ parser reads (pool, url/host/port/uri, recv `ngx_buf_t`, headers array, the
 `headers_done` / `chunked` / `content_length` / `body_offset` framing fields)
 plus the `ngx_string` / `ngx_array` / `ngx_atoi` / `ngx_atoof` helpers, with
 identical semantics. The same shim + slice also back the standalone unit test
-`tests/unit/test_http.c`.
+`ci/tests/unit/test_http.c`.
 
 `ngx_shim.h` supplies the minimal nginx surface the JSON parser touches:
 `ngx_pool_t` with a malloc-backed allocator, `ngx_pcalloc` / `ngx_pnalloc`,
@@ -106,8 +106,8 @@ heap-buffer-overflow.
 
 ```bash
 # needs clang with libFuzzer (clang >= 6) — no nginx build tree needed
-CC=clang bash fuzz/build.sh    # -> fuzz/fuzz_json + fuzz/fuzz_http + fuzz/fuzz_b64
-cd fuzz
+CC=clang bash ci/fuzz/build.sh    # -> ci/fuzz/fuzz_json + ci/fuzz/fuzz_http + ci/fuzz/fuzz_b64
+cd ci/fuzz
 ./fuzz_json -max_total_time=120 -print_final_stats=1 corpus/
 ./fuzz_http -max_total_time=120 -print_final_stats=1 corpus_http/
 ./fuzz_b64  -max_total_time=120 -print_final_stats=1 corpus_b64/
@@ -116,7 +116,7 @@ cd fuzz
 The valgrind-replay path (plain compile, no sanitizers):
 
 ```bash
-CC=clang CFLAGS='-g -O1' bash fuzz/build.sh
+CC=clang CFLAGS='-g -O1' bash ci/fuzz/build.sh
 ```
 
 A crash drops a `crash-*` reproducer; re-run with `./fuzz_json crash-<id>` to
@@ -128,7 +128,7 @@ permanent regression seed.
 `corpus/` contains 10 seed inputs covering the main ACME response shapes:
 
 | file | covers |
-|---|---|
+| --- | --- |
 | `directory.json` | ACME directory object |
 | `order.json` | order with identifiers + authorizations arrays |
 | `account.json` | newAccount response |
@@ -144,7 +144,7 @@ permanent regression seed.
 responses:
 
 | file | covers |
-|---|---|
+| --- | --- |
 | `cl_ok` | 200 with a `Content-Length` body |
 | `created` | 201 with a `Location` header (account register) |
 | `chunked` | `Transfer-Encoding: chunked` multi-chunk body |
@@ -158,7 +158,7 @@ responses:
 alphabet-boundary cases the strict decoder must reject:
 
 | file | covers |
-|---|---|
+| --- | --- |
 | `jws_protected_header` | a realistic JWS protected-header segment |
 | `jws_payload_order` / `jws_payload_empty` | JWS payload segment, incl. empty |
 | `jws_signature_ecdsa` | 64-byte raw ECDSA signature, base64url-encoded |
