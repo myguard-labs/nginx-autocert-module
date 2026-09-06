@@ -63,6 +63,7 @@
 #include "ngx_autocert_ratecap.h"  /* A3.4: rate-cap + wildcard-cover pures */
 #include "ngx_autocert_requests.h" /* A3.3: runtime request drain/set_state */
 #include "ngx_autocert_shared.h"
+#include "ngx_autocert_timeconv.h" /* seconds->ms clamp for resolver_timeout */
 #include "ngx_http_autocert_conf.h" /* store-layout enum */
 #include "ngx_http_autocert_crypto.h"
 
@@ -600,7 +601,13 @@ ngx_autocert_bootstrap_ca(ngx_cycle_t *cycle, ngx_uint_t ca_idx)
                 ca_idx++;
                 continue;
             }
-            state->client.resolver_timeout = acf.resolver_timeout * 1000;
+            /* Clamp the seconds->ms conversion the same way
+             * ngx_autocert_order_dns_delay_start() and the dns-01 hook
+             * timeout do: a negative or absurd configured value must not
+             * wrap the time_t multiply into a tiny/huge ngx_msec_t (or trip
+             * signed-overflow UB at the top of the time_t range). */
+            state->client.resolver_timeout =
+                ngx_autocert_sec_to_msec_clamped(acf.resolver_timeout);
 
             /*
              * Pin the outbound client to the configured directory origin so the

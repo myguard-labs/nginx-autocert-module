@@ -136,6 +136,17 @@ gcc -Wall -Wextra -Werror $CORE_INC \
 	"$NGX/objs/src/core/ngx_string.o" -o test_ratecap
 ./test_ratecap
 
+# F4: pure seconds->ms clamp used for resolver_timeout (and matching the
+# dns-01 hook/propagation-delay clamp style) (ngx_autocert_timeconv.h).
+# Header-only static-inline touching no nginx runtime state; links against
+# ONLY ngx_string.o, same idiom as test_ratecap.c above (a plain `ngx_cycle`
+# stub covers the one extern ref ngx_core.h's headers pull in).
+# shellcheck disable=SC2086
+gcc -Wall -Wextra -Werror $CORE_INC \
+	"$WORKSPACE/ci/tests/unit/test_timeconv.c" \
+	"$NGX/objs/src/core/ngx_string.o" -o test_timeconv
+./test_timeconv
+
 # A6 runtime-marker open semantics. Pure syscall-contract test (no nginx
 # objects): plants a FIFO / symlink at <store>/<seg>/.autocert-runtime and
 # asserts the driver's open flags refuse them WITHOUT blocking. A FIFO
