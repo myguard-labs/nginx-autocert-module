@@ -82,7 +82,20 @@ if [ "${#WF[@]}" -gt 0 ]; then
 
     need zizmor "pipx install zizmor"
     say "zizmor (workflow security, pedantic)"
-    zizmor --offline --persona=pedantic --no-progress "${WF[@]}" || rc=1
+    # Two passes, on purpose. zizmor is deliberately UNPINNED (see
+    # install-linters.sh) so new audits reach us as they ship -- but that also
+    # means a new LOW-severity audit lands as a red gate on every open branch
+    # at once, with no relation to the change under review. That happened with
+    # 1.30.0's `self-repository` audit: 18 low findings across workflows no
+    # branch had touched.
+    #
+    # So: print the full pedantic report, including low findings, then gate on
+    # medium-and-above. Nothing is hidden -- a new low audit is visible in the
+    # log the moment it ships, and triaging it is a real task -- but it does
+    # not block unrelated work until someone has looked at it.
+    zizmor --offline --persona=pedantic --no-progress "${WF[@]}" || true
+    zizmor --offline --persona=pedantic --no-progress --min-severity=medium \
+        "${WF[@]}" >/dev/null 2>&1 || rc=1
 fi
 
 exit "$rc"

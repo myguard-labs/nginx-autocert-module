@@ -291,6 +291,30 @@ printf 'a: 1\na: 2\n' > "$yamlroot/err.yml"
 case_ 1 "lint-yaml: error-level YAML fails the gate" \
     bash -c "cd '$PWD' && ci/linter/lint-yaml.sh '$yamlroot/err.yml'"
 
+# zizmor gates at medium-and-above (it is unpinned, so a newly shipped LOW
+# audit must not red-gate every open branch before anyone has triaged it).
+# Control the part that must NOT be weakened: a workflow with a real
+# medium/high finding still fails. Uses pull_request_target + an interpolated
+# PR title -- template injection, which zizmor rates high.
+# Lives under the repo's own .github/workflows/ because lint-yaml.sh only
+# runs the workflow auditors on paths matching that prefix, and it resolves
+# its lib via `git rev-parse`, so it must run from inside the checkout.
+# Removed on exit by the trap below.
+zizfix=".github/workflows/zz-selftest-inj.yml"
+trap 'rm -rf "$badroot" "$yamlroot"; rm -f "$PWD/$zizfix"' EXIT
+cat > "$zizfix" <<'ZIZ'
+name: inj
+on: [pull_request_target]
+permissions: {}
+jobs:
+  a:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "${{ github.event.pull_request.title }}"
+ZIZ
+case_ 1 "lint-yaml: a high-severity workflow finding still fails the gate" \
+    bash -c "cd '$PWD' && ci/linter/lint-yaml.sh '$zizfix'"
+
 if [ "$rc" -eq 0 ]; then
     echo "== lint gate selftest: all controls held =="
 else
