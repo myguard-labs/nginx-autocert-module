@@ -1183,7 +1183,13 @@ ngx_autocert_openat(int dfd, const char *name, int flags)
     crt_flags = 0;
 
     if (flags & O_DIRECTORY) {
-        desired_access |= FILE_LIST_DIRECTORY | FILE_TRAVERSE;
+        /* READ_CONTROL is required for GetSecurityInfo() to read the DACL.
+         * The file arm below gets it implicitly via GENERIC_READ; a directory
+         * handle does not, and ngx_autocert_fstat() now walks the DACL for
+         * directories too (the store-directory permission guard depends on
+         * it). Without this the walk fails with ERROR_ACCESS_DENIED and the
+         * fail-closed contract turns every store directory into a refusal. */
+        desired_access |= FILE_LIST_DIRECTORY | FILE_TRAVERSE | READ_CONTROL;
         options |= NGX_AUTOCERT_FILE_DIRECTORY_FILE
                  | NGX_AUTOCERT_FILE_OPEN_FOR_BACKUP_INTENT;
     } else {
