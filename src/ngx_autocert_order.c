@@ -18,6 +18,7 @@
 #include "ngx_http_autocert_crypto.h"
 #include "ngx_http_autocert_conf.h"     /* key-type enum mapping */
 #include "ngx_autocert_shared.h"        /* shared ngx_autocert_renameat2() */
+#include "ngx_autocert_timeconv.h"      /* ngx_autocert_sec_to_msec_clamped() */
 
 #include <fcntl.h>
 #if !(NGX_WIN32)
@@ -1496,9 +1497,16 @@ ngx_autocert_order_dns_hook(ngx_autocert_order_t *order, ngx_str_t *hook,
                   "autocert: dns-01 exec %s hook \"%V\" for \"%V\"",
                   is_add ? "add" : "remove", hook, &name);
 
-    /* Clamp the timeout the same way as the propagation delay, computed here
-     * so both platform spawn arms below clamp identically — neither one
-     * re-derives it. */
+    /* Same 3600s cap as the propagation delay, computed here so both platform
+     * spawn arms below clamp identically — neither one re-derives it. This
+     * stays open-coded rather than calling ngx_autocert_sec_to_msec_clamped():
+     * that helper treats only "< 0" as "no timeout" (-> 0ms), but config load
+     * already rejects a non-positive dns_hook_timeout, and 0 reaching here
+     * would still need to mean "no timeout" for a caller that ever passed 0
+     * directly. The helper's "< 0 -> 0" is not equivalent to "<= 0 -> 0": a
+     * blind substitution would convert an explicit 0 into 0ms (correct here
+     * only by coincidence) while changing the boundary this site actually
+     * depends on. */
     if (order->dns_hook_timeout <= 0) {
         timeout_ms = 0;
     } else if (order->dns_hook_timeout > 3600) {
@@ -1570,19 +1578,16 @@ ngx_autocert_order_publish_dns(ngx_autocert_order_t *order)
 /* Wait for DNS propagation before asking the CA to validate. Clamp the
      * seconds→ms conversion so a negative or absurd configured delay can't wrap
      * the time_t multiply (esp. 32-bit time_t) into a tiny/huge ngx_msec_t.
-     * A propagation wait beyond an hour is nonsensical, so cap there. */
+     * A propagation wait beyond an hour is nonsensical, so cap there.
+     * dns_propagation_delay's "< 0 -> 0" semantics match the shared helper's
+     * exactly (unlike dns_hook_timeout below, whose "<= 0 -> 0" means
+     * something different and stays open-coded), so this uses it directly. */
 static void
 ngx_autocert_order_dns_delay_start(ngx_autocert_order_t *order)
 {
     ngx_msec_t  delay;
 
-    if (order->dns_propagation_delay < 0) {
-        delay = 0;
-    } else if (order->dns_propagation_delay > 3600) {
-        delay = (ngx_msec_t) 3600 * 1000;
-    } else {
-        delay = (ngx_msec_t) order->dns_propagation_delay * 1000;
-    }
+    delay = ngx_autocert_sec_to_msec_clamped(order->dns_propagation_delay);
 
     ngx_memzero(&order->dns_delay_timer, sizeof(ngx_event_t));
     order->dns_delay_timer.handler = ngx_autocert_order_dns_delay_timer;

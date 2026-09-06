@@ -603,9 +603,10 @@ ngx_autocert_bootstrap_ca(ngx_cycle_t *cycle, ngx_uint_t ca_idx)
             }
             /* Clamp the seconds->ms conversion the same way
              * ngx_autocert_order_dns_delay_start() and the dns-01 hook
-             * timeout do: a negative or absurd configured value must not
-             * wrap the time_t multiply into a tiny/huge ngx_msec_t (or trip
-             * signed-overflow UB at the top of the time_t range). */
+             * timeout do: an absurd configured value near the top of time_t's
+             * range must not overflow the signed `time_t * 1000` multiply
+             * (undefined behaviour, not a defined wrap), and a negative value
+             * must not produce a bogus ngx_msec_t either. */
             state->client.resolver_timeout =
                 ngx_autocert_sec_to_msec_clamped(acf.resolver_timeout);
 
