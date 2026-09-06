@@ -3052,11 +3052,44 @@ ngx_autocert_driver_exit_process(ngx_cycle_t *cycle)
  * single-process path to tear the engine state down and re-arm it against the
  * NEW cycle. The POSIX interprocess lock is released and re-acquired: the lock
  * file lives in the store dir, so a reload that changes autocert_path must pick
- * up the correct lock file location from the new cycle's config. The Win32
- * named mutex is NOT released here — ngx_autocert_win32_driver_unlock() runs
- * only from exit_process and the trylock error paths, so on Win32 a reload that
- * changes autocert_path keeps the old store's mutex and skips acquiring the new
- * one (win32_driver_trylock returns NGX_OK early while the handle is non-NULL).
+ * up the correct lock file location from the new cycle's config.
+ *
+ * There is no matching Win32 arm here, because this function is POSIX-only by
+ * REACHABILITY (not by #ifdef). Its single caller is
+ * ngx_http_autocert_init_module(), gated on `ngx_process == NGX_PROCESS_SINGLE
+ * && ngx_http_autocert_single_started`, so reaching it needs a SECOND
+ * ngx_init_cycle() inside a process that is already running single-process.
+ * Win32 nginx has no such path (verified against nginx-1.31.4):
+ *
+ *   - ngx_init_cycle() is re-run at exactly one site in
+ *     src/os/win32/ngx_process_cycle.c — line 203, inside
+ *     ngx_master_process_cycle()'s "reconfiguring" branch (line 195). That
+ *     branch runs only when ngx_process == NGX_PROCESS_MASTER, which
+ *     src/core/nginx.c:339-341 and :379-384 make mutually exclusive with
+ *     NGX_PROCESS_SINGLE.
+ *   - win32 ngx_single_process_cycle() (same file, :986-1003) spawns
+ *     ngx_worker_thread() (:996) and then parks the calling thread in
+ *     WaitForSingleObject(ngx_stop_event, INFINITE) (:1002). It waits on the
+ *     STOP event only — never on ngx_reload_event — and never calls
+ *     ngx_init_cycle() itself.
+ *   - ngx_worker_thread() (:763-820), which runs init_process and the event
+ *     loop, handles only ngx_quit / ngx_terminate / ngx_reopen (:811). It
+ *     never inspects ngx_reconfigure and never re-enters ngx_init_cycle().
+ *
+ * So `nginx -s reload` under `master_process off` on Windows sets
+ * ngx_reload_event and nothing consumes it: the config is not re-read, no
+ * init_module re-runs, and this function does not execute. Releasing
+ * ngx_autocert_win32_mutex here would therefore be dead code no test can
+ * reach — and it would not be safe by default if a win32 reload path ever
+ * appeared. The mutex is thread-affine and is acquired on ngx_worker_thread
+ * (via init_process / the relock timer); a release from any other thread hits
+ * the ERROR_NOT_OWNER path in ngx_autocert_win32_driver_unlock() and then
+ * CloseHandle()s our only reference while the named object stays owned by a
+ * still-live thread. The zero-timeout reacquire in
+ * ngx_autocert_win32_mutex_open_and_wait() would return WAIT_TIMEOUT forever
+ * and the driver would never re-arm — strictly worse than holding the old
+ * store's mutex. If win32 ever grows an in-process reload, settle which
+ * thread performs the release BEFORE adding one here.
  *
  * Must run inside the worker event loop (true on reload — init_module fires
  * from ngx_init_cycle() while the loop is live), since it re-arms a timer.
