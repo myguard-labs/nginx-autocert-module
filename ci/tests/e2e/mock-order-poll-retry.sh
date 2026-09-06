@@ -65,6 +65,9 @@ trap cleanup EXIT
 
 rm -rf "$PREFIX"
 mkdir -p "$PREFIX/logs" "$PREFIX/conf" "$PREFIX/store"
+# store mode must not depend on the caller's umask (the driver refuses a
+# group/other-writable store, and mkdir's mode is umask-filtered).
+chmod 0700 "$PREFIX/store"
 
 # Self-signed cert for the mock CA (its own trust anchor); SAN must be the host
 # the helper connects to so the verified-TLS hostname check passes.

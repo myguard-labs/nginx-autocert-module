@@ -51,6 +51,9 @@ trap cleanup EXIT
 
 rm -rf "$PREFIX"
 mkdir -p "$PREFIX/logs" "$PREFIX/conf" "$PREFIX/store"
+# store mode must not depend on the caller's umask (the driver refuses a
+# group/other-writable store, and mkdir's mode is umask-filtered).
+chmod 0700 "$PREFIX/store"
 
 openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 \
     -keyout "$PREFIX/ca-key.pem" -out "$PREFIX/ca.pem" -days 2 -nodes \

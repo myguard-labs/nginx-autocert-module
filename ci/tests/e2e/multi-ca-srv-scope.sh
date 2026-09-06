@@ -37,6 +37,9 @@ trap cleanup EXIT
 
 rm -rf "$PREFIX"
 mkdir -p "$PREFIX/logs" "$PREFIX/conf" "$PREFIX/store"
+# store mode must not depend on the caller's umask (the driver refuses a
+# group/other-writable store, and mkdir's mode is umask-filtered).
+chmod 0700 "$PREFIX/store"
 
 # Both CA URLs are unreachable on purpose — we assert config-time grouping, not
 # issuance, so the driver's later registration failure against ca_list[0] is
