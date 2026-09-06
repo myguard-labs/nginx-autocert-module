@@ -50,12 +50,28 @@ rc=0
 
 need yamllint "apt-get install yamllint"
 say "yamllint"
-# yamllint exit codes: 0 clean, 1 error-level findings, 2 warnings only. Some
-# builds (the runner's pipx yamllint) return 2 where the local Debian package
-# returns 0, so `|| rc=1` turned repo-wide WARNINGS into a red gate. Warnings
-# stay visible but do not fail, matching the "no --strict" note above; only
-# exit 1 (errors) blocks.
-yamllint "${FILES[@]}" || { yrc=$?; [ "$yrc" -eq 2 ] || rc=1; }
+# Gate on the SEVERITY of what yamllint reported, not on its exit status.
+#
+# The exit status is not a portable signal here. yamllint auto-detects a
+# GitHub Actions runner and switches to `-f github`, and the exit code it
+# pairs with a warnings-only run has differed between the local Debian
+# package (1.37.1) and the pipx build the runner resolves -- yamllint is
+# unpinned, so that build moves on its own. `|| rc=1` therefore turned
+# repo-wide WARNINGS into a red gate on CI while passing locally, on files
+# the branch never touched.
+#
+# `-f parsable` fixes the output shape on every version and runner, so
+# counting `[error]` lines is a stable gate. Warnings stay visible and do not
+# fail, which is the "No --strict on yamllint, on purpose" contract at the
+# top of this script; error-level findings still block.
+#
+# The output is captured rather than streamed so it can be both counted and
+# printed; yamllint's own exit status is deliberately ignored.
+yaml_out="$(yamllint -f parsable "${FILES[@]}" 2>&1 || true)"
+[ -n "$yaml_out" ] && printf '%s\n' "$yaml_out"
+if printf '%s\n' "$yaml_out" | grep -q '\[error\]'; then
+    rc=1
+fi
 
 mapfile -t WF < <(printf '%s\n' "${FILES[@]}" | grep -E '^\.github/workflows/' || true)
 if [ "${#WF[@]}" -gt 0 ]; then

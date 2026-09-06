@@ -272,6 +272,25 @@ printf 'on: [pull_request\njobs: {\n' > "$badroot/.github/workflows/broken.yml"
 case_ 2 "policy runners: unparsable YAML is exit 2, not clean" \
     env "WORKFLOW_POLICY_ROOT=$badroot" python3 ci/linter/workflow_policy.py runners
 
+# lint-yaml gates on FINDING SEVERITY, not on yamllint's exit status: yamllint
+# is unpinned and switches to `-f github` on a runner, and the exit code it
+# pairs with a warnings-only run has differed between builds. Both directions
+# are controlled here -- a warnings-only file must pass, an error-level file
+# must fail -- so a future "|| rc=1" cannot quietly re-red the gate on
+# warnings, and no rewrite can quietly stop blocking real errors.
+yamlroot="$(mktemp -d)"
+trap 'rm -rf "$badroot" "$yamlroot"' EXIT
+# Long line + one-space comment: [warning] only under this repo's .yamllint.
+{
+    printf 'key: %s # one-space comment\n' "$(printf 'x%.0s' $(seq 1 130))"
+} > "$yamlroot/warn.yml"
+case_ 0 "lint-yaml: warning-only YAML passes the gate" \
+    bash -c "cd '$PWD' && ci/linter/lint-yaml.sh '$yamlroot/warn.yml'"
+
+printf 'a: 1\na: 2\n' > "$yamlroot/err.yml"
+case_ 1 "lint-yaml: error-level YAML fails the gate" \
+    bash -c "cd '$PWD' && ci/linter/lint-yaml.sh '$yamlroot/err.yml'"
+
 if [ "$rc" -eq 0 ]; then
     echo "== lint gate selftest: all controls held =="
 else
