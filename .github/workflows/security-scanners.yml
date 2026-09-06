@@ -1,4 +1,4 @@
-# sync-sha: b2a7b53e302f26835123adafeef6f9fa7ae8d5f20a164c0eab0f6de25369504a
+# sync-sha: 0b0b355132b43de9c9342054d5f28c98301b5031c6dd7d07680d84c2543a3fac
 name: Security scanners
 
 # Static / security scanners gate on every PR/push — flawfinder, clang-tidy
@@ -8,6 +8,10 @@ name: Security scanners
 # Action pins (keep in sync with build-test.yml header):
 # actions/checkout@v5        -> 93cb6efe18208431cddfb8368fd83d5badbf9bfd
 # actions/upload-artifact@v5 -> 330a01c490aca151604b8cf639adc76d48f6c5d4
+#
+# gitleaks pin (own job below, hosted runner, no self-hosted deps):
+# gitleaks v8.30.1 linux_x64 tarball, sha256 verified against the upstream
+# release checksums file -- see the "Install gitleaks" step.
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
@@ -133,3 +137,44 @@ jobs:
             ${{ github.workspace }}/clang-tidy.log
             ${{ github.workspace }}/semgrep.log
           retention-days: 14
+
+  gitleaks:
+    name: gitleaks (full history)
+    # Independent of the self-hosted `scanners` job above: no build tree, no
+    # ccache, no nginx source needed -- a hosted runner is both sufficient and
+    # keeps a scanner-supply-chain issue from taking a self-hosted slot.
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout module (full history)
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          persist-credentials: false
+          # Full history, not just HEAD: a secret committed and later removed
+          # is still a leak. gitleaks' own default scan mode walks history,
+          # but only if the clone has it.
+          fetch-depth: 0
+      - name: Install gitleaks
+        run: |
+          set -euo pipefail
+          # Pinned CLI binary + checksum, not a floating action tag or a
+          # `latest` release fetch. gitleaks/gitleaks-action is EULA-licensed
+          # (Gitleaks LLC commercial terms) and does not expose a clean CLI
+          # version pin, so this repo runs the open-source CLI directly --
+          # same pattern as the Pebble binary pin in windows-build.yml.
+          ver=8.30.1
+          sha=551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
+          curl -fsSL -o gitleaks.tar.gz \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${ver}/gitleaks_${ver}_linux_x64.tar.gz"
+          echo "${sha}  gitleaks.tar.gz" | sha256sum -c -
+          tar -xzf gitleaks.tar.gz gitleaks
+          install -m 0755 gitleaks /usr/local/bin/gitleaks
+          rm -f gitleaks.tar.gz gitleaks
+          gitleaks version
+      - name: gitleaks (full history scan)
+        run: |
+          set -euo pipefail
+          # .gitleaks.toml at the repo root is auto-discovered; it allowlists
+          # only the module's own ACME test fixtures (see that file's header)
+          # -- nothing broadened here to force a green run.
+          gitleaks git --no-banner --redact -v "$GITHUB_WORKSPACE"
