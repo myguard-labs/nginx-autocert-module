@@ -1154,7 +1154,7 @@ ngx_autocert_open_file_path(const char *path, int flags)
  * all; this function can).
  *
  * Contract: the caller has already walked every ACE in the file's DACL and
- * reduced each one to a (is_owner, is_allow, is_tolerated) tuple:
+ * reduced each one to a (is_owner, is_allow, is_tolerated, is_write) tuple:
  *   - is_owner:     the ACE's SID equals the file owner's SID (EqualSid).
  *   - is_allow:     the ACE type is ACCESS_ALLOWED_ACE_TYPE (a DENY ACE
  *                    grants nothing and is not evidence of exposure).
@@ -1168,13 +1168,24 @@ ngx_autocert_open_file_path(const char *path, int flags)
  *                    without adding any real security. Nothing else is
  *                    tolerated: a non-owner, non-tolerated ALLOW ace is
  *                    exactly the exposure account.c's guard exists to catch.
+ *   - is_write:     the ACE's access mask grants a write-ish right, as
+ *                    decided by ngx_autocert_win32_mask_is_write() below.
+ *                    A foreign ALLOW without one is a READ grant only.
  *
- * Returns the POSIX group/other bits that should be OR'd into st_mode
- * (S_IRWXG|S_IRWXO when any ACE is a non-owner, non-tolerated ALLOW; 0 when
- * every ALLOW ace is owner-only or tolerated). Callers combine this with
- * S_IFREG and the fixed owner bits (0600) the way the win32 fstat bodies
- * already build st_mode; this function decides only the group/other half,
- * which is the half account.c's guard actually reads.
+ * Returns the POSIX group/other bits that should be OR'd into st_mode:
+ *   - S_IRWXG|S_IRWXO when any ACE is a non-owner, non-tolerated ALLOW that
+ *     grants write (or when the walk is empty, below);
+ *   - S_IRGRP|S_IROTH when every such foreign ALLOW is read-only — enough
+ *     for ngx_autocert_check_owner_mode(secret=1) to refuse a readable key,
+ *     while secret=0 (the store directory, which holds public certificates)
+ *     accepts it exactly as it accepts a 0755 directory on POSIX. Before this
+ *     distinction existed a read-only inherited grant to Users was
+ *     indistinguishable from full control and every ordinary Windows store
+ *     was refused;
+ *   - 0 when every ALLOW ace is owner-only or tolerated.
+ * Callers combine this with S_IFREG/S_IFDIR and the fixed owner bits (0600 /
+ * 0700) the way the win32 fstat bodies already build st_mode; this function
+ * decides only the group/other half, which is the half the guards read.
  *
  * n == 0 (a DACL with no ACEs at all, i.e. NULL DACL / everyone denied by
  * default, or the caller passing an empty walk) is NOT "no exposure found":
@@ -1185,15 +1196,53 @@ ngx_autocert_open_file_path(const char *path, int flags)
  * rather than silently returning "safe", so it also returns the flagged
  * bits. A real owner-only DACL always has at least the owner's ACE.
  */
+
+/*
+ * The access-mask rights that let a principal plant, replace, delete or
+ * re-permission the object, spelled as literals so this decision has a Linux
+ * test oracle without <windows.h>. ngx_autocert_win32.h static-asserts the
+ * value against the real SDK constants on the win32 build, so the two cannot
+ * drift apart silently.
+ *
+ *   FILE_WRITE_DATA / FILE_ADD_FILE            0x00000002
+ *   FILE_APPEND_DATA / FILE_ADD_SUBDIRECTORY   0x00000004
+ *   FILE_WRITE_EA                              0x00000010
+ *   FILE_DELETE_CHILD                          0x00000040
+ *   FILE_WRITE_ATTRIBUTES                      0x00000100
+ *   DELETE                                     0x00010000
+ *   WRITE_DAC                                  0x00040000
+ *   WRITE_OWNER                                0x00080000
+ *   GENERIC_ALL                                0x10000000
+ *   GENERIC_WRITE                              0x40000000
+ *
+ * FILE_ALL_ACCESS (0x001F01FF) and the "Modify" template (0x001301BF) both
+ * contain several of these, so they need no entry of their own. The two
+ * attribute/EA rights are included deliberately: no stock Windows template
+ * grants them without FILE_WRITE_DATA, and erring toward "write" is the
+ * fail-closed direction. GENERIC_READ / GENERIC_EXECUTE and every FILE_READ_*
+ * / FILE_EXECUTE right are read-only and stay out.
+ */
+#define NGX_AUTOCERT_WIN32_WRITE_MASK  0x500D0156u
+
+static ngx_inline ngx_int_t
+ngx_autocert_win32_mask_is_write(uint32_t mask)
+{
+    return (mask & NGX_AUTOCERT_WIN32_WRITE_MASK) ? 1 : 0;
+}
+
 static ngx_inline ngx_autocert_mode_t
 ngx_autocert_win32_dacl_mode(const ngx_int_t *is_owner,
-    const ngx_int_t *is_allow, const ngx_int_t *is_tolerated, ngx_uint_t n)
+    const ngx_int_t *is_allow, const ngx_int_t *is_tolerated,
+    const ngx_int_t *is_write, ngx_uint_t n)
 {
-    ngx_uint_t  i;
+    ngx_uint_t           i;
+    ngx_autocert_mode_t  bits;
 
     if (n == 0) {
         return (ngx_autocert_mode_t) (S_IRWXG | S_IRWXO);
     }
+
+    bits = 0;
 
     for (i = 0; i < n; i++) {
         if (!is_allow[i]) {
@@ -1202,10 +1251,13 @@ ngx_autocert_win32_dacl_mode(const ngx_int_t *is_owner,
         if (is_owner[i] || is_tolerated[i]) {
             continue;
         }
-        return (ngx_autocert_mode_t) (S_IRWXG | S_IRWXO);
+        if (is_write[i]) {
+            return (ngx_autocert_mode_t) (S_IRWXG | S_IRWXO);
+        }
+        bits = (ngx_autocert_mode_t) (S_IRGRP | S_IROTH);
     }
 
-    return 0;
+    return bits;
 }
 
 

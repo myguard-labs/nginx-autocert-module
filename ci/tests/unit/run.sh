@@ -241,8 +241,8 @@ gcc -D_GNU_SOURCE -Wall -Wextra -Werror $CORE_INC \
 # real on win32 instead of a tautology -- before W11 the fabricated st_mode
 # was a constant S_IFREG|0600 regardless of the file's actual DACL, so a
 # world-readable account key always passed the guard on win32. Given the
-# caller's (is_owner, is_allow, is_tolerated) walk of a file's real DACL,
-# this decides whether the group/other bits that guard checks should be set.
+# caller's (is_owner, is_allow, is_tolerated, is_write) walk of a file's
+# real DACL, this decides whether the group/other bits that guard checks should be set.
 # No win32-header dependency (plain ngx_int_t arrays), same reasoning as
 # test_win32_mutex_verdict.c above: this runs the real production function
 # on Linux.

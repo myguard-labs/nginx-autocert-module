@@ -191,6 +191,15 @@ typedef struct {
 #ifndef S_IWOTH
 #define S_IWOTH  0000002
 #endif
+/* The individual READ bits: ngx_autocert_win32_dacl_mode() maps a read-only
+ * foreign ACE to exactly these so a secret still refuses it while a store
+ * directory accepts it. MSVC defines neither. */
+#ifndef S_IRGRP
+#define S_IRGRP  0000040
+#endif
+#ifndef S_IROTH
+#define S_IROTH  0000004
+#endif
 
 
 /*
@@ -347,7 +356,9 @@ static ngx_inline int ngx_autocert_win32_errno(DWORD err);
  */
 static ngx_inline ngx_autocert_mode_t
 ngx_autocert_win32_dacl_mode(const ngx_int_t *is_owner,
-    const ngx_int_t *is_allow, const ngx_int_t *is_tolerated, ngx_uint_t n);
+    const ngx_int_t *is_allow, const ngx_int_t *is_tolerated,
+    const ngx_int_t *is_write, ngx_uint_t n);
+static ngx_inline ngx_int_t ngx_autocert_win32_mask_is_write(uint32_t mask);
 
 /*
  * W13 — flock(fd, LOCK_EX | LOCK_NB) -> LockFileEx.
@@ -1403,8 +1414,23 @@ ngx_autocert_unlinkat(int dfd, const char *name, int flags)
  * this cannot determine the truth. This is the opposite default of a normal
  * "return -1 on error" API and is deliberate; callers must not reinterpret a
  * -1 return here as "leave st_mode alone".
+ *
+ * Each ALLOW ACE's access Mask is classified too (is_write): a read-only
+ * grant to a foreign SID — the Users/Authenticated Users read ACE every
+ * directory under a stock Windows tree inherits — maps to the READ bits
+ * only, so a secret still refuses it and the store directory accepts it.
+ * Without the mask the walk could not tell a read grant from full control
+ * and refused every ordinary store.
  */
 #define NGX_AUTOCERT_DACL_WALK_MAX  32
+
+/* The literal in ngx_autocert_shared.h must equal the SDK's constants; a
+ * mismatch is a compile error here, on the one build that has the SDK. */
+typedef char  ngx_autocert_win32_write_mask_check_t[
+    (NGX_AUTOCERT_WIN32_WRITE_MASK
+     == (FILE_WRITE_DATA | FILE_APPEND_DATA | FILE_WRITE_EA
+         | FILE_DELETE_CHILD | FILE_WRITE_ATTRIBUTES | DELETE | WRITE_DAC
+         | WRITE_OWNER | GENERIC_ALL | GENERIC_WRITE)) ? 1 : -1];
 
 static ngx_inline int
 ngx_autocert_win32_mode_from_dacl(HANDLE h, ngx_autocert_mode_t *mode_bits)
@@ -1416,6 +1442,7 @@ ngx_autocert_win32_mode_from_dacl(HANDLE h, ngx_autocert_mode_t *mode_bits)
     ngx_int_t              is_owner[NGX_AUTOCERT_DACL_WALK_MAX];
     ngx_int_t              is_allow[NGX_AUTOCERT_DACL_WALK_MAX];
     ngx_int_t              is_tolerated[NGX_AUTOCERT_DACL_WALK_MAX];
+    ngx_int_t              is_write[NGX_AUTOCERT_DACL_WALK_MAX];
     BYTE                   system_buf[SECURITY_MAX_SID_SIZE];
     BYTE                   admins_buf[SECURITY_MAX_SID_SIZE];
     DWORD                  system_len, admins_len, i, err;
@@ -1445,6 +1472,7 @@ ngx_autocert_win32_mode_from_dacl(HANDLE h, ngx_autocert_mode_t *mode_bits)
     ngx_memzero(is_owner, sizeof(is_owner));
     ngx_memzero(is_allow, sizeof(is_allow));
     ngx_memzero(is_tolerated, sizeof(is_tolerated));
+    ngx_memzero(is_write, sizeof(is_write));
 
     err = GetSecurityInfo(h, SE_KERNEL_OBJECT,
                 OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
@@ -1510,6 +1538,7 @@ ngx_autocert_win32_mode_from_dacl(HANDLE h, ngx_autocert_mode_t *mode_bits)
     for (i = 0; i < size_info.AceCount; i++) {
         ACE_HEADER  *hdr;
         PSID         ace_sid;
+        ACCESS_MASK  mask;
         int          allow;
 
         if (!GetAce(dacl, i, (LPVOID *) &hdr)) {
@@ -1524,19 +1553,22 @@ ngx_autocert_win32_mode_from_dacl(HANDLE h, ngx_autocert_mode_t *mode_bits)
          * ALLOW grants access (the exposure this guard looks for), DENY
          * grants nothing so it is never evidence of exposure. Anything else
          * (object-specific / callback ACE types) is conservatively treated
-         * as neither owner nor tolerated, so a non-owner one still flags —
-         * fail closed rather than assume a type this shim does not
-         * recognise is benign. */
+         * as neither owner nor tolerated AND as write-granting, so a
+         * non-owner one still flags with the full bits — fail closed rather
+         * than assume a type this shim does not recognise is benign. */
         if (hdr->AceType == ACCESS_ALLOWED_ACE_TYPE) {
             ace_sid = (PSID) &((ACCESS_ALLOWED_ACE *) hdr)->SidStart;
+            mask = ((ACCESS_ALLOWED_ACE *) hdr)->Mask;
             allow = 1;
         } else if (hdr->AceType == ACCESS_DENIED_ACE_TYPE) {
             ace_sid = (PSID) &((ACCESS_DENIED_ACE *) hdr)->SidStart;
+            mask = ((ACCESS_DENIED_ACE *) hdr)->Mask;
             allow = 0;
         } else {
             is_owner[n] = 0;
             is_allow[n] = 1;
             is_tolerated[n] = 0;
+            is_write[n] = 1;
             n++;
             continue;
         }
@@ -1545,13 +1577,14 @@ ngx_autocert_win32_mode_from_dacl(HANDLE h, ngx_autocert_mode_t *mode_bits)
         is_owner[n] = (owner != NULL && EqualSid(ace_sid, owner)) ? 1 : 0;
         is_tolerated[n] = (EqualSid(ace_sid, system_sid)
                             || EqualSid(ace_sid, admins_sid)) ? 1 : 0;
+        is_write[n] = ngx_autocert_win32_mask_is_write((uint32_t) mask);
         n++;
     }
 
     LocalFree(sd);
 
     *mode_bits = ngx_autocert_win32_dacl_mode(is_owner, is_allow,
-                                               is_tolerated, n);
+                                               is_tolerated, is_write, n);
     return 0;
 }
 
