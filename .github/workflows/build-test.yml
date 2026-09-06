@@ -1,4 +1,4 @@
-# sync-sha: b035a4761e722ef69d07aa6bf148b3506064ce312041ac6e4d6b7510398bd708
+# sync-sha: 41224f8205aedae49a611f6060ecd87ed747ab9706073c8ab0f462dd41a2e97b
 name: Build & Test
 
 # Third-party actions pinned to commit SHAs for supply-chain safety.
@@ -434,6 +434,41 @@ jobs:
       - name: Build + run unit tests
         env:
           NGX_BUILD_DIR: ${{ github.workspace }}/${{ needs.resolve.outputs.nginx_dir }}
+        run: bash ci/tests/unit/run.sh
+
+  # Same 12-binary unit suite as `unit-tests` above, rebuilt and relinked
+  # under ASan+UBSan (SANITIZE=1, ci/tests/unit/run.sh) so a heap/UB defect
+  # on the merge path is caught on every PR rather than only in the weekly
+  # asan.yml soak (which exercises the SERVE path, not this suite). The
+  # nginx objects it links against are the plain (unsanitized) build-nginx
+  # artifact -- ASan's interceptors work at runtime and do not require the
+  # linked objects to be sanitizer-built themselves.
+  unit-tests-asan:
+    name: Unit tests (ASan+UBSan)
+    needs: [resolve, build-nginx, guard-suite]
+    runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || fromJSON('["self-hosted","builder02","lxc"]') }}
+    timeout-minutes: 15
+    steps:
+      - name: Checkout module
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          persist-credentials: false
+
+      - name: Setup build deps
+        uses: ./.github/actions/setup  # zizmor: ignore[self-repository] actionlint rejects $/ (actionlint#711)
+        with:
+          packages: build-essential libssl-dev
+
+      - name: Download nginx build
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: build-nginx
+          path: ${{ needs.resolve.outputs.nginx_dir }}
+
+      - name: Build + run unit tests under ASan+UBSan
+        env:
+          NGX_BUILD_DIR: ${{ github.workspace }}/${{ needs.resolve.outputs.nginx_dir }}
+          SANITIZE: "1"
         run: bash ci/tests/unit/run.sh
 
   # ------------------------------------------------------------------ nginx e2e
