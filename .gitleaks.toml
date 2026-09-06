@@ -34,11 +34,21 @@ paths = [
   # Unit-test vectors: P-256 keys and ALPN/crypto fixtures generated for tests.
   # vec_p256_p8.pem is a PKCS#8 test vector; test_crypto.c and test_alpn.c
   # embed PEM literals so the unit binaries need no filesystem fixtures.
+  #
+  # `git` (full-history) scanning matches the path as recorded in the commit
+  # that introduced the finding, not the file's current location -- so the
+  # bare `test/` prefix from before commit c9de3e8 ("consolidate test/ fuzz/
+  # tests/ under one tests/ tree", #96) still has to be allowlisted even
+  # though nothing lives there today. Same fixture, old path; not a new
+  # fixture class.
   '''^ci/tests/unit/''',
+  '''^test/''',
 
   # Fuzz corpus: recorded ACME directory/authorization JSON. The "token"
-  # members are the parse surface being fuzzed, not credentials.
+  # members are the parse surface being fuzzed, not credentials. Old
+  # pre-reorg path was `fuzz/corpus/` (introduced before #96/#107).
   '''^ci/fuzz/corpus/''',
+  '''^fuzz/corpus/''',
 
   # Vendored nginx source, fetched at build time and untracked. Its QUIC code
   # assigns to `client_key.len` / `server_key.len`, which trips generic-api-key.
