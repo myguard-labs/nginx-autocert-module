@@ -44,6 +44,13 @@ ngx_log_error_core(ngx_uint_t level, ngx_log_t *log, ngx_err_t err,
 
 #include "src/ngx_http_autocert_conf.h"  /* ngx_autocert_ident.h */
 
+/*
+ * Only json_safe is used here. log_safe is `static` in production, so pulling
+ * its slice in unused would trip -Werror=unused-function and would also drag
+ * ngx_escape_json into the link, which this TU does not link ngx_string.o for.
+ */
+#define NGX_AUTOCERT_SLICE_SKIP_ngx_autocert_account_log_safe
+
 #include "generated_jsonsafe.inc" /* ngx_autocert_account_json_safe */
 
 #include <stdio.h>
@@ -157,6 +164,35 @@ main(void)
         buf[253] = 'a';
         buf[254] = '\0'; /* 254 bytes -- must be rejected */
         CHECK(name_ok(buf) == 0, "rejects a name of 254 bytes (over cap)");
+
+        /*
+         * The cap is on the WHOLE name, so a wildcard does not buy two extra
+         * bytes: "*." plus a 253-byte suffix is 255 total and must be
+         * rejected. Measuring only the post-"*." remainder accepted it.
+         */
+        {
+            char  wild[sizeof(buf) + 2];
+
+            buf[253] = '\0';                    /* back to a 253-byte name */
+            snprintf(wild, sizeof(wild), "*.%s", buf);
+            CHECK(strlen(wild) == 255, "wildcard fixture is 255 bytes total");
+            CHECK(name_ok(wild) == 0,
+                  "rejects a wildcard whose FULL length exceeds 253 "
+                  "(the '*.' prefix buys no extra bytes)");
+        }
+
+        /* A wildcard at exactly the cap is still accepted -- the fix must not
+         * over-tighten into rejecting a legal name. */
+        {
+            char  wild[sizeof(buf) + 2];
+
+            buf[251] = '\0';                    /* 251 + "*." == 253 */
+            snprintf(wild, sizeof(wild), "*.%s", buf);
+            CHECK(strlen(wild) == 253, "wildcard boundary fixture is 253 bytes");
+            CHECK(buf[250] != '.', "wildcard boundary fixture ends a label");
+            CHECK(name_ok(wild) == 1,
+                  "accepts a wildcard of exactly 253 bytes (boundary)");
+        }
     }
 
     /* --- autocert_contact: reuse of ngx_autocert_account_json_safe --- */

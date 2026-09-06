@@ -138,23 +138,24 @@ main(void)
 
         /* over-long input is truncated to the buffer's capacity (a hostile
          * server sending a multi-megabyte body must not flood the log or
-         * overrun the caller's fixed buffer). Feed a body of all '\r' so
-         * WORST-CASE escaping (2 bytes per input byte, "\\r") is what the
-         * cap has to survive -- this is the case that would overrun a naive
-         * "cap = buf_size" (rather than buf_size / 6) implementation. */
+         * overrun the caller's fixed buffer). Feed a body of 0x01, whose
+         * escape is the SIX-byte "\\u0001" -- that, not '\r', is the
+         * worst case the buf_size / 6 cap exists for. '\r' escapes to the
+         * two-byte "\\r", so a regressed "buf_size / 2" cap would still pass
+         * a '\r' body while overflowing on any other control byte. */
         {
             static u_char  big[4096];
             size_t         i;
 
             for (i = 0; i < sizeof(big); i++) {
-                big[i] = '\r';
+                big[i] = 0x01;          /* six-byte escape sequence */
             }
             src.data = big;
             src.len = sizeof(big);
             out = ngx_autocert_account_log_safe(&src, buf, sizeof(buf));
             CHECK(out.len <= sizeof(buf),
                   "log_safe: escaped output never exceeds the caller's "
-                  "buffer capacity, even under worst-case 2x-per-byte "
+                  "buffer capacity, even under worst-case 6x-per-byte "
                   "escaping");
             CHECK(out.len < sizeof(buf),
                   "log_safe: an over-long body is truncated (bounded), "

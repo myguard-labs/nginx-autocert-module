@@ -44,14 +44,28 @@ for FN in "${FNS[@]}"; do
     fi
     rtype=$((start - 1))   # the return-type line precedes the name
 
-    awk -v s="$rtype" -v name="$FN" '
-        NR >= s {
-            print
-            if (entered && $0 == "}") { exit }
-            if ($0 ~ ("^" name "\\(")) { entered = 1 }
-        }
-    ' "$SRC" >> "$OUT"
-    echo "" >> "$OUT"
+    # Wrap each slice in its own opt-out guard. A consumer may need only ONE
+    # of these helpers -- test_name_valid.c uses json_safe alone. log_safe is
+    # `static` in production, so a TU that includes the slice without calling
+    # it trips -Werror=unused-function AND drags in ngx_escape_json at link
+    # time; either one fails the build, which means that test silently stops
+    # running. Such a consumer defines NGX_AUTOCERT_SLICE_SKIP_<FN> before the
+    # include. Guarding beats __attribute__((unused)): that silences the
+    # warning but still emits the body, so the link dependency remains.
+    {
+        printf '#ifndef NGX_AUTOCERT_SLICE_SKIP_%s\n' "$FN"
+
+        awk -v s="$rtype" -v name="$FN" '
+            NR >= s {
+                print
+                if (entered && $0 == "}") { exit }
+                if ($0 ~ ("^" name "\\(")) { entered = 1 }
+            }
+        ' "$SRC"
+
+        printf '#endif /* NGX_AUTOCERT_SLICE_SKIP_%s */\n' "$FN"
+        echo ""
+    } >> "$OUT"
 done
 
 for FN in "${FNS[@]}"; do

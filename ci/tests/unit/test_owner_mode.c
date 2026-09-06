@@ -105,6 +105,14 @@ main(void)
         perror("mkdir store-group");
         return 2;
     }
+    /* mkdir's mode is filtered by the umask, so under the usual 0022 this
+     * fixture lands at 0750 and never carries S_IWGRP -- a guard that
+     * rejected group-READ but accepted group-WRITE would still pass here.
+     * chmod is not umask-filtered, so force the bits the case is about. */
+    if (chmod(path, 0770) == -1) {
+        perror("chmod store-group");
+        return 2;
+    }
     fd = open(path, O_RDONLY | O_DIRECTORY);
     if (fd == -1) {
         perror("open store-group");

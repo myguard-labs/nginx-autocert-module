@@ -122,7 +122,12 @@ ngx_autocert_dns_name_valid(const ngx_str_t *name)
 
     end = name->data + name->len;
 
-    if (p >= end || (size_t) (end - p) > 253) {
+    /*
+     * The 253-byte cap is on the WHOLE name, not on the part after a stripped
+     * "*." -- measuring only the suffix let a wildcard buy two extra bytes and
+     * accepted a 255-byte name.
+     */
+    if (p >= end || name->len > 253) {
         return 0;
     }
 
