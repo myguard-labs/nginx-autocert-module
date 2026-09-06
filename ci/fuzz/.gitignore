@@ -20,3 +20,27 @@ corpus_http/*
 !corpus_http/created
 !corpus_http/junk
 !corpus_http/notfound
+# Base64 corpus: ignore libFuzzer-discovered units; track only the named seeds.
+corpus_b64/*
+!corpus_b64/all_dash_underscore
+!corpus_b64/eab_hmac_key_32
+!corpus_b64/empty
+!corpus_b64/exact_4char
+!corpus_b64/has_newline
+!corpus_b64/has_null_byte
+!corpus_b64/has_padding_equals
+!corpus_b64/has_space
+!corpus_b64/has_std_b64_plus
+!corpus_b64/has_std_b64_slash
+!corpus_b64/high_byte_0x80
+!corpus_b64/jws_payload_empty
+!corpus_b64/jws_payload_order
+!corpus_b64/jws_protected_header
+!corpus_b64/jws_signature_ecdsa
+!corpus_b64/len_mod4_eq1
+!corpus_b64/mixed_valid_invalid
+!corpus_b64/short_1char
+!corpus_b64/short_2char
+!corpus_b64/short_3char
+!corpus_b64/utf8_multibyte
+!corpus_b64/very_long_valid
