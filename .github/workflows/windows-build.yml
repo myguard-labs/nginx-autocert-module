@@ -1,4 +1,4 @@
-# sync-sha: 8a00d132a3e11f87f2d885b33ac92b7bbe2683db3d36243d8ff9eec214143391
+# sync-sha: e848ca23d1c469c13c126230233fb8ddb618c65664e2d1afe0eabf12b7bf12f7
 name: Windows build
 
 # Native Windows port gate (W17). Proves the module compiles and links on
@@ -494,7 +494,7 @@ jobs:
           $keyauth = "$token.9jg46WB3rR_AHD-EBXdN7cBkH1WOu0tA3M9fm21mqTI"
 
           New-Item -ItemType Directory -Force `
-            -Path conf, logs, temp, temp/store | Out-Null
+            -Path conf, logs, temp | Out-Null
 
           # ABSOLUTE store path, with forward slashes. A relative one is
           # resolved against the CONFIG FILE's directory, not the -p prefix, so
@@ -508,7 +508,14 @@ jobs:
           # The directive-table step above gets away with "temp/store" because
           # nginx -t never opens the store; this is the first step that runs
           # the server for real.
-          $store = ((Resolve-Path temp/store).Path -replace '\\', '/')
+          #
+          # The store itself is NOT pre-created: the module creates it with an
+          # owner-only DACL, which is the deployment shape a Windows admin
+          # gets by pointing autocert_store_path at a fresh directory. A
+          # directory pre-created here would inherit the workspace ACL, and
+          # every stock volume root grants Authenticated Users Modify, so the
+          # driver would (correctly) refuse to adopt it.
+          $store = ((Resolve-Path temp).Path -replace '\\', '/') + '/store'
 
           # worker_processes 1: this test is about the challenge-serve path.
           # The N>1 singleton assertion is W19 and needs its own config.
@@ -709,6 +716,12 @@ jobs:
               Write-Host "== error.log =="
               Get-Content logs/error.log | Select-Object -Last 40 | Write-Host
             }
+            # The store's effective DACL, for when the driver refuses to
+            # adopt it: the guard's one-line error cannot say which ACE.
+            if (Test-Path $store) {
+              Write-Host "== icacls $store =="
+              icacls $store | Write-Host
+            }
           }
 
           # -s stop's exit status is irrelevant to the verdict; the assertions
@@ -743,13 +756,12 @@ jobs:
           $root = 'w19'
           Remove-Item -Recurse -Force $root -ErrorAction SilentlyContinue
           New-Item -ItemType Directory -Force `
-            -Path $root, "$root/conf", "$root/logs", "$root/temp", `
-                  "$root/store" | Out-Null
+            -Path $root, "$root/conf", "$root/logs", "$root/temp" | Out-Null
 
           # Absolute, forward-slashed, for the same reason as the HTTP-01 step:
           # a relative store path resolves against the config file's directory,
           # not -p, and the driver then fails to open it.
-          $store = ((Resolve-Path "$root/store").Path -replace '\\', '/')
+          $store = ((Resolve-Path $root).Path -replace '\\', '/') + '/store' # module-created
 
           # worker_processes 2 is the whole point: win32 spawns that many real
           # processes (ngx_start_worker_processes loops ngx_spawn_process at
@@ -911,7 +923,7 @@ jobs:
           # which reads like a config error but is a missing directory.
           New-Item -ItemType Directory -Force `
             -Path $root, "$root/conf", "$root/logs", "$root/temp", `
-                  "$root/store", "$root/pebble" | Out-Null
+                  "$root/pebble" | Out-Null
 
           # --- fetch Pebble (native windows/amd64, no Docker, no build) ---
           # sha256-pinned like every other download in this workflow (see the
@@ -1034,7 +1046,7 @@ jobs:
 
             # --- config: the IP literal is the server_name; the listener
             # binds it on the VA's httpPort so the http-01 GET lands. ---
-            $store = ((Resolve-Path "$root/store").Path -replace '\\', '/')
+            $store = ((Resolve-Path $root).Path -replace '\\', '/') + '/store' # module-created
             $ca    = ((Resolve-Path "$root/ca.pem").Path -replace '\\', '/')
             $lines = @(
               'error_log logs/error.log info;',
@@ -1341,8 +1353,7 @@ jobs:
 
           Remove-Item -Recurse -Force $root -ErrorAction SilentlyContinue
           New-Item -ItemType Directory -Force `
-            -Path $root, "$root/conf", "$root/logs", "$root/temp", `
-                  "$root/store" | Out-Null
+            -Path $root, "$root/conf", "$root/logs", "$root/temp" | Out-Null
 
           # Reuse the Pebble binary and PEMs the issuance step already fetched
           # and sha256-verified into w18b/. Re-downloading would double the
@@ -1492,7 +1503,7 @@ jobs:
               throw "Pebble did not come up"
             }
 
-            $store = ((Resolve-Path "$root/store").Path -replace '\\', '/')
+            $store = ((Resolve-Path $root).Path -replace '\\', '/') + '/store' # module-created
             $ca    = ((Resolve-Path "$root/ca.pem").Path -replace '\\', '/')
             $lines = @(
               'error_log logs/error.log info;',
