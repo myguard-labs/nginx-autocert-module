@@ -14,6 +14,26 @@ if [ -z "${WORKSPACE:-}" ]; then
 	WORKSPACE="$(cd "$(dirname "$0")/../../.." && pwd)"
 fi
 
+# Compiler + optional sanitizer instrumentation. Default (CC unset, SANITIZE
+# unset) is byte-identical to the historical hardcoded `gcc` invocation: CC
+# resolves to plain "gcc" and both flag/lib additions are empty strings, so
+# every gcc line below compiles and links exactly as before.
+#
+# SANITIZE=1 (or any non-empty value) turns on ASan+UBSan for the WHOLE suite
+# (same flags ci/tests/unit/run-asan.sh already uses for its one test), so the
+# same 12-binary suite this script runs by default can also run instrumented,
+# rather than maintaining a second parallel script per binary.
+CC="${CC:-gcc}"
+SANITIZE_CFLAGS=""
+SANITIZE_LIBS=""
+if [ -n "${SANITIZE:-}" ]; then
+	SANITIZE_CFLAGS="-fsanitize=address,undefined -fno-sanitize-recover=all"
+	SANITIZE_LIBS="-lasan -lubsan"
+fi
+# EXTRA_CFLAGS: free-form additional compiler flags (e.g. -O1 -g3), applied to
+# every compile/link invocation alongside SANITIZE_CFLAGS. Empty by default.
+EXTRA_CFLAGS="${EXTRA_CFLAGS:-}"
+
 # Require NGX_BUILD_DIR
 if [ -z "${NGX_BUILD_DIR:-}" ]; then
 	echo "Usage: NGX_BUILD_DIR=<built nginx tree> $0"
@@ -63,17 +83,17 @@ STORE_OBJS="$BASE_OBJS $NGX/objs/src/core/ngx_slab.o \
 # ngx_inet.o: crypto.c now pulls ngx_autocert_str_is_ip (IP-cert arc),
 # which references ngx_inet_addr / ngx_inet6_addr.
 # shellcheck disable=SC2086
-gcc -Wall -Wextra -Werror -DNGX_AUTOCERT_TEST_FAULTS $CORE_INC -o test_crypto \
+"$CC" $SANITIZE_CFLAGS $EXTRA_CFLAGS -Wall -Wextra -Werror -DNGX_AUTOCERT_TEST_FAULTS $CORE_INC -o test_crypto \
 	"$WORKSPACE/ci/tests/unit/test_crypto.c" \
 	"$WORKSPACE/src/ngx_http_autocert_crypto.c" \
-	$INET_OBJS -lssl -lcrypto
+	$INET_OBJS -lssl -lcrypto $SANITIZE_LIBS
 ./test_crypto
 
 # shellcheck disable=SC2086
-gcc -Wall -Wextra -Werror $CORE_INC -o test_json \
+"$CC" $SANITIZE_CFLAGS $EXTRA_CFLAGS -Wall -Wextra -Werror $CORE_INC -o test_json \
 	"$WORKSPACE/ci/tests/unit/test_json.c" \
 	"$WORKSPACE/src/ngx_autocert_json.c" \
-	$BASE_OBJS
+	$BASE_OBJS $SANITIZE_LIBS
 ./test_json
 
 HTTP_INC="-I$NGX/src/core -I$NGX/src/event -I$NGX/src/event/modules \
@@ -82,9 +102,9 @@ HTTP_INC="-I$NGX/src/core -I$NGX/src/event -I$NGX/src/event/modules \
 IPIDENT_OBJS="$NGX/objs/src/core/ngx_string.o $NGX/objs/src/core/ngx_inet.o \
       $NGX/objs/src/core/ngx_palloc.o $NGX/objs/src/os/unix/ngx_alloc.o"
 # shellcheck disable=SC2086
-gcc -Wall -Wextra -Werror $HTTP_INC -o test_ipident \
+"$CC" $SANITIZE_CFLAGS $EXTRA_CFLAGS -Wall -Wextra -Werror $HTTP_INC -o test_ipident \
 	"$WORKSPACE/ci/tests/unit/test_ipident.c" \
-	$IPIDENT_OBJS -lssl -lcrypto
+	$IPIDENT_OBJS -lssl -lcrypto $SANITIZE_LIBS
 ./test_ipident
 
 # Self-contained: the parser bodies are sliced from the shipped
@@ -92,22 +112,23 @@ gcc -Wall -Wextra -Werror $HTTP_INC -o test_ipident \
 # fuzz shim — no nginx objects needed (the rest of that TU is
 # event/SSL/resolver machinery the parser does not touch).
 bash "$WORKSPACE/ci/fuzz/extract_http.sh"
-gcc -Wall -Wextra -Werror -I"$WORKSPACE" \
-	-o test_http "$WORKSPACE/ci/tests/unit/test_http.c"
+# shellcheck disable=SC2086
+"$CC" $SANITIZE_CFLAGS $EXTRA_CFLAGS -Wall -Wextra -Werror -I"$WORKSPACE" \
+	-o test_http "$WORKSPACE/ci/tests/unit/test_http.c" $SANITIZE_LIBS
 ./test_http
 
 # The store source carries an (intentional) unused init-zone `data`
 # param, so compile it with nginx's own -Wall (no -Wextra), and keep
 # -Wextra -Werror on the test TU.
 # shellcheck disable=SC2086
-gcc -Wall -Werror $CORE_INC -c \
+"$CC" $SANITIZE_CFLAGS $EXTRA_CFLAGS -Wall -Werror $CORE_INC -c \
 	"$WORKSPACE/src/ngx_autocert_challenge.c" -o challenge.o
 # shellcheck disable=SC2086
-gcc -Wall -Wextra -Werror $CORE_INC -c \
+"$CC" $SANITIZE_CFLAGS $EXTRA_CFLAGS -Wall -Wextra -Werror $CORE_INC -c \
 	"$WORKSPACE/ci/tests/unit/test_challenge.c" \
 	-o test_challenge_tu.o
 # shellcheck disable=SC2086
-gcc -o test_challenge test_challenge_tu.o challenge.o $STORE_OBJS
+"$CC" $SANITIZE_CFLAGS $EXTRA_CFLAGS -o test_challenge test_challenge_tu.o challenge.o $STORE_OBJS $SANITIZE_LIBS
 ./test_challenge
 
 # autolabel A1: runtime cert-request registry. Owner/consumer is
@@ -115,14 +136,14 @@ gcc -o test_challenge test_challenge_tu.o challenge.o $STORE_OBJS
 # OLD cycle's shm header on nginx's zone-reuse (reload) path and is
 # adopted, which the reload tests here exercise.
 # shellcheck disable=SC2086
-gcc -Wall -Wextra -Werror $CORE_INC -c \
+"$CC" $SANITIZE_CFLAGS $EXTRA_CFLAGS -Wall -Wextra -Werror $CORE_INC -c \
 	"$WORKSPACE/src/ngx_autocert_requests.c" -o requests.o
 # shellcheck disable=SC2086
-gcc -Wall -Wextra -Werror $CORE_INC -c \
+"$CC" $SANITIZE_CFLAGS $EXTRA_CFLAGS -Wall -Wextra -Werror $CORE_INC -c \
 	"$WORKSPACE/ci/tests/unit/test_requests.c" \
 	-o test_requests_tu.o
 # shellcheck disable=SC2086
-gcc -o test_requests test_requests_tu.o requests.o $STORE_OBJS
+"$CC" $SANITIZE_CFLAGS $EXTRA_CFLAGS -o test_requests test_requests_tu.o requests.o $STORE_OBJS $SANITIZE_LIBS
 ./test_requests
 
 # autolabel A3.4: pure rate-cap + wildcard-cover primitives
@@ -131,9 +152,9 @@ gcc -o test_requests test_requests_tu.o requests.o $STORE_OBJS
 # ngx_log_error_core/ngx_cycle), so it links against ONLY ngx_string.o
 # (NOT $STORE_OBJS — ngx_palloc.o there would clash with the stubs).
 # shellcheck disable=SC2086
-gcc -Wall -Wextra -Werror $CORE_INC \
+"$CC" $SANITIZE_CFLAGS $EXTRA_CFLAGS -Wall -Wextra -Werror $CORE_INC \
 	"$WORKSPACE/ci/tests/unit/test_ratecap.c" \
-	"$NGX/objs/src/core/ngx_string.o" -o test_ratecap
+	"$NGX/objs/src/core/ngx_string.o" -o test_ratecap $SANITIZE_LIBS
 ./test_ratecap
 
 # F4: pure seconds->ms clamp used for resolver_timeout (and matching the
@@ -142,9 +163,9 @@ gcc -Wall -Wextra -Werror $CORE_INC \
 # ONLY ngx_string.o, same idiom as test_ratecap.c above (a plain `ngx_cycle`
 # stub covers the one extern ref ngx_core.h's headers pull in).
 # shellcheck disable=SC2086
-gcc -Wall -Wextra -Werror $CORE_INC \
+"$CC" $SANITIZE_CFLAGS $EXTRA_CFLAGS -Wall -Wextra -Werror $CORE_INC \
 	"$WORKSPACE/ci/tests/unit/test_timeconv.c" \
-	"$NGX/objs/src/core/ngx_string.o" -o test_timeconv
+	"$NGX/objs/src/core/ngx_string.o" -o test_timeconv $SANITIZE_LIBS
 ./test_timeconv
 
 # A6 runtime-marker open semantics. Pure syscall-contract test (no nginx
@@ -154,9 +175,9 @@ gcc -Wall -Wextra -Werror $CORE_INC \
 # appears, which wedged the sole ACME driver loop (and its worker) after a
 # successful runtime issuance; O_NOFOLLOW does not stop it.
 # shellcheck disable=SC2086
-gcc -Wall -Wextra -Werror $CORE_INC \
+"$CC" $SANITIZE_CFLAGS $EXTRA_CFLAGS -Wall -Wextra -Werror $CORE_INC \
 	"$WORKSPACE/ci/tests/unit/test_marker_open.c" \
-	-o test_marker_open
+	-o test_marker_open $SANITIZE_LIBS
 ./test_marker_open
 
 # Store cert retrieval: ngx_autocert_open_file_path (ngx_autocert_shared.h)
@@ -170,9 +191,9 @@ gcc -Wall -Wextra -Werror $CORE_INC \
 # (same as test_win32_split_root.c below); not $STORE_OBJS -- its
 # ngx_palloc.o would clash with this file's own trivial stubs.
 # shellcheck disable=SC2086
-gcc -D_GNU_SOURCE -Wall -Wextra -Werror $CORE_INC \
+"$CC" $SANITIZE_CFLAGS $EXTRA_CFLAGS -D_GNU_SOURCE -Wall -Wextra -Werror $CORE_INC \
 	"$WORKSPACE/ci/tests/unit/test_store_open.c" \
-	"$NGX/objs/src/core/ngx_string.o" -o test_store_open
+	"$NGX/objs/src/core/ngx_string.o" -o test_store_open $SANITIZE_LIBS
 ./test_store_open
 
 # Store-directory / serving-key ownership guard (ngx_autocert_check_owner_mode,
@@ -184,9 +205,9 @@ gcc -D_GNU_SOURCE -Wall -Wextra -Werror $CORE_INC \
 # Exercises real owner-only / group-writable / world-readable dirs and files
 # in a temp tree.
 # shellcheck disable=SC2086
-gcc -D_GNU_SOURCE -Wall -Wextra -Werror $CORE_INC \
+"$CC" $SANITIZE_CFLAGS $EXTRA_CFLAGS -D_GNU_SOURCE -Wall -Wextra -Werror $CORE_INC \
 	"$WORKSPACE/ci/tests/unit/test_owner_mode.c" \
-	"$NGX/objs/src/core/ngx_string.o" -o test_owner_mode
+	"$NGX/objs/src/core/ngx_string.o" -o test_owner_mode $SANITIZE_LIBS
 ./test_owner_mode
 
 # win32 root-splitting classifier (ngx_autocert_win32_classify_root, W5g):
@@ -197,9 +218,9 @@ gcc -D_GNU_SOURCE -Wall -Wextra -Werror $CORE_INC \
 # Needs ngx_string.o for ngx_snprintf/ngx_strlchr; not $STORE_OBJS (its
 # ngx_palloc.o pulls in symbols this header-only test never defines stubs for).
 # shellcheck disable=SC2086
-gcc -D_GNU_SOURCE -Wall -Wextra -Werror $CORE_INC \
+"$CC" $SANITIZE_CFLAGS $EXTRA_CFLAGS -D_GNU_SOURCE -Wall -Wextra -Werror $CORE_INC \
 	"$WORKSPACE/ci/tests/unit/test_win32_split_root.c" \
-	"$NGX/objs/src/core/ngx_string.o" -o test_win32_split_root
+	"$NGX/objs/src/core/ngx_string.o" -o test_win32_split_root $SANITIZE_LIBS
 ./test_win32_split_root
 
 # win32 command-line quoting (ngx_autocert_win32_quote_arg, W8): the
@@ -209,9 +230,9 @@ gcc -D_GNU_SOURCE -Wall -Wextra -Werror $CORE_INC \
 # (no win32-header dependency), same reasoning as test_win32_split_root.c
 # above: this runs the real production function on Linux.
 # shellcheck disable=SC2086
-gcc -D_GNU_SOURCE -Wall -Wextra -Werror $CORE_INC \
+"$CC" $SANITIZE_CFLAGS $EXTRA_CFLAGS -D_GNU_SOURCE -Wall -Wextra -Werror $CORE_INC \
 	"$WORKSPACE/ci/tests/unit/test_win32_quote_arg.c" \
-	"$NGX/objs/src/core/ngx_string.o" -o test_win32_quote_arg
+	"$NGX/objs/src/core/ngx_string.o" -o test_win32_quote_arg $SANITIZE_LIBS
 ./test_win32_quote_arg
 
 # dns-01 hooks share one order across add/remove invocations.  The timeout
@@ -227,9 +248,9 @@ bash "$WORKSPACE/ci/tests/unit/assert_dns_hook_timeout_reset.sh"
 # dependency), same reasoning as test_win32_quote_arg.c above: this runs the
 # real production function on Linux.
 # shellcheck disable=SC2086
-gcc -D_GNU_SOURCE -Wall -Wextra -Werror $CORE_INC \
+"$CC" $SANITIZE_CFLAGS $EXTRA_CFLAGS -D_GNU_SOURCE -Wall -Wextra -Werror $CORE_INC \
 	"$WORKSPACE/ci/tests/unit/test_win32_singleton_name.c" \
-	"$NGX/objs/src/core/ngx_string.o" -o test_win32_singleton_name
+	"$NGX/objs/src/core/ngx_string.o" -o test_win32_singleton_name $SANITIZE_LIBS
 ./test_win32_singleton_name
 
 # win32 WaitForSingleObject() result -> singleton-acquisition VERDICT mapping
@@ -241,9 +262,9 @@ gcc -D_GNU_SOURCE -Wall -Wextra -Werror $CORE_INC \
 # (-> NGX_ERROR, fail closed). No win32-header dependency (takes a plain
 # uint32_t), so this runs the real production function on Linux.
 # shellcheck disable=SC2086
-gcc -D_GNU_SOURCE -Wall -Wextra -Werror $CORE_INC \
+"$CC" $SANITIZE_CFLAGS $EXTRA_CFLAGS -D_GNU_SOURCE -Wall -Wextra -Werror $CORE_INC \
 	"$WORKSPACE/ci/tests/unit/test_win32_mutex_verdict.c" \
-	-o test_win32_mutex_verdict
+	-o test_win32_mutex_verdict $SANITIZE_LIBS
 ./test_win32_mutex_verdict
 
 # win32 DACL-ACE-tuple -> POSIX group/other permission-bit decision core
@@ -258,9 +279,9 @@ gcc -D_GNU_SOURCE -Wall -Wextra -Werror $CORE_INC \
 # test_win32_mutex_verdict.c above: this runs the real production function
 # on Linux.
 # shellcheck disable=SC2086
-gcc -D_GNU_SOURCE -Wall -Wextra -Werror $CORE_INC \
+"$CC" $SANITIZE_CFLAGS $EXTRA_CFLAGS -D_GNU_SOURCE -Wall -Wextra -Werror $CORE_INC \
 	"$WORKSPACE/ci/tests/unit/test_win32_dacl_mode.c" \
-	-o test_win32_dacl_mode
+	-o test_win32_dacl_mode $SANITIZE_LIBS
 ./test_win32_dacl_mode
 
 # FILE_RENAME_INFORMATION / FILE_LINK_INFORMATION variable-length-buffer
@@ -276,19 +297,19 @@ gcc -D_GNU_SOURCE -Wall -Wextra -Werror $CORE_INC \
 # reimplementation. Needs ngx_string.o for the same reason
 # test_win32_split_root.c does (shared.h pulls in ngx_core.h).
 # shellcheck disable=SC2086
-gcc -D_GNU_SOURCE -Wall -Wextra -Werror $CORE_INC \
+"$CC" $SANITIZE_CFLAGS $EXTRA_CFLAGS -D_GNU_SOURCE -Wall -Wextra -Werror $CORE_INC \
 	"$WORKSPACE/ci/tests/unit/test_win32_rename_info_layout.c" \
-	"$NGX/objs/src/core/ngx_string.o" -o test_win32_rename_info_layout
+	"$NGX/objs/src/core/ngx_string.o" -o test_win32_rename_info_layout $SANITIZE_LIBS
 ./test_win32_rename_info_layout
 
 # shellcheck disable=SC2086
-gcc -Wall -Werror $CORE_INC -c \
+"$CC" $SANITIZE_CFLAGS $EXTRA_CFLAGS -Wall -Werror $CORE_INC -c \
 	"$WORKSPACE/src/ngx_autocert_alpn.c" -o alpn.o
 # shellcheck disable=SC2086
-gcc -Wall -Wextra -Werror $CORE_INC -c \
+"$CC" $SANITIZE_CFLAGS $EXTRA_CFLAGS -Wall -Wextra -Werror $CORE_INC -c \
 	"$WORKSPACE/ci/tests/unit/test_alpn.c" -o test_alpn_tu.o
 # shellcheck disable=SC2086
-gcc -o test_alpn test_alpn_tu.o alpn.o $STORE_OBJS
+"$CC" $SANITIZE_CFLAGS $EXTRA_CFLAGS -o test_alpn test_alpn_tu.o alpn.o $STORE_OBJS $SANITIZE_LIBS
 ./test_alpn
 
 # ngx_inet.o: crypto.c (include-shimmed here) now pulls
@@ -299,9 +320,9 @@ gcc -o test_alpn test_alpn_tu.o alpn.o $STORE_OBJS
 # path ci/tests/unit/fixture_leaf.pem).
 cd "$WORKSPACE"
 # shellcheck disable=SC2086
-gcc -D_GNU_SOURCE -Wall -Wextra -Werror $CORE_INC -o "$BUILD_DIR/test_cert_time" \
+"$CC" $SANITIZE_CFLAGS $EXTRA_CFLAGS -D_GNU_SOURCE -Wall -Wextra -Werror $CORE_INC -o "$BUILD_DIR/test_cert_time" \
 	"$WORKSPACE/ci/tests/unit/test_cert_time.c" \
-	$INET_OBJS -lssl -lcrypto
+	$INET_OBJS -lssl -lcrypto $SANITIZE_LIBS
 "$BUILD_DIR/test_cert_time"
 
 # Slice ngx_autocert_account_json_safe + ngx_autocert_account_log_safe from
@@ -312,12 +333,12 @@ gcc -D_GNU_SOURCE -Wall -Wextra -Werror $CORE_INC -o "$BUILD_DIR/test_cert_time"
 # ngx_log_error_core / ngx_pnalloc. Same stub-link idiom as test_ratecap.c.
 bash ci/tests/unit/extract_jsonsafe.sh
 # shellcheck disable=SC2086
-gcc -Wall -Wextra -Werror -Ici/tests/unit $CORE_INC \
+"$CC" $SANITIZE_CFLAGS $EXTRA_CFLAGS -Wall -Wextra -Werror -Ici/tests/unit $CORE_INC \
 	-o "$BUILD_DIR/test_account_jsonsafe" \
 	"$WORKSPACE/ci/tests/unit/test_account_jsonsafe.c" \
 	"$NGX/objs/src/core/ngx_string.o" \
 	"$NGX/objs/src/core/ngx_palloc.o" \
-	"$NGX/objs/src/os/unix/ngx_alloc.o"
+	"$NGX/objs/src/os/unix/ngx_alloc.o" $SANITIZE_LIBS
 "$BUILD_DIR/test_account_jsonsafe"
 
 # Cert-cache freshness key (audit MINOR): mtime alone is whole-second
@@ -330,10 +351,10 @@ gcc -Wall -Wextra -Werror -Ici/tests/unit $CORE_INC \
 # output, not hand-built fixtures.
 bash "$WORKSPACE/ci/tests/unit/extract_slotfresh.sh"
 # shellcheck disable=SC2086
-gcc -D_GNU_SOURCE -Wall -Wextra -Werror -Ici/tests/unit -I"$WORKSPACE" \
+"$CC" $SANITIZE_CFLAGS $EXTRA_CFLAGS -D_GNU_SOURCE -Wall -Wextra -Werror -Ici/tests/unit -I"$WORKSPACE" \
 	$CORE_INC \
 	-o "$BUILD_DIR/test_slot_fresh" \
-	"$WORKSPACE/ci/tests/unit/test_slot_fresh.c"
+	"$WORKSPACE/ci/tests/unit/test_slot_fresh.c" $SANITIZE_LIBS
 "$BUILD_DIR/test_slot_fresh"
 
 # dns-01 orphan-reap table (audit MAJOR/Robustness): ngx_autocert_order_free()
@@ -350,10 +371,10 @@ gcc -D_GNU_SOURCE -Wall -Wextra -Werror -Ici/tests/unit -I"$WORKSPACE" \
 # stubs ngx_log_error_core/ngx_cycle itself (same idiom as test_ratecap.c).
 bash "$WORKSPACE/ci/tests/unit/extract_orphan.sh"
 # shellcheck disable=SC2086
-gcc -D_GNU_SOURCE -Wall -Wextra -Werror -Ici/tests/unit -I"$WORKSPACE" \
+"$CC" $SANITIZE_CFLAGS $EXTRA_CFLAGS -D_GNU_SOURCE -Wall -Wextra -Werror -Ici/tests/unit -I"$WORKSPACE" \
 	$CORE_INC \
 	-o "$BUILD_DIR/test_orphan_reap" \
-	"$WORKSPACE/ci/tests/unit/test_orphan_reap.c"
+	"$WORKSPACE/ci/tests/unit/test_orphan_reap.c" $SANITIZE_LIBS
 "$BUILD_DIR/test_orphan_reap"
 
 # Config-time name/contact validation (audit MINOR): server_name/
@@ -369,7 +390,7 @@ gcc -D_GNU_SOURCE -Wall -Wextra -Werror -Ici/tests/unit -I"$WORKSPACE" \
 # -- an over-strict gate here breaks a working config, which is worse than
 # the bug this closes.
 # shellcheck disable=SC2086
-gcc -Wall -Wextra -Werror -Ici/tests/unit -I"$WORKSPACE" $HTTP_INC \
+"$CC" $SANITIZE_CFLAGS $EXTRA_CFLAGS -Wall -Wextra -Werror -Ici/tests/unit -I"$WORKSPACE" $HTTP_INC \
 	-o "$BUILD_DIR/test_name_valid" \
-	"$WORKSPACE/ci/tests/unit/test_name_valid.c" -lssl -lcrypto
+	"$WORKSPACE/ci/tests/unit/test_name_valid.c" -lssl -lcrypto $SANITIZE_LIBS
 "$BUILD_DIR/test_name_valid"
