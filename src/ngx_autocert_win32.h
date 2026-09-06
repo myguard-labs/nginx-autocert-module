@@ -1610,12 +1610,22 @@ static ngx_inline int ngx_autocert_fstatat( int dfd, const char *name,
 
     is_dir = (info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) ? 1 : 0;
 
-    if (!is_dir) {
-        /* Directories keep the fixed S_IFDIR|0700 approximation — the
-         * account-key guard this feeds only ever stats regular files
-         * (ngx_autocert_account.c's S_ISREG check rejects a directory before
-         * the permission check runs), so only the file case needs the real
-         * DACL walk. Read it while the handle is still open. */
+    {
+        /* Walk the DACL for DIRECTORIES TOO, not just regular files.
+         *
+         * This used to be `if (!is_dir)`, on the reasoning that the only
+         * consumer was the account-key guard, which rejects a directory via
+         * S_ISREG before ever reading the mode. That is no longer true:
+         * ngx_autocert_check_owner_mode() now stats the STORE DIRECTORY
+         * (driver.c's trylock) to refuse one that group/other can write.
+         * With the fixed S_IFDIR|0700 approximation those bits were never
+         * set on win32, so that check passed unconditionally and a store
+         * directory another local user could write was adopted silently —
+         * exactly the case the guard exists to stop.
+         *
+         * The fail-closed contract carries over unchanged: on any error
+         * mode_from_dacl() sets (S_IRWXG|S_IRWXO), which contains the write
+         * bits, so an undeterminable DACL refuses rather than accepts. */
         if (ngx_autocert_win32_mode_from_dacl(h, &dacl_bits) == -1) {
             DWORD  err = GetLastError();
             _close(fd);
@@ -1623,15 +1633,16 @@ static ngx_inline int ngx_autocert_fstatat( int dfd, const char *name,
             errno = ngx_autocert_win32_errno(err);
             return -1;
         }
-    } else {
-        dacl_bits = 0;
     }
 
     _close(fd);
 
     ngx_memzero(st, sizeof(*st));
-    st->st_mode = is_dir ? (ngx_autocert_mode_t) (S_IFDIR | 0700)
-                          : (ngx_autocert_mode_t) (S_IFREG | 0600 | dacl_bits);
+    /* dacl_bits now comes from the real DACL for BOTH kinds, so a
+     * group/other-writable directory is visible to the store-directory
+     * guard instead of being masked by a hardcoded 0700. */
+    st->st_mode = (ngx_autocert_mode_t)
+                  ((is_dir ? (S_IFDIR | 0700) : (S_IFREG | 0600)) | dacl_bits);
     st->st_nlink = (short) (info.nNumberOfLinks > 0
                              ? info.nNumberOfLinks : 1);
     st->st_size = ngx_file_size(&info);
@@ -1672,18 +1683,20 @@ ngx_autocert_fstat(int fd, ngx_autocert_stat_t *st)
 
     is_dir = (info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) ? 1 : 0;
 
-    if (!is_dir) {
-        if (ngx_autocert_win32_mode_from_dacl(h, &dacl_bits) == -1) {
-            errno = ngx_autocert_win32_errno(GetLastError());
-            return -1;
-        }
-    } else {
-        dacl_bits = 0;
+    /* Directories walk the DACL too — see the matching comment in
+     * ngx_autocert_fstat() above for why the old `if (!is_dir)` made the
+     * store-directory guard vacuous on win32. */
+    if (ngx_autocert_win32_mode_from_dacl(h, &dacl_bits) == -1) {
+        errno = ngx_autocert_win32_errno(GetLastError());
+        return -1;
     }
 
     ngx_memzero(st, sizeof(*st));
-    st->st_mode = is_dir ? (ngx_autocert_mode_t) (S_IFDIR | 0700)
-                          : (ngx_autocert_mode_t) (S_IFREG | 0600 | dacl_bits);
+    /* dacl_bits now comes from the real DACL for BOTH kinds, so a
+     * group/other-writable directory is visible to the store-directory
+     * guard instead of being masked by a hardcoded 0700. */
+    st->st_mode = (ngx_autocert_mode_t)
+                  ((is_dir ? (S_IFDIR | 0700) : (S_IFREG | 0600)) | dacl_bits);
     st->st_nlink = (short) (info.nNumberOfLinks > 0
                              ? info.nNumberOfLinks : 1);
     st->st_size = ngx_file_size(&info);

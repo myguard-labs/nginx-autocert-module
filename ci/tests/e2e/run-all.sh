@@ -372,6 +372,20 @@ else
             continue
         fi
         IFS=$'\t' read -r verdict secs label < "$RESULT_DIR/$i"
+        # A recognised verdict is not enough: a worker killed mid-write can
+        # leave a file holding just "pass" with no duration and no label,
+        # which would otherwise be folded in as a passing test under a blank
+        # name. Require the WHOLE record -- verdict, numeric duration, label
+        # -- before the verdict is trusted at all.
+        if [ -z "$secs" ] || [ -z "$label" ] || case "$secs" in
+                                                    ''|*[!0-9]*) true ;;
+                                                    *) false ;;
+                                                esac
+        then
+            echo "::error::e2e ${FLAVOR}: ${TASK_LABEL[$i]} wrote an incomplete result record"
+            FAIL+=("${TASK_LABEL[$i]} (incomplete result)")
+            continue
+        fi
         DURATIONS+=("${secs}	${label}")
         # Anything that is not a recognised verdict counts as a FAILURE:
         # a corrupt or truncated result file must never read as success.
