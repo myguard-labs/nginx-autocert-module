@@ -2603,19 +2603,6 @@ static const char *ngx_autocert_store_files[] = {
     NULL
 };
 
-#if (NGX_WIN32)
-/*
- * The win32 per-file commit publishes ONLY the four names belonging to the
- * ISSUING order's own key_type (see ngx_autocert_order_publish_files_at).
- * The other keytype's files were already hardlink-seeded into staging by
- * ngx_autocert_order_seed_staging_at() and are correct in the live dir as-is;
- * renaming them again would be a no-op copy that still bumps the live file's
- * mtime, and serve.c's per-slot reload is armed off that mtime
- * (ngx_autocert_slot_chain_name[] / sl->mtime), so touching the other slot's
- * files would spuriously arm a reload for a cert that did not change.
- */
-#endif
-
 /* Per-keytype PEM leaf names. priv/chain always; leaf/rest are certbot-only. */
 static void
 ngx_autocert_keytype_pem_names(ngx_uint_t kt, const char **priv,

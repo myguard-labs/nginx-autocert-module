@@ -397,9 +397,11 @@ test_cert_pair_check(void)
         }
     }
 
-    unlink(cert_p); unlink(key_p); unlink(oth_p);
-
 cleanup:
+    /* Below the label so an early `goto cleanup` (failed keygen, failed leaf
+     * build, failed PEM write) still removes whatever mkstemp() created. An
+     * unexpanded XXXXXX template just yields ENOENT, which is harmless. */
+    unlink(cert_p); unlink(key_p); unlink(oth_p);
     if (leaf != NULL)  { X509_free(leaf); }
     if (key != NULL)   { EVP_PKEY_free(key); }
     if (other != NULL) { EVP_PKEY_free(other); }

@@ -437,7 +437,9 @@ before the chain (the serve path arms a reload off `fullchain.pem`'s mtime, so
 the matching key is already in place when it does). A reader that catches the
 brief window between the two renames sees a key/cert mismatch, which is
 rejected and retried rather than served; a crash in that window self-heals,
-because a corrupt stored cert is treated as due for reissue. For a wildcard the cache entry, store dir, and the
+because a corrupt stored cert is treated as due for reissue.
+
+For a wildcard the cache entry, store dir, and the
 ≤1 stat/sec throttle are keyed by the shared `_wildcard_.<rest>` segment — one
 entry for all subdomains, not per concrete SNI.
 
@@ -699,6 +701,15 @@ against a real `nginx.exe`, then asserts the identifier was ordered as `"ip"`
 `iPAddress` with no DNS SAN, and the issued certificate's public key matches
 the stored private key -- the same assertions `ci/tests/e2e/ipv4-issue.sh`
 makes on Linux, ported off Docker.
+
+A second lane covers **renewal**, which on win32 is a different commit path
+rather than the same one run twice: there is no `RENAME_EXCHANGE` and NTFS
+cannot rename over an existing directory, so the pair is published file by
+file into a live generation that already exists (see [Store
+layout](#store-layout)). The lane issues once, then issues again over that
+live generation and asserts the certificate **serial changed** — an oracle
+that fails if the second pass silently keeps the old cert instead of
+publishing the new one.
 
 ---
 

@@ -1282,8 +1282,19 @@ ngx_http_autocert_key_pairs_with(const char *key_path, X509 *leaf,
 
     bio = BIO_new_fd(fd, BIO_CLOSE);    /* BIO owns + closes fd */
     if (bio == NULL) {
+        /*
+         * BIO_new_fd() fails only on allocation failure -- the key is neither
+         * absent, unparsable, nor mismatched, so this is not evidence of a
+         * torn pair. Returning NGX_ABORT here would fire a real ACME order
+         * for every name in the sweep under memory pressure, against the CA's
+         * rate limits. Skip the check for this sweep, like a transient open.
+         */
         (void) ngx_autocert_close(fd);
-        return NGX_ABORT;
+        ngx_log_error(NGX_LOG_WARN, log, 0,
+                      "autocert: BIO_new_fd for key \"%s\" failed; "
+                      "skipping key-pair freshness check for this sweep",
+                      key_path);
+        return NGX_DECLINED;            /* allocation failure -> skip */
     }
 
     key = PEM_read_bio_PrivateKey(bio, NULL, ngx_http_autocert_no_passphrase,
