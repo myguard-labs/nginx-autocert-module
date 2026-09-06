@@ -350,26 +350,56 @@ ngx_autocert_json_hex4(ngx_autocert_json_ctx_t *c, uint32_t *out)
 
 /*
  * Parse a JSON string starting at c->p (which points at the opening '"'),
- * decoding escapes into a fresh pool buffer. The decoded form is never longer
- * than the source span, so one allocation of (span length) bytes always fits.
+ * decoding escapes into a fresh pool buffer.
+ *
+ * The buffer is sized to THIS string's own raw span (the bytes between the
+ * quotes), found by a pre-scan for the closing quote. The decoded form is
+ * never longer than that span -- escapes only shrink it (\n -> 1 byte,
+ * \uXXXX -> <= 3 bytes, a surrogate pair's 12 raw bytes -> 4) -- so one
+ * allocation of (span length) bytes always fits.
+ *
+ * Sizing to the span rather than to the rest of the document keeps a document
+ * of N bytes holding many short strings at O(N) pool memory instead of
+ * O(N^2): string spans in a document are disjoint and their sum is bounded
+ * by the document length, so no separate cumulative cap is needed.
+ *
+ * The pre-scan only tracks backslash escaping so it stops at the true closing
+ * quote; it does not validate escape or control-byte syntax. That stays with
+ * the decode loop below, which is unchanged, so accept/reject semantics are
+ * exactly as before: any input the pre-scan admits is still fully validated,
+ * and an input with no closing quote is rejected here as unterminated -- the
+ * same verdict the decode loop reached by running off c->last.
  */
 static ngx_int_t
 ngx_autocert_json_string_raw(ngx_autocert_json_ctx_t *c, ngx_str_t *out)
 {
-    u_char    *start, *dst, ch;
+    u_char    *start, *dst, *scan, ch;
     uint32_t   cp, lo;
+    size_t     span;
 
     c->p++;                                   /* consume opening '"' */
     start = c->p;
 
-    /*
-     * Worst case the decoded string equals the raw span between the quotes;
-     * escapes only shrink it (\n -> 1 byte, \uXXXX -> <=3 bytes). Allocate the
-     * span up front. last - start is an upper bound even with the closing
-     * quote not yet found.
-     */
-    dst = ngx_pnalloc(c->pool, (size_t) (c->last - start));
-    if (dst == NULL && c->last != start) {
+    /* Pre-scan for the closing quote, honouring backslash escapes. */
+    for (scan = start; /* void */ ; scan++) {
+        if (scan >= c->last) {
+            return NGX_ERROR;                 /* unterminated string */
+        }
+        if (*scan == '"') {
+            break;
+        }
+        if (*scan == '\\') {
+            scan++;                           /* skip the escaped byte */
+            if (scan >= c->last) {
+                return NGX_ERROR;             /* unterminated string */
+            }
+        }
+    }
+
+    span = (size_t) (scan - start);
+
+    dst = ngx_pnalloc(c->pool, span);
+    if (dst == NULL && span != 0) {
         return NGX_ERROR;
     }
     out->data = dst;

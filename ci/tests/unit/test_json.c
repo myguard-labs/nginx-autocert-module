@@ -435,6 +435,81 @@ test_unicode_edge_bounded(void)
 
 
 static void
+test_string_span_prescan(void)
+{
+    /*
+     * Targets the closing-quote pre-scan added to size the string
+     * allocation to its own span (not the rest of the document). These
+     * cases exercise the pre-scan's boundary and its backslash handling
+     * specifically -- separate from the decode-loop escape coverage above.
+     */
+    ngx_autocert_json_value_t  *v;
+    ngx_str_t                   s;
+
+    /* single-char string value */
+    v = parse("{\"k\":\"x\"}");
+    CHECK(ngx_autocert_json_object_str(v, "k", &s) == NGX_OK
+          && streq(&s, "x"), "single-char string value");
+
+    /* closing quote is the very last byte of the buffer (c->last) */
+    {
+        static const u_char buf[] = { '"', 'x', 'y', '"' };
+        v = ngx_autocert_json_parse(pool, (u_char *) buf, sizeof(buf));
+        CHECK(v != NULL && v->type == NGX_AUTOCERT_JSON_STRING
+              && streq(&v->u.string, "xy"),
+              "closing quote as last byte before c->last accepted");
+    }
+
+    /*
+     * Escaped quote inside the string must NOT terminate the pre-scan early.
+     * If the pre-scan ignored backslash escaping it would stop at the FIRST
+     * '"' (right after \"), sizing the allocation too small for the real
+     * span up to the true closing quote -- exactly the bug class the
+     * pre-scan exists to avoid. The decoded value must contain the escaped
+     * quote and continue to the real terminator.
+     */
+    v = parse("{\"k\":\"a\\\"b\"}");
+    CHECK(ngx_autocert_json_object_str(v, "k", &s) == NGX_OK
+          && s.len == 3
+          && memcmp(s.data, "a\"b", 3) == 0,
+          "escaped quote inside string does not terminate pre-scan early");
+
+    /*
+     * Same defect, but with a long tail after the escaped quote AND a
+     * second member following it. An escape-blind pre-scan sizes the first
+     * string's allocation to the SHORT span ending at the escaped quote (2
+     * bytes: 'a' and the backslash) while the decode loop still walks to
+     * the true closing quote and writes the full 20-byte decoded value into
+     * that undersized buffer -- overflowing into whatever the pool hands
+     * out next (here, the "k2" key/value). A pool allocator has no
+     * per-allocation redzone, so this survives even under ASan/UBSan
+     * (verified: it does not abort, and with nothing allocated after it in
+     * a large pool the overflow can land on never-touched memory and read
+     * back "correct" by pure luck -- the trailing member exists specifically
+     * to force a real adjacent allocation to corrupt). The only reliable
+     * oracle is the exact decoded CONTENT of the returned string.
+     */
+    v = parse("{\"k\":\"a\\\"BBBBBBBBBBBBBBBBBB\",\"k2\":\"end\"}");
+    CHECK(ngx_autocert_json_object_str(v, "k", &s) == NGX_OK
+          && s.len == 20
+          && memcmp(s.data, "a\"BBBBBBBBBBBBBBBBBB", 20) == 0,
+          "escaped quote near string start: full decoded value intact "
+          "(not sized to the escaped quote's short span)");
+
+    /* trailing bare backslash at end of input (no byte to escape) */
+    {
+        static const u_char buf[] = { '"', 'a', '\\' };
+        v = ngx_autocert_json_parse(pool, (u_char *) buf, sizeof(buf));
+        CHECK(v == NULL, "trailing bare backslash at end of input rejected");
+    }
+
+    /* unterminated string (no closing quote at all) */
+    v = parse("\"abc");
+    CHECK(v == NULL, "unterminated string with no closing quote rejected");
+}
+
+
+static void
 test_depth_limit(void)
 {
     /* Nesting beyond the bound must be rejected, not recurse unbounded. */
@@ -529,6 +604,7 @@ main(void)
     test_malformed();
     test_no_overread();
     test_unicode_edge_bounded();
+    test_string_span_prescan();
     test_depth_limit();
 
     ngx_destroy_pool(p);
