@@ -2933,6 +2933,11 @@ ngx_autocert_driver_cancel_timers(void)
     if (ngx_autocert_relock_timer.timer_set) {
         ngx_del_timer(&ngx_autocert_relock_timer);
     }
+
+    /* The dns-01 orphan reaper is module-scoped inside order.c but lives in
+     * this cycle's timer tree like the three above, so it is cancelled with
+     * them. Its pid table is process-lifetime and deliberately survives. */
+    ngx_autocert_order_cancel_timers();
 }
 
 /* Free the in-flight order and its (cycle-independent) pool. */

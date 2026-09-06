@@ -155,5 +155,12 @@ ngx_int_t ngx_autocert_order_start(ngx_autocert_order_t *order);
 
 void ngx_autocert_order_free(ngx_autocert_order_t *order);
 
+/*
+ * Drop the module-scoped dns-01 orphan-reap timer. Called from the driver's
+ * cancel-timers path (reload and exit_process) so the timer never survives
+ * into a replaced cycle's timer tree. Safe to call when no timer is set.
+ */
+void ngx_autocert_order_cancel_timers(void);
+
 
 #endif /* _NGX_AUTOCERT_ORDER_H_INCLUDED_ */
