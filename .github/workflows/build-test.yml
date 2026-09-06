@@ -1,4 +1,4 @@
-# sync-sha: 21e7ba60a89615b902d78ad269e171f86718ef6736ece4fd51f29eaa9f06de9f
+# sync-sha: b035a4761e722ef69d07aa6bf148b3506064ce312041ac6e4d6b7510398bd708
 name: Build & Test
 
 # Third-party actions pinned to commit SHAs for supply-chain safety.
@@ -205,7 +205,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Build module + load/serve tests
-        uses: ./.github/actions/build-module
+        uses: ./.github/actions/build-module  # zizmor: ignore[self-repository] actionlint rejects $/ (actionlint#711)
         with:
           flavor: nginx
           version: ${{ needs.resolve.outputs.nginx_version }}
@@ -229,7 +229,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Build module + load/serve tests
-        uses: ./.github/actions/build-module
+        uses: ./.github/actions/build-module  # zizmor: ignore[self-repository] actionlint rejects $/ (actionlint#711)
         with:
           flavor: angie
           version: ${{ needs.resolve.outputs.angie_version }}
@@ -257,7 +257,7 @@ jobs:
           persist-credentials: false
 
       - name: Setup build deps
-        uses: ./.github/actions/setup
+        uses: ./.github/actions/setup  # zizmor: ignore[self-repository] actionlint rejects $/ (actionlint#711)
         with:
           ccache-key: guard-${{ needs.resolve.outputs.nginx_version }}-${{ needs.resolve.outputs.angie_version }}
 
@@ -421,7 +421,7 @@ jobs:
           persist-credentials: false
 
       - name: Setup build deps
-        uses: ./.github/actions/setup
+        uses: ./.github/actions/setup  # zizmor: ignore[self-repository] actionlint rejects $/ (actionlint#711)
         with:
           packages: build-essential libssl-dev
 
@@ -487,7 +487,7 @@ jobs:
           persist-credentials: false
 
       - name: Setup runtime deps
-        uses: ./.github/actions/setup
+        uses: ./.github/actions/setup  # zizmor: ignore[self-repository] actionlint rejects $/ (actionlint#711)
         with:
           packages: libpcre2-8-0
 

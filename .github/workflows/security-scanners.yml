@@ -1,4 +1,4 @@
-# sync-sha: 4415fdb4acfcf89e25454827a597ae201762ee3ccffbd8b0dd490a874cc933f5
+# sync-sha: 81d03920863e3fc03d598e78889aad8acea0490f548b13f49580c24d3bb882da
 name: Security scanners
 
 # Static / security scanners gate on every PR/push — flawfinder, clang-tidy
@@ -39,7 +39,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Setup scanner deps + ccache
-        uses: ./.github/actions/setup
+        uses: ./.github/actions/setup  # zizmor: ignore[self-repository] actionlint rejects $/ (actionlint#711)
         with:
           packages: >-
             build-essential ccache clang-tidy flawfinder libpcre2-dev libssl-dev
