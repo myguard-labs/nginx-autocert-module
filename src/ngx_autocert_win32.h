@@ -1424,14 +1424,6 @@ ngx_autocert_unlinkat(int dfd, const char *name, int flags)
  */
 #define NGX_AUTOCERT_DACL_WALK_MAX  32
 
-/* The literal in ngx_autocert_shared.h must equal the SDK's constants; a
- * mismatch is a compile error here, on the one build that has the SDK. */
-typedef char  ngx_autocert_win32_write_mask_check_t[
-    (NGX_AUTOCERT_WIN32_WRITE_MASK
-     == (FILE_WRITE_DATA | FILE_APPEND_DATA | FILE_WRITE_EA
-         | FILE_DELETE_CHILD | FILE_WRITE_ATTRIBUTES | DELETE | WRITE_DAC
-         | WRITE_OWNER | GENERIC_ALL | GENERIC_WRITE)) ? 1 : -1];
-
 static ngx_inline int
 ngx_autocert_win32_mode_from_dacl(HANDLE h, ngx_autocert_mode_t *mode_bits)
 {

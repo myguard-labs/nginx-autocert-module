@@ -1200,9 +1200,11 @@ ngx_autocert_open_file_path(const char *path, int flags)
 /*
  * The access-mask rights that let a principal plant, replace, delete or
  * re-permission the object, spelled as literals so this decision has a Linux
- * test oracle without <windows.h>. ngx_autocert_win32.h static-asserts the
- * value against the real SDK constants on the win32 build, so the two cannot
- * drift apart silently.
+ * test oracle without <windows.h>. The win32 build static-asserts the value
+ * against the real SDK constants just below (this header includes
+ * ngx_autocert_win32.h before this point, so the SDK names are in scope
+ * here and the macro is not in scope there), so the two cannot drift apart
+ * silently.
  *
  *   FILE_WRITE_DATA / FILE_ADD_FILE            0x00000002
  *   FILE_APPEND_DATA / FILE_ADD_SUBDIRECTORY   0x00000004
@@ -1223,6 +1225,14 @@ ngx_autocert_open_file_path(const char *path, int flags)
  * / FILE_EXECUTE right are read-only and stay out.
  */
 #define NGX_AUTOCERT_WIN32_WRITE_MASK  0x500D0156u
+
+#if (NGX_WIN32)
+typedef char  ngx_autocert_win32_write_mask_check_t[
+    (NGX_AUTOCERT_WIN32_WRITE_MASK
+     == (FILE_WRITE_DATA | FILE_APPEND_DATA | FILE_WRITE_EA
+         | FILE_DELETE_CHILD | FILE_WRITE_ATTRIBUTES | DELETE | WRITE_DAC
+         | WRITE_OWNER | GENERIC_ALL | GENERIC_WRITE)) ? 1 : -1];
+#endif
 
 static ngx_inline ngx_int_t
 ngx_autocert_win32_mask_is_write(uint32_t mask)

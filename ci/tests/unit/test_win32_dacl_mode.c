@@ -10,8 +10,8 @@
  * permission bits" guard (account.c:276-283) a tautology on win32: a
  * world-readable private key always passed. This function is the security
  * decision that closes that gap -- given the caller's walk of every ACE in
- * the file's real DACL, reduced to (is_owner, is_allow, is_tolerated, is_write, is_write) tuples,
- * it decides whether the group/other bits the guard checks should be SET
+ * the file's real DACL, reduced to (is_owner, is_allow, is_tolerated,
+ * is_write) tuples, it decides whether the group/other bits the guard checks should be SET
  * (reject) or clear (accept).
  *
  * It has no win32-header dependency (plain ngx_int_t arrays and a count), so
@@ -213,13 +213,19 @@ main(void)
     CHECK(ngx_autocert_win32_mask_is_write(0x001F01FFu) == 1,
           "FILE_ALL_ACCESS (0x1F01FF) -> write");
     CHECK(ngx_autocert_win32_mask_is_write(0x00100116u) == 1,
-          "\"Write\" template (0x100116) -> write");
+          "Explorer \"Write\" template (0x100116) -> write");
+    CHECK(ngx_autocert_win32_mask_is_write(0x00120116u) == 1,
+          "FILE_GENERIC_WRITE (0x120116) -> write");
     CHECK(ngx_autocert_win32_mask_is_write(0x00000002u) == 1,
           "FILE_WRITE_DATA / FILE_ADD_FILE alone -> write");
     CHECK(ngx_autocert_win32_mask_is_write(0x00000004u) == 1,
           "FILE_APPEND_DATA / FILE_ADD_SUBDIRECTORY alone -> write");
+    CHECK(ngx_autocert_win32_mask_is_write(0x00000010u) == 1,
+          "FILE_WRITE_EA alone -> write");
     CHECK(ngx_autocert_win32_mask_is_write(0x00000040u) == 1,
           "FILE_DELETE_CHILD alone -> write");
+    CHECK(ngx_autocert_win32_mask_is_write(0x00000100u) == 1,
+          "FILE_WRITE_ATTRIBUTES alone -> write");
     CHECK(ngx_autocert_win32_mask_is_write(0x00010000u) == 1,
           "DELETE alone -> write");
     CHECK(ngx_autocert_win32_mask_is_write(0x00040000u) == 1,
