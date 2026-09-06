@@ -161,6 +161,33 @@ EOF
     || { echo "::error::a valid autocert_renew_before was rejected"; exit 1; }
 echo "✓ valid autocert_renew_before accepted"
 
+# ngx_autocert_sec_to_msec_clamped() silently caps resolver_timeout above
+# 3600s to 3600000ms at runtime; reject the confusing gap at config load
+# instead (same reasoning as autocert_renew_before above).
+expect_reject "autocert_resolver_timeout over 3600s" \
+    "    autocert_resolver_timeout 3601s;" \
+    "autocert_resolver_timeout must be <= 3600s"
+expect_reject "autocert_resolver_timeout absurd" \
+    "    autocert_resolver_timeout 999999999;" \
+    "autocert_resolver_timeout must be <= 3600s"
+
+# Sanity: an in-range resolver_timeout, including the cap itself, is accepted.
+cat > "$PREFIX/conf/nginx.conf" <<EOF
+load_module $HTTP_SO;
+error_log $PREFIX/logs/error.log;
+events {}
+http {
+    autocert on;
+    autocert_contact a@b.com;
+    autocert_store_path $PREFIX/store;
+    autocert_resolver_timeout 3600s;
+    server { listen $PORT; server_name x.example.com; }
+}
+EOF
+"$SERVER_BIN" -t -p "$PREFIX" -c "$PREFIX/conf/nginx.conf" 2>&1 | grep -q "syntax is ok" \
+    || { echo "::error::a valid autocert_resolver_timeout was rejected"; exit 1; }
+echo "✓ valid autocert_resolver_timeout accepted"
+
 # --- IP-address certs (RFC 8738) ---------------------------------------------
 
 # An IP identifier can only be validated over http-01 / tls-alpn-01; dns-01 is

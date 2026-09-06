@@ -30,6 +30,7 @@
 #include "ngx_autocert_driver.h"
 #include "ngx_autocert_shared.h"
 #include "ngx_autocert_account.h" /* ngx_autocert_account_json_safe */
+#include "ngx_autocert_timeconv.h" /* NGX_AUTOCERT_TIMECONV_CAP_SEC */
 
 
 #define NGX_HTTP_AUTOCERT_DEFAULT_CA \
@@ -532,6 +533,22 @@ ngx_http_autocert_init_main_conf(ngx_conf_t *cf, void *conf)
     ngx_conf_init_value(amcf->resolver_timeout, 30);
     ngx_conf_init_value(amcf->dns_propagation_delay, 10);   /* M16 dns-01 */
     ngx_conf_init_value(amcf->dns_hook_timeout, 30);        /* M16 hook exec */
+
+    /*
+     * ngx_autocert_sec_to_msec_clamped() silently caps any resolver_timeout
+     * over 3600s to 3600000ms at runtime, so a value beyond that is never
+     * unsafe -- just nonsensical (a DNS lookup to reach the CA does not need
+     * an hour). Unlike dns_hook_timeout (a silently-broken 0 timeout) this
+     * has no runtime failure mode, only a confusing gap between the
+     * configured and effective value, so reject at config load rather than
+     * runtime-warn: matches autocert_renew_before's severity for the same
+     * "fat-fingered value, make it obvious now" reasoning above.
+     */
+    if (amcf->resolver_timeout > NGX_AUTOCERT_TIMECONV_CAP_SEC) {
+        ngx_log_error(NGX_LOG_EMERG, cf->log, 0,
+                      "autocert_resolver_timeout must be <= 3600s");
+        return NGX_CONF_ERROR;
+    }
 
     /*
      * A non-positive dns_hook_timeout reaches the driver as 0, which makes the

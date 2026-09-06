@@ -4,18 +4,6 @@
  * can be tested without the whole driver TU. No slab / nginx runtime needed;
  * just the nginx string/type headers pulled by ngx_core.h via test_slab.h.
  *
- * Verifies the exact boundary of the clamp:
- *   - 3600s (the cap) converts cleanly to 3600000ms, the largest value that
- *     is NOT clamped
- *   - 3601s, the first value past the cap, clamps to 3600000ms rather than
- *     scaling to 3601000ms
- *   - a negative configured value clamps to 0 rather than producing a huge
- *     ngx_msec_t via a signed multiply
- *   - 0s converts to 0ms (not a clamp case, just the identity boundary)
- *   - the historical driver.c defect: a huge configured value (larger than
- *     time_t / 1000, which used to overflow the raw `* 1000` multiply) must
- *     also clamp to the same 3600000ms rather than invoking UB
- *
  * Exit 0 = all pass; non-zero on first failure.
  */
 
@@ -64,15 +52,12 @@ static int  failures;
 int
 main(void)
 {
-    /* Identity boundary: 0s -> 0ms. */
     CHECK(ngx_autocert_sec_to_msec_clamped(0) == 0,
           "0s converts to 0ms");
 
-    /* Largest value that converts cleanly (the cap itself). */
     CHECK(ngx_autocert_sec_to_msec_clamped(3600) == (ngx_msec_t) 3600000,
           "3600s (the cap) converts cleanly to 3600000ms");
 
-    /* First value past the cap: must clamp, not scale to 3601000. */
     CHECK(ngx_autocert_sec_to_msec_clamped(3601) == (ngx_msec_t) 3600000,
           "3601s (first value past the cap) clamps to 3600000ms");
 
@@ -81,8 +66,6 @@ main(void)
     CHECK(ngx_autocert_sec_to_msec_clamped(3599) == (ngx_msec_t) 3599000,
           "3599s converts cleanly to 3599000ms");
 
-    /* Negative configured value clamps to 0 rather than wrapping through a
-     * signed multiply into a huge ngx_msec_t. */
     CHECK(ngx_autocert_sec_to_msec_clamped(-1) == 0,
           "-1s clamps to 0ms");
 
