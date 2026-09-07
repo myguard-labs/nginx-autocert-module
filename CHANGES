@@ -1,5 +1,18 @@
 Changes unreleased
 
+    *) Feature: an RSA certificate key is now generated on a thread pool
+       thread instead of the worker's event loop. With autocert_key_type set
+       to rsa2048, rsa3072 or rsa4096, generating the leaf key blocked the
+       worker for the whole prime search -- measured at roughly 70ms, 200ms
+       and 700ms respectively on one development host, with a long tail, and
+       every connection that worker owned stopped being served for that time.
+       Issuance is unaffected otherwise, and no configuration needs to change:
+       the module uses nginx's "default" thread pool, which is provisioned
+       automatically. A build or configuration without threads, or without
+       that pool, falls back to generating the key inline exactly as before.
+       EC key types (the default) are unchanged and still generated inline --
+       at tens of microseconds they never stalled anything.
+
     *) Change: an unused shared-memory zone is no longer created. The zone
        published the set of autocert-enabled server names into shared memory
        on every load and reload, but nothing ever read it: the consumer it was

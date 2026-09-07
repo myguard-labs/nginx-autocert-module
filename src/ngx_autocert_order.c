@@ -10,6 +10,10 @@
 
 #include <ngx_config.h>
 
+#if (NGX_THREADS)
+#include <ngx_thread_pool.h>
+#endif
+
 #include "ngx_autocert_order.h"
 #include "ngx_autocert_acme.h"
 #include "ngx_autocert_json.h"
@@ -95,6 +99,15 @@ static void ngx_autocert_order_poll_timer(ngx_event_t *ev);
 static void ngx_autocert_order_poll_done(
     ngx_autocert_acme_request_t *req, ngx_int_t rc);
 static ngx_int_t ngx_autocert_order_finalize(ngx_autocert_order_t *order);
+static ngx_int_t ngx_autocert_order_finalize_csr(ngx_autocert_order_t *order);
+#if (NGX_THREADS)
+static ngx_int_t ngx_autocert_keygen_is_rsa(ngx_uint_t curve);
+static ngx_int_t ngx_autocert_keygen_post(ngx_autocert_order_t *order,
+    ngx_uint_t curve);
+static void ngx_autocert_keygen_thread(void *data, ngx_log_t *log);
+static void ngx_autocert_keygen_completion(ngx_event_t *ev);
+static void ngx_autocert_keygen_abandon(ngx_autocert_order_t *order);
+#endif
 static void ngx_autocert_order_finalize_done(
     ngx_autocert_acme_request_t *req, ngx_int_t rc);
 static void ngx_autocert_order_poll_order_timer(ngx_event_t *ev);
@@ -610,7 +623,7 @@ ngx_autocert_order_authz_done(ngx_autocert_acme_request_t *req, ngx_int_t rc)
             ngx_log_error(NGX_LOG_NOTICE, order->log, 0,
                           "autocert: authorization for \"%V\" already valid; "
                           "skipping challenge", &order->domain);
-            if (ngx_autocert_order_finalize(order) != NGX_OK) {
+            if (ngx_autocert_order_finalize(order) == NGX_ERROR) {
                 ngx_autocert_order_finish(order, NGX_ERROR);
             }
             return;
@@ -1271,7 +1284,7 @@ ngx_autocert_order_dns_hook_done(ngx_autocert_order_t *order, ngx_int_t rc)
         order->dns_set = 0;
         if (order->dns_hook_after_authz) {
             order->dns_hook_after_authz = 0;
-            if (ngx_autocert_order_finalize(order) != NGX_OK) {
+            if (ngx_autocert_order_finalize(order) == NGX_ERROR) {
                 ngx_autocert_order_finish(order, NGX_ERROR);
             }
             return;
@@ -1795,7 +1808,7 @@ ngx_autocert_order_poll_done(ngx_autocert_acme_request_t *req, ngx_int_t rc)
         }
 
         /* M6b: finalize the order with a CSR. */
-        if (ngx_autocert_order_finalize(order) != NGX_OK) {
+        if (ngx_autocert_order_finalize(order) == NGX_ERROR) {
             ngx_autocert_order_finish(order, NGX_ERROR);
         }
         return;
@@ -1815,6 +1828,213 @@ ngx_autocert_order_poll_done(ngx_autocert_acme_request_t *req, ngx_int_t rc)
 }
 
 
+#if (NGX_THREADS)
+
+/* Which key types route through the thread pool (see the block comment on the
+ * keygen slot below). Kept as one predicate so the finalize path and the tests
+ * cannot disagree about what "expensive" means. */
+static ngx_int_t
+ngx_autocert_keygen_is_rsa(ngx_uint_t curve)
+{
+    return (curve == NGX_HTTP_AUTOCERT_CRYPTO_RSA2048
+            || curve == NGX_HTTP_AUTOCERT_CRYPTO_RSA3072
+            || curve == NGX_HTTP_AUTOCERT_CRYPTO_RSA4096);
+}
+
+
+/*
+ * Off-event-loop RSA certificate-key generation.
+ *
+ * An nginx thread task CANNOT BE CANCELLED. Once ngx_thread_task_post()
+ * accepts it, the worker thread will run it and its completion event will fire
+ * on the event loop afterwards — there is no withdraw. Meanwhile a reload or
+ * shutdown calls ngx_autocert_driver_drop_order() -> ngx_autocert_order_free(),
+ * which destroys order->pool and the pool the order struct itself lives in.
+ *
+ * So NOTHING the task touches may live in either pool. This slot is a
+ * process-lifetime static for exactly the reason the dns-01 orphan table above
+ * is one: order->pool is destroyed by _free(), and a cycle pool is released by
+ * ngx_clean_old_cycles() once the old cycle retires — either would leave the
+ * task dangling across a reload. The driver keeps a single in-flight order per
+ * worker (ngx_autocert_order), so one slot is sufficient by construction; the
+ * `busy` flag makes that assumption checkable rather than assumed.
+ *
+ * The worker thread touches ONLY key_type (read) and key/failed (written). It
+ * never dereferences `order`, never allocates from a pool, and never logs — so
+ * order lifetime is irrelevant to it. The event-loop side owns `order`.
+ *
+ * Cancellation is therefore a flag, not a stop: ngx_autocert_keygen_abandon()
+ * clears the back-pointer, and the completion handler — which always runs, on
+ * the event loop — frees the generated EVP_PKEY and releases the slot instead
+ * of writing into freed memory. A key generated for a dead order is freed, not
+ * leaked and not stored.
+ */
+
+typedef struct {
+    ngx_thread_task_t       *task;   /* process-pool allocated, reused */
+    ngx_autocert_order_t    *order;  /* NULL once abandoned */
+    ngx_uint_t               key_type;
+    EVP_PKEY                *key;    /* thread -> event loop */
+    ngx_uint_t               failed; /* thread -> event loop */
+    ngx_uint_t               busy;   /* task posted, completion pending */
+} ngx_autocert_keygen_t;
+
+static ngx_autocert_keygen_t  ngx_autocert_keygen;
+
+
+/*
+ * Detach the in-flight task from a dying order. Called from
+ * ngx_autocert_order_free(). The task keeps running; its completion handler
+ * sees order == NULL and cleans up. Idempotent, and a no-op when this order
+ * has no task in flight.
+ */
+static void
+ngx_autocert_keygen_abandon(ngx_autocert_order_t *order)
+{
+    if (ngx_autocert_keygen.busy && ngx_autocert_keygen.order == order) {
+        ngx_autocert_keygen.order = NULL;
+    }
+}
+
+
+/* Runs on a THREAD-POOL THREAD. No pools, no logging, no order access. */
+static void
+ngx_autocert_keygen_thread(void *data, ngx_log_t *log)
+{
+    ngx_autocert_keygen_t  *kg = data;
+
+    (void) log;
+
+    kg->key = ngx_http_autocert_key_generate(kg->key_type);
+    kg->failed = (kg->key == NULL);
+}
+
+
+/* Runs on the EVENT LOOP once the task completes. */
+static void
+ngx_autocert_keygen_completion(ngx_event_t *ev)
+{
+    ngx_autocert_keygen_t  *kg = ev->data;
+    ngx_autocert_order_t   *order;
+    EVP_PKEY               *key;
+
+    order = kg->order;
+    key = kg->key;
+
+    /* Release the slot BEFORE re-entering the state machine: _finalize_csr()
+     * can fail and finish the order, which runs the driver's completion and
+     * may start the next order — which needs the slot free. */
+    kg->order = NULL;
+    kg->key = NULL;
+    kg->busy = 0;
+
+    if (order == NULL) {
+        /* Reload/shutdown freed the order while the task was in flight. The
+         * key belongs to nobody: free it rather than leak it. */
+        ngx_http_autocert_key_free(key);
+        return;
+    }
+
+    if (kg->failed || key == NULL) {
+        ngx_log_error(NGX_LOG_ERR, order->log, 0,
+                      "autocert: certificate key generation failed");
+        ngx_autocert_order_finish(order, NGX_ERROR);
+        return;
+    }
+
+    order->cert_key = key;
+
+    if (ngx_autocert_order_finalize_csr(order) != NGX_OK) {
+        ngx_autocert_order_finish(order, NGX_ERROR);
+    }
+}
+
+
+/*
+ * Post an RSA keygen to the thread pool. Returns NGX_AGAIN when the task is in
+ * flight (the caller must NOT treat that as failure: the state machine resumes
+ * from the completion handler), or NGX_ERROR when it could not be posted at
+ * all. Never returns NGX_OK — finalize does not complete inline on this path.
+ */
+static ngx_int_t
+ngx_autocert_keygen_post(ngx_autocert_order_t *order, ngx_uint_t curve)
+{
+    ngx_thread_pool_t  *tp;
+    ngx_str_t           name = ngx_string("default");
+
+    if (ngx_autocert_keygen.busy) {
+        /* One in-flight order per worker, so this cannot happen; fail the
+         * order rather than corrupt the slot if the invariant ever breaks. */
+        ngx_log_error(NGX_LOG_ALERT, order->log, 0,
+                      "autocert: certificate keygen slot busy");
+        return NGX_ERROR;
+    }
+
+    tp = ngx_thread_pool_get((ngx_cycle_t *) ngx_cycle, &name);
+    if (tp == NULL) {
+        /* No "default" thread pool configured in this build/cycle. Fall back
+         * to generating inline: a stalled worker is bad, but failing issuance
+         * outright is worse. */
+        ngx_log_error(NGX_LOG_WARN, order->log, 0,
+                      "autocert: no \"default\" thread pool; generating the "
+                      "RSA certificate key on the event loop");
+        order->cert_key = ngx_http_autocert_key_generate(curve);
+        if (order->cert_key == NULL) {
+            ngx_log_error(NGX_LOG_ERR, order->log, 0,
+                          "autocert: certificate key generation failed");
+            return NGX_ERROR;
+        }
+        return ngx_autocert_order_finalize_csr(order);
+    }
+
+    /* Allocated once from the CYCLE-INDEPENDENT process heap, not a pool: it
+     * must survive both order->pool destruction and a cycle retirement. It is
+     * then REUSED for the life of the process and deliberately never freed —
+     * exactly one ngx_thread_task_t per worker, and freeing it is never safe
+     * because a posted task may still be in flight or queued for completion.
+     * (This mirrors the orphan table above: process-lifetime state, because
+     * process lifetime is how long it must remain valid.) */
+    if (ngx_autocert_keygen.task == NULL) {
+        ngx_autocert_keygen.task = ngx_alloc(sizeof(ngx_thread_task_t),
+                                             order->log);
+        if (ngx_autocert_keygen.task == NULL) {
+            return NGX_ERROR;
+        }
+        ngx_memzero(ngx_autocert_keygen.task, sizeof(ngx_thread_task_t));
+    }
+
+    ngx_autocert_keygen.order = order;
+    ngx_autocert_keygen.key_type = curve;
+    ngx_autocert_keygen.key = NULL;
+    ngx_autocert_keygen.failed = 0;
+
+    ngx_autocert_keygen.task->handler = ngx_autocert_keygen_thread;
+    ngx_autocert_keygen.task->ctx = &ngx_autocert_keygen;
+    ngx_autocert_keygen.task->event.data = &ngx_autocert_keygen;
+    ngx_autocert_keygen.task->event.handler = ngx_autocert_keygen_completion;
+    /* ngx_cycle->log outlives order->log's pool, and the completion handler
+     * may run after the order is freed. */
+    ngx_autocert_keygen.task->event.log = ngx_cycle->log;
+
+    if (ngx_thread_task_post(tp, ngx_autocert_keygen.task) != NGX_OK) {
+        ngx_autocert_keygen.order = NULL;
+        ngx_log_error(NGX_LOG_ERR, order->log, 0,
+                      "autocert: could not post the certificate keygen task");
+        return NGX_ERROR;
+    }
+
+    ngx_autocert_keygen.busy = 1;
+
+    ngx_log_debug2(NGX_LOG_DEBUG_CORE, order->log, 0,
+                   "autocert: RSA keygen (type %ui) offloaded for \"%V\"",
+                   curve, &order->domain);
+
+    return NGX_AGAIN;
+}
+
+#endif /* NGX_THREADS */
+
+
 /*
  * M6b step 7: generate a fresh certificate key, build a CSR with SAN=domain,
  * and POST it to the finalize URL. base64url(DER(CSR)) goes in {"csr":…}.
@@ -1822,8 +2042,6 @@ ngx_autocert_order_poll_done(ngx_autocert_acme_request_t *req, ngx_int_t rc)
 static ngx_int_t
 ngx_autocert_order_finalize(ngx_autocert_order_t *order)
 {
-    ngx_str_t   csr_der, csr_b64, payload;
-    u_char     *p;
     ngx_uint_t  curve;
 
     if (order->finalize_url.len == 0) {
@@ -1844,12 +2062,46 @@ ngx_autocert_order_finalize(ngx_autocert_order_t *order)
         order->cert_key = NULL;
     }
 
+#if (NGX_THREADS)
+    /*
+     * RSA keygen is a prime search: unbounded in principle and measured here at
+     * ~70ms (2048) / ~200ms (3072) / ~700ms+ (4096) for a SINGLE key, with a
+     * long tail. That is a hard stall of the worker's event loop — every
+     * connection this worker owns stops being served for the duration. Hand it
+     * to the thread pool and resume at _finalize_csr() on the event loop.
+     *
+     * EC stays synchronous and deliberately so: P-256 measures ~30us and P-384
+     * ~150us, four to five orders of magnitude below the RSA arm and far below
+     * the cost of a thread round-trip. Offloading it would add the in-flight
+     * cancellation window below for no benefit at all.
+     */
+    if (ngx_autocert_keygen_is_rsa(curve)) {
+        return ngx_autocert_keygen_post(order, curve);
+    }
+#endif
+
     order->cert_key = ngx_http_autocert_key_generate(curve);
     if (order->cert_key == NULL) {
         ngx_log_error(NGX_LOG_ERR, order->log, 0,
                       "autocert: certificate key generation failed");
         return NGX_ERROR;
     }
+
+    return ngx_autocert_order_finalize_csr(order);
+}
+
+
+/*
+ * Second half of finalize: build the CSR from order->cert_key and POST it.
+ * Split out of ngx_autocert_order_finalize() so the threaded RSA path can
+ * re-enter here from the completion handler, on the event loop, with exactly
+ * the same code the synchronous EC path runs.
+ */
+static ngx_int_t
+ngx_autocert_order_finalize_csr(ngx_autocert_order_t *order)
+{
+    ngx_str_t   csr_der, csr_b64, payload;
+    u_char     *p;
 
     /* PEM now (in the order pool) — needed at store time, and the key handle is
      * freed in _free; capturing the PEM up front decouples the two. */
@@ -2097,7 +2349,7 @@ ngx_autocert_order_poll_order_done(ngx_autocert_acme_request_t *req,
         ngx_log_error(NGX_LOG_NOTICE, order->log, 0,
                       "autocert: order \"%V\" now ready, re-finalizing",
                       &order->domain);
-        if (ngx_autocert_order_finalize(order) != NGX_OK) {
+        if (ngx_autocert_order_finalize(order) == NGX_ERROR) {
             ngx_autocert_order_finish(order, NGX_ERROR);
         }
         return;
@@ -3922,6 +4174,16 @@ ngx_autocert_order_free(ngx_autocert_order_t *order)
     if (order->dns_delay_timer.timer_set) {
         ngx_del_timer(&order->dns_delay_timer);
     }
+#if (NGX_THREADS)
+    /*
+     * A posted keygen task cannot be cancelled and its completion handler runs
+     * after this returns — possibly after order->pool and the order struct
+     * itself are gone. Detach it here, while `order` is still a valid pointer
+     * to compare against, so the completion frees the key instead of writing
+     * into freed memory.
+     */
+    ngx_autocert_keygen_abandon(order);
+#endif
     if (order->cert_key != NULL) {
         ngx_http_autocert_key_free(order->cert_key);
         order->cert_key = NULL;

@@ -428,3 +428,33 @@ bash "$WORKSPACE/ci/tests/unit/extract_seedchunk.sh"
 	-o "$BUILD_DIR/test_name_valid" \
 	"$WORKSPACE/ci/tests/unit/test_name_valid.c" -lssl -lcrypto $SANITIZE_LIBS
 "$BUILD_DIR/test_name_valid"
+
+# Off-event-loop RSA certificate-key generation (ledger MINOR):
+# ngx_autocert_order_finalize() generated the leaf key inline, so an
+# autocert_key_type of rsa2048/3072/4096 stalled the worker's event loop for
+# the whole prime search (~70ms/~200ms/~700ms worst-of-N here, long tail). The
+# RSA arm now goes to the nginx thread pool and resumes from a completion
+# handler; the EC arm stays inline (P-256 ~30us -- a thread round-trip and an
+# in-flight cancellation window would cost more than they save).
+# The hazard under test is ownership, not keygen: an nginx thread task CANNOT
+# be cancelled, while reload/shutdown frees the order and its pool underneath
+# it. extract_keygen.sh slices the whole cancellation state machine (is_rsa,
+# the slot, _abandon, _thread, _completion) out of the shipped order source --
+# the whole .c is the ACME order state machine, far too heavy to include-shim
+# -- so an ownership bug in order.c fails here. The abandoned-order case
+# asserts against a real EVP_PKEY refcount, so a leaked key is observable
+# rather than indistinguishable from a correct free.
+# Needs -DNGX_THREADS=1: the slot is compiled under #if (NGX_THREADS), and the
+# module's own CI builds always configure --with-threads.
+# src/ngx_http_autocert_crypto.c is deliberately NOT linked: the TU defines
+# ngx_http_autocert_key_generate/_key_free itself so the free can be counted
+# (linking crypto.c too is a duplicate-symbol link error, not a fallback).
+bash "$WORKSPACE/ci/tests/unit/extract_keygen.sh"
+# shellcheck disable=SC2086
+"$CC" $SANITIZE_CFLAGS $EXTRA_CFLAGS -D_GNU_SOURCE -DNGX_THREADS=1 \
+	-Wall -Wextra -Werror -Ici/tests/unit -I"$WORKSPACE" \
+	$HTTP_INC \
+	-o "$BUILD_DIR/test_keygen_offload" \
+	"$WORKSPACE/ci/tests/unit/test_keygen_offload.c" \
+	$INET_OBJS -lssl -lcrypto $SANITIZE_LIBS
+"$BUILD_DIR/test_keygen_offload"
