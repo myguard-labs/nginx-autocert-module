@@ -293,8 +293,9 @@ collect_host(void *data, ngx_str_t *host)
  * It is NOT bounded by a tick cap — that would make the mutated walk's
  * inability to advance an artefact of the test rather than a measured
  * property. Instead it terminates on an OBSERVED FIXED POINT: a full chunk
- * that adds no new host to the set. WALK_SPIN_LIMIT is a runaway guard only;
- * hitting it is a FAILURE (returns -2), never a silent pass.
+ * that adds no new host to the set. WALK_SPIN_LIMIT is a runaway guard on
+ * EVERY walk (resuming and cursor-reset alike); hitting it is a FAILURE
+ * (returns -2), never a silent pass and never a hang.
  */
 #define WALK_SPIN_LIMIT  1024
 
@@ -344,7 +345,19 @@ walk_chunked(const char *root, size_t chunk, host_set_t *out, size_t *ticks,
             return 0;                    /* enumeration exhausted */
         }
 
-        /* Yield boundary. */
+        /* Yield boundary.
+         *
+         * The runaway guard bounds EVERY walk, not just the cursor-reset
+         * one. A shipped-loop bug that returns NGX_AGAIN without consuming
+         * an entry (a budget off-by-one, or NGX_DONE remapped to NGX_AGAIN)
+         * makes the resuming walk spin forever too; without this the test
+         * hangs until the CI job timeout instead of failing by name.
+         */
+        if (*ticks >= WALK_SPIN_LIMIT) {
+            (void) closedir(dh);
+            return -2;                   /* runaway: no walk should need this */
+        }
+
         if (reset_cursor) {
             /*
              * MUTATION MODEL: drop the resume cursor. A walk that re-opens
@@ -359,15 +372,6 @@ walk_chunked(const char *root, size_t chunk, host_set_t *out, size_t *ticks,
             if (ctx.added == 0) {
                 (void) closedir(dh);
                 return 0;
-            }
-
-            if (*ticks >= WALK_SPIN_LIMIT) {
-                /* Not a fixed point after a very generous number of chunks:
-                 * the mutation model no longer behaves as described. Fail
-                 * loudly rather than returning a set the caller would treat
-                 * as meaningful. */
-                (void) closedir(dh);
-                return -2;
             }
 
             (void) closedir(dh);
@@ -519,7 +523,7 @@ main(void)
     /* Deliberately more than one chunk, and not a multiple of it, so the last
      * chunk is partial and at least one boundary falls mid-store. */
     const size_t  n_entries = NGX_AUTOCERT_SEED_CHUNK + 7;
-    int         fds_before, fds_after, cfd;
+    int         fds_before, fds_after, cfd, crc;
     DIR        *dh;
 
     if (mkdtemp(root) == NULL) {
@@ -546,8 +550,11 @@ main(void)
     ok(oneshot.n == n_entries,
        "one-shot walk recovers every planted marker");
 
-    if (walk_chunked(root, NGX_AUTOCERT_SEED_CHUNK, &chunked, &ticks, 0) != 0) {
-        fprintf(stderr, "chunked walk failed\n");
+    crc = walk_chunked(root, NGX_AUTOCERT_SEED_CHUNK, &chunked, &ticks, 0);
+    ok(crc != -2,
+       "chunked walk advances its cursor (runaway guard not hit)");
+    if (crc != 0) {
+        fprintf(stderr, "chunked walk failed (rc=%d)\n", crc);
         return 2;
     }
     host_set_sort(&chunked);
@@ -572,7 +579,13 @@ main(void)
         int     all_equal = 1;
 
         for (s = 0; s < sizeof(sizes) / sizeof(sizes[0]); s++) {
-            if (walk_chunked(root, sizes[s], &sized, &ticks, 0) != 0) {
+            int  src = walk_chunked(root, sizes[s], &sized, &ticks, 0);
+
+            if (src == -2) {
+                printf("      chunk=%zu runaway: cursor never advanced\n",
+                       sizes[s]);
+            }
+            if (src != 0) {
                 all_equal = 0;
                 break;
             }
@@ -673,10 +686,13 @@ main(void)
             (void) mkfifo(path, 0600);
         }
 
-        if (walk_chunked(root, NGX_AUTOCERT_SEED_CHUNK, &chunked, &ticks, 0)
-            != 0)
-        {
-            fprintf(stderr, "skip walk failed\n");
+        int  krc = walk_chunked(root, NGX_AUTOCERT_SEED_CHUNK, &chunked,
+                                &ticks, 0);
+
+        ok(krc != -2,
+           "skip-fixture walk advances its cursor (runaway guard not hit)");
+        if (krc != 0) {
+            fprintf(stderr, "skip walk failed (rc=%d)\n", krc);
             return 2;
         }
         host_set_sort(&chunked);
