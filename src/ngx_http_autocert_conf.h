@@ -158,7 +158,6 @@ typedef struct {
     time_t       dns_propagation_delay;  /* seconds to wait after publish */
     time_t       dns_hook_timeout;  /* seconds to wait for a hook exec */
 
-    ngx_shm_zone_t  *shm_zone;      /* published enabled-name set (for M4) */
     ngx_array_t     *names;         /* ngx_str_t, collected at postconfig */
 
     /*

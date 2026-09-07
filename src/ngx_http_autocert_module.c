@@ -48,9 +48,6 @@
  * authorization — larger entries than the token store, still few of them. */
 #define NGX_HTTP_AUTOCERT_ALPN_ZONE_SIZE  (256 * 1024)
 
-/* Default zone size: enough for a few thousand names; admin-tunable later. */
-#define NGX_HTTP_AUTOCERT_ZONE_SIZE  (256 * 1024)
-
 /* autolabel A1 runtime-request registry: capped at NGX_AUTOCERT_REQUESTS_MAX
  * (64) short host strings + rbtree nodes; a small zone with slab headroom is
  * plenty. */
@@ -61,21 +58,12 @@
  * CORE helper's accessor TU agrees on the layout. */
 
 
-/* Shared-zone payload: a flat list of NUL-free name strings in slab memory. */
-typedef struct {
-    ngx_uint_t   nelts;
-    ngx_str_t    elts[1];           /* nelts entries; data also in slab */
-} ngx_http_autocert_sh_t;
-
-
 static void *ngx_http_autocert_create_main_conf(ngx_conf_t *cf);
 static char *ngx_http_autocert_init_main_conf(ngx_conf_t *cf, void *conf);
 static void *ngx_http_autocert_create_srv_conf(ngx_conf_t *cf);
 static char *ngx_http_autocert_merge_srv_conf(ngx_conf_t *cf, void *parent,
     void *child);
 static ngx_int_t ngx_http_autocert_postconfig(ngx_conf_t *cf);
-static ngx_int_t ngx_http_autocert_init_zone(ngx_shm_zone_t *shm_zone,
-    void *data);
 static ngx_int_t ngx_http_autocert_challenge_handler(ngx_http_request_t *r);
 #if (NGX_AUTOCERT_TEST)
 static char *ngx_http_autocert_test_challenge(ngx_conf_t *cf,
@@ -1573,24 +1561,6 @@ ngx_http_autocert_postconfig(ngx_conf_t *cf)
         *h = ngx_http_autocert_challenge_handler;
     }
 
-    if (amcf->names->nelts == 0) {
-        /* Test-seed only: no name zone needed. */
-        return NGX_OK;
-    }
-
-    ngx_str_set(&name, "autocert");
-
-    amcf->shm_zone = ngx_shared_memory_add(cf, &name,
-                                           NGX_HTTP_AUTOCERT_ZONE_SIZE,
-                                           &ngx_http_autocert_module);
-    if (amcf->shm_zone == NULL) {
-        return NGX_ERROR;
-    }
-
-    amcf->shm_zone->init = ngx_http_autocert_init_zone;
-    amcf->shm_zone->data = amcf;
-    amcf->shm_zone->noreuse = 1;
-
     return NGX_OK;
 }
 
@@ -1701,78 +1671,6 @@ ngx_http_autocert_challenge_handler(ngx_http_request_t *r)
     out.next = NULL;
 
     return ngx_http_output_filter(r, &out);
-}
-
-
-/*
- * Populate the slab with the collected name set. noreuse=1 forces a fresh
- * zone on every (re)load, so this always (re)builds from the current config.
- * nginx still passes the *previous* cycle's zone data as `data`; we ignore it
- * — touching it would be a use-after-free once the old cycle is freed.
- */
-static ngx_int_t
-ngx_http_autocert_init_zone(ngx_shm_zone_t *shm_zone, void *data)
-{
-    ngx_http_autocert_main_conf_t  *amcf = shm_zone->data;
-
-    size_t                    sz;
-    u_char                   *p;
-    ngx_uint_t                i, nelts;
-    ngx_str_t                *src;
-    ngx_slab_pool_t          *shpool;
-    ngx_http_autocert_sh_t   *sh;
-
-    shpool = (ngx_slab_pool_t *) shm_zone->shm.addr;
-
-    nelts = amcf->names->nelts;
-    src = amcf->names->elts;
-
-    /*
-     * Guard the size_t multiply against overflow before sizing the slab.
-     * nelts is bounded by config in practice, but a wrapped sz would
-     * underallocate and let the copy loop corrupt the slab.
-     */
-    if (nelts > (NGX_MAX_SIZE_T_VALUE
-                 - offsetof(ngx_http_autocert_sh_t, elts))
-                / sizeof(ngx_str_t))
-    {
-        ngx_log_error(NGX_LOG_EMERG, shm_zone->shm.log, 0,
-                      "autocert: too many names (%ui) for zone", nelts);
-        return NGX_ERROR;
-    }
-
-    sz = offsetof(ngx_http_autocert_sh_t, elts) + nelts * sizeof(ngx_str_t);
-
-    sh = ngx_slab_calloc(shpool, sz);
-    if (sh == NULL) {
-        return NGX_ERROR;
-    }
-
-    sh->nelts = nelts;
-
-    for (i = 0; i < nelts; i++) {
-        p = ngx_slab_alloc(shpool, src[i].len);
-        if (p == NULL) {
-            /* Slab is mmap-backed and survives a failed reload, so free what we
-             * already allocated before bailing — otherwise a repeatedly-failing
-             * reload permanently wastes slab space. */
-            ngx_uint_t  j;
-
-            for (j = 0; j < i; j++) {
-                ngx_slab_free(shpool, sh->elts[j].data);
-            }
-            ngx_slab_free(shpool, sh);
-            return NGX_ERROR;
-        }
-
-        ngx_memcpy(p, src[i].data, src[i].len);
-        sh->elts[i].len = src[i].len;
-        sh->elts[i].data = p;
-    }
-
-    shpool->data = sh;
-
-    return NGX_OK;
 }
 
 
