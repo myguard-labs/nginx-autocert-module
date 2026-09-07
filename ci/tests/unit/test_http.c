@@ -799,16 +799,18 @@ parity_case(const char *label, const char *resp)
     {
         size_t  *feeds = malloc(len * sizeof(size_t));
 
-        CHECK(feeds != NULL, "parity: byte-at-a-time feed table allocated");
-        if (feeds != NULL) {
-            for (i = 0; i < len; i++) {
-                feeds[i] = i + 1;
-            }
-            rc = parse_resp_incremental(resp, feeds, len, &r);
-            assert_parity(&ref, rc, &r, label, -1);
-            ngx_http_fuzz_pool_reset(&pool);
-            free(feeds);
+        if (feeds == NULL) {
+            fprintf(stderr, "FATAL: parity byte-at-a-time feed table "
+                    "allocation failed\n");
+            abort();
         }
+        for (i = 0; i < len; i++) {
+            feeds[i] = i + 1;
+        }
+        rc = parse_resp_incremental(resp, feeds, len, &r);
+        assert_parity(&ref, rc, &r, label, -1);
+        ngx_http_fuzz_pool_reset(&pool);
+        free(feeds);
     }
 
     /*
