@@ -1,4 +1,4 @@
-# sync-sha: 84e209d2cde553c6ab0ab015575f7f42b6d16d5b108ea5759ccaa42618573eb0
+# sync-sha: ae2031e3d4c185c226fa0fdd98a54f07e927d663c38f7139be4bfa1744898843
 name: Fuzzing
 
 # Fast fuzz regression — 30s/target on the JSON + HTTP + base64url ACME parsers
@@ -52,6 +52,17 @@ jobs:
       - name: Build fuzz targets
         run: bash ci/fuzz/build.sh "$GITHUB_WORKSPACE/fuzz"
 
+      # -max_len=32768 (libFuzzer's default is 4096). The shims carry an
+      # allocation-budget oracle that abort()s when a parser's total allocation
+      # count or byte total exceeds a linear bound in the input length, so a
+      # superlinear blowup is only visible if the fuzzer can generate a document
+      # long enough to exceed that bound. 4096 bytes is too short to leave much
+      # margin. 32768 measured as the largest value with no incremental
+      # throughput cost on this host: fuzz_json ~176k exec/s (~168k at the 4096
+      # default), fuzz_b64 ~460k (~297k), fuzz_http ~35k -- and fuzz_http sits at
+      # 34-36k exec/s anywhere from 8192 to 32768, so the step down from default
+      # is paid at any raise and buying the extra length is free. The 30s lane
+      # still gets ~1M+ executions per target.
       - name: Run each target 30s
         run: |
           set -euo pipefail
@@ -70,6 +81,7 @@ jobs:
             set +e
             "$BIN/fuzz_${name}" \
               -max_total_time=30 \
+              -max_len=32768 \
               -dict="$DATA/fuzz.dict" \
               -print_final_stats=1 \
               -artifact_prefix="crash-${name}-" \

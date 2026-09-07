@@ -102,6 +102,53 @@ The harness allocates a buffer sized **exactly** to `size` bytes with **no**
 trailing NUL, so ASAN turns any read at or past the end into an immediate
 heap-buffer-overflow.
 
+### Allocation-budget oracle
+
+ASAN cannot see a *pool*-allocated overflow — pool allocations carry no
+per-allocation redzone — and it has nothing to say about a parser that merely
+allocates far too much. Both the JSON and HTTP shims therefore assert the
+allocation invariant directly.
+
+The shims previously registered allocations in a fixed 4096-entry array and
+returned `NULL` once it filled. That made blowup **invisible**: a document
+asking for a million nodes hit the cap, got `NULL`, and the parser's own
+out-of-memory path produced a clean rejection — indistinguishable from correct
+behaviour. The registry now grows geometrically (`realloc`), so it is never the
+thing that fails; only the budget assertion stops a parse.
+
+Both parsers allocate `O(N)` in the document length, because every allocation
+site is charged to input bytes that are consumed once and never revisited. The
+shims assert:
+
+```
+allocs <= 2 * input_len + 8
+bytes  <= 64 * input_len + 4096
+```
+
+Measured worst-case densities the bounds are derived from (per input byte):
+
+| document | allocs/byte | bytes/byte |
+|---|---|---|
+| `[0,0,0,...]` | 1.00 | 20.0 |
+| `["","",...]` | 1.00 | 13.3 |
+| `{"":0,"":0,...}` | 0.60 | 11.2 |
+| `"aaaa...a"` | ~0 | 1.0 |
+| `a:b\r\n` x N (HTTP) | 0.40 | 21.4 |
+
+The bounds carry deliberate headroom. A linear bound with slack still catches
+superlinear growth, since superlinear growth exceeds *any* linear bound once the
+document is long enough — the slack only decides how long "long enough" is.
+
+A violation prints `ALLOCATION BUDGET EXCEEDED` and `abort()`s, so libFuzzer
+records it as a crash with the offending input saved.
+
+`fuzz_b64` has no such oracle and needs none: it performs exactly one
+allocation per input, sized directly from the input length.
+
+Because the oracle can only fire on a document long enough to exceed its bound,
+both CI lanes run with `-max_len=32768` rather than libFuzzer's 4096-byte
+default.
+
 ## Build & run locally
 
 ```bash

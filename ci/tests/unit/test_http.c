@@ -499,8 +499,9 @@ test_hdr_scan_cursor(void)
 int
 main(void)
 {
-    pool.nallocs = 0;
-    pool.log = NULL;
+    /* The unit suite drives fixed fixtures, not sized fuzz inputs, so it opts
+     * out of the shim's allocation budget while keeping its tracked registry. */
+    ngx_http_fuzz_pool_init(&pool, NULL, NGX_HTTP_FUZZ_NO_BUDGET);
 
     test_parse_url();
     test_status_line();
