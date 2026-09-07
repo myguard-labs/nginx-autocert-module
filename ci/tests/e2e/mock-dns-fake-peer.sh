@@ -79,6 +79,10 @@ MOCK_PID=""
 cleanup() {
 	"$SERVER_BIN" -p "$PREFIX" -c "$PREFIX/conf/nginx.conf" -s stop 2>/dev/null || true
 	if [ -n "$DNS_PID" ]; then
+		# Give the peer's own poll loops a chance at a graceful exit via the
+		# sentinel file they already check (os.path.exists(MODE_FILE + ".stop"))
+		# before falling back to a signal.
+		touch "${MODE_FILE:-$PREFIX/dns-mode}.stop" 2>/dev/null || true
 		kill "$DNS_PID" 2>/dev/null || true
 		wait "$DNS_PID" 2>/dev/null || true
 	fi
@@ -108,6 +112,7 @@ openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 \
 # this fixture could reach a real issuance attempt but never complete one.
 cat >"$PREFIX/mockca.py" <<PYEOF
 import base64, datetime, json, ssl, itertools
+from datetime import timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
@@ -127,7 +132,7 @@ def b64url_dec(s):
 
 def make_leaf(csr_der):
     csr = x509.load_der_x509_csr(csr_der)
-    now = datetime.datetime.utcnow()
+    now = datetime.datetime.now(timezone.utc)
     leaf = (x509.CertificateBuilder()
             .subject_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, NAME)]))
             .issuer_name(CA_CERT.subject)
@@ -366,9 +371,11 @@ def udp_server():
     sock.settimeout(0.5)
     while not os.path.exists(MODE_FILE + ".stop"):
         try:
-            data, addr = sock.recvfrom(512)
+            data, addr = sock.recvfrom(4096)
         except socket.timeout:
             continue
+        if len(data) >= 4096:
+            log("udp query warning: possible truncation at 4096-byte boundary")
         mode = read_mode()
         log("udp query mode=%s" % mode)
         if mode == "drop":
@@ -458,25 +465,53 @@ PYEOF
 
 MODE_FILE="$PREFIX/dns-mode"
 DNS_LOG="$PREFIX/dns-query.log"
-echo "drop" >"$MODE_FILE"
+# Probe with a real answer so a matching reply is unambiguous proof the peer
+# actually parsed and answered a query -- not merely that some UDP socket on
+# this port replied to anything. The probe is reply-checked (parsed, and the
+# 2-byte query ID echoed back) so a crash-on-import, EADDRINUSE, or a peer
+# that never binds cannot pass silently.
+echo "answer" >"$MODE_FILE"
 
 echo "== starting fake DNS peer on 127.0.0.1:$DNS_PORT (UDP+TCP) =="
 python3 "$PREFIX/fakedns.py" "$DNS_PORT" "$CA_HOST" "127.0.0.1" "$MODE_FILE" "$DNS_LOG" &
 DNS_PID=$!
 for i in $(seq 1 20); do
-	python3 - "$DNS_PORT" <<'EOF' >/dev/null 2>&1 && break
-import socket, sys
+	kill -0 "$DNS_PID" 2>/dev/null || {
+		echo "::error::fake DNS peer process died before it started listening"
+		exit 1
+	}
+	python3 - "$DNS_PORT" "$CA_HOST" <<'EOF' >/dev/null 2>&1 && break
+import socket, struct, sys
+
+def encode_qname(name):
+    out = b""
+    for label in name.rstrip(".").split("."):
+        out += bytes([len(label)]) + label.encode()
+    return out + b"\x00"
+
+port = int(sys.argv[1])
+qname = sys.argv[2]
+qid = b"\xAB\xCD"
+query = qid + struct.pack("!HHHHH", 0x0100, 1, 0, 0, 0) + encode_qname(qname) + struct.pack("!HH", 1, 1)
+
 s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 s.settimeout(0.2)
-s.sendto(b"\x00" * 12, ("127.0.0.1", int(sys.argv[1])))
+s.sendto(query, ("127.0.0.1", port))
+data, _ = s.recvfrom(4096)
+# Require a parseable reply whose query ID matches ours -- proves the peer
+# actually received and answered THIS query, not stray traffic on the port.
+assert len(data) >= 12, "reply too short to be a DNS header"
+assert data[0:2] == qid, "reply query ID does not match"
 EOF
 	sleep 0.25
 	[ "$i" = 20 ] && {
-		echo "::error::fake DNS peer did not come up"
+		echo "::error::fake DNS peer did not come up (no valid, ID-matching reply)"
 		exit 1
 	}
 done
-echo "✓ fake DNS peer listening"
+echo "✓ fake DNS peer listening (verified with a real A query and a matching reply)"
+# Now that readiness is proven, switch to the stage-1 mode.
+echo "drop" >"$MODE_FILE"
 
 echo "== starting mock ACME CA on :$CA_PORT =="
 python3 "$PREFIX/mockca.py" &
@@ -540,12 +575,26 @@ echo "✓ config accepted"
 
 LOG="$PREFIX/logs/error.log"
 
-count_resolve_fail() { grep -c "autocert: resolve \"${CA_HOST}\" failed" "$LOG" 2>/dev/null || true; }
+count_resolve_fail() {
+	[ -f "$LOG" ] || {
+		echo 0
+		return
+	}
+	grep -c "autocert: resolve \"${CA_HOST}\" failed" "$LOG" || true
+}
 count_finish() {
-	grep -cE 'autocert: (ACME order failed|certificate provisioned for) "'"${NAME}"'"' "$LOG" 2>/dev/null || true
+	[ -f "$LOG" ] || {
+		echo 0
+		return
+	}
+	grep -cE 'autocert: (ACME order failed|certificate provisioned for) "'"${NAME}"'"' "$LOG" || true
 }
 count_issued() {
-	grep -c "autocert: certificate provisioned for \"${NAME}\"" "$LOG" 2>/dev/null || true
+	[ -f "$LOG" ] || {
+		echo 0
+		return
+	}
+	grep -c "autocert: certificate provisioned for \"${NAME}\"" "$LOG" || true
 }
 wait_for() {
 	local pattern="$1" tries="$2" desc="$3"
@@ -569,12 +618,31 @@ wait_for_new() {
 	local pattern="$1" tries="$2" before="$3" desc="$4"
 	local i
 	for i in $(seq 1 "$tries"); do
-		[ "$(grep -cE "$pattern" "$LOG" 2>/dev/null || true)" -gt "$before" ] && return 0
+		local cnt=0
+		[ -f "$LOG" ] && cnt=$(grep -cE "$pattern" "$LOG" || true)
+		[ "${cnt:-0}" -gt "$before" ] && return 0
 		sleep 0.5
 	done
 	echo "::error::timed out waiting for a NEW match of: $desc"
 	tail -60 "$LOG"
 	return 1
+}
+
+# Count mode-tagged receipts the fake peer itself logged for a given mode,
+# across both UDP and TCP. This is the discriminating oracle: it proves the
+# fake peer actually received and processed a query in that mode, which
+# count_resolve_fail() alone cannot -- ngx_autocert_acme_resolve_handler()
+# (src/ngx_autocert_acme.c:568-575) logs the identical "resolve ... failed"
+# line for a timeout, SERVFAIL, NXDOMAIN, malformed reply, or connection
+# refused alike, so that line is satisfied even with no DNS peer running at
+# all. Gating each stage on ALSO seeing a new "mode=<X>" line in $DNS_LOG
+# closes that gap.
+count_dns_mode() {
+	[ -f "$DNS_LOG" ] || {
+		echo 0
+		return
+	}
+	grep -c "mode=$1" "$DNS_LOG" || true
 }
 
 # fd/timer/connection resource snapshot for the neutrality check below.
@@ -606,8 +674,14 @@ echo "pid=$NGX_PID baseline fds=$BASELINE_FDS"
 
 # ---- Stage 1: dropped UDP queries -> resolve times out -> retry -----------
 echo "== stage 1: dropped replies (resolve timeout) =="
+DROP_BEFORE_1=$(count_dns_mode drop)
 wait_for 'autocert: resolve "'"${CA_HOST}"'" failed' 30 "first resolve failure (dropped replies)"
 echo "✓ resolve failed as expected under a dropped-reply peer"
+[ "$(count_dns_mode drop)" -gt "$DROP_BEFORE_1" ] || {
+	echo "::error::no 'mode=drop' receipt observed in $DNS_LOG -- the fake peer never actually saw a query in stage 1, the resolve failure could have happened with no peer at all"
+	exit 1
+}
+echo "✓ fake peer logged a new drop-mode receipt -- the failure was genuinely caused by the peer dropping a real query"
 
 FAILS_AFTER_1=$(count_resolve_fail)
 echo "== waiting for the driver to retry (sweep floor 5s under NGX_AUTOCERT_TEST) =="
@@ -626,6 +700,7 @@ echo "✓ driver retried the resolve after a dropped-reply timeout"
 echo "== stage 2: SERVFAIL =="
 echo "servfail" >"$MODE_FILE"
 FAILS_BEFORE_2=$(count_resolve_fail)
+SERVFAIL_BEFORE_2=$(count_dns_mode servfail)
 for i in $(seq 1 "$WAIT_TRIES"); do
 	[ "$(count_resolve_fail)" -gt "$FAILS_BEFORE_2" ] && break
 	sleep 0.5
@@ -634,12 +709,17 @@ for i in $(seq 1 "$WAIT_TRIES"); do
 		exit 1
 	}
 done
-echo "✓ SERVFAIL surfaced as a resolve failure and the order was not stuck"
+[ "$(count_dns_mode servfail)" -gt "$SERVFAIL_BEFORE_2" ] || {
+	echo "::error::no 'mode=servfail' receipt observed in $DNS_LOG -- the resolve failure was not proven to come from an actual SERVFAIL reply"
+	exit 1
+}
+echo "✓ SERVFAIL surfaced as a resolve failure (confirmed by a new servfail-mode receipt) and the order was not stuck"
 
 # ---- Stage 3: NXDOMAIN ---------------------------------------------------
 echo "== stage 3: NXDOMAIN =="
 echo "nxdomain" >"$MODE_FILE"
 FAILS_BEFORE_3=$(count_resolve_fail)
+NXDOMAIN_BEFORE_3=$(count_dns_mode nxdomain)
 for i in $(seq 1 "$WAIT_TRIES"); do
 	[ "$(count_resolve_fail)" -gt "$FAILS_BEFORE_3" ] && break
 	sleep 0.5
@@ -648,41 +728,49 @@ for i in $(seq 1 "$WAIT_TRIES"); do
 		exit 1
 	}
 done
-echo "✓ NXDOMAIN surfaced as a resolve failure and the order was not stuck"
+[ "$(count_dns_mode nxdomain)" -gt "$NXDOMAIN_BEFORE_3" ] || {
+	echo "::error::no 'mode=nxdomain' receipt observed in $DNS_LOG -- the resolve failure was not proven to come from an actual NXDOMAIN reply"
+	exit 1
+}
+echo "✓ NXDOMAIN surfaced as a resolve failure (confirmed by a new nxdomain-mode receipt) and the order was not stuck"
 
 # ---- Stage 4: malformed reply --------------------------------------------
 echo "== stage 4: malformed (truncated header) reply =="
 echo "malformed" >"$MODE_FILE"
 FAILS_BEFORE_4=$(count_resolve_fail)
+MALFORMED_BEFORE_4=$(count_dns_mode malformed)
 for i in $(seq 1 "$WAIT_TRIES"); do
-	rc=0
-	{ [ "$(count_resolve_fail)" -gt "$FAILS_BEFORE_4" ] || [ "$(count_issued)" -gt 0 ]; } || rc=1
-	if [ "$rc" -eq 0 ]; then break; fi
+	# count_issued deliberately excluded: a successful issuance means the
+	# reply was NOT malformed, which is a stage FAILURE, not a pass.
+	{ [ "$(count_resolve_fail)" -gt "$FAILS_BEFORE_4" ] && [ "$(count_dns_mode malformed)" -gt "$MALFORMED_BEFORE_4" ]; } && break
 	sleep 0.5
 	[ "$i" = "$WAIT_TRIES" ] && {
-		echo "::error::no observable progress (failure or issuance) under a malformed reply"
+		echo "::error::no resolve failure paired with a new malformed-mode receipt -- either nothing failed, or the fake peer never actually served a malformed reply"
 		exit 1
 	}
 done
-echo "✓ malformed reply did not wedge the resolve (module observed a terminal resolver outcome, not a hang)"
+echo "✓ malformed reply (confirmed served by the fake peer) did not wedge the resolve, and produced a genuine resolve failure rather than an accidental issuance"
 
 # ---- Stage 5: bogus compression-pointer reply ----------------------------
 echo "== stage 5: reply with an out-of-range compression pointer =="
 echo "badcompress" >"$MODE_FILE"
 BEFORE_5_FAIL=$(count_resolve_fail)
-BEFORE_5_ISSUED=$(count_issued)
-BEFORE_5_REJECTED=$(grep -c "unexpected compression pointer in DNS response" "$LOG" 2>/dev/null || true)
+BEFORE_5_REJECTED=0
+[ -f "$LOG" ] && BEFORE_5_REJECTED=$(grep -c "unexpected compression pointer in DNS response" "$LOG" || true)
+BEFORE_5_REJECTED=${BEFORE_5_REJECTED:-0}
+BADCOMPRESS_BEFORE_5=$(count_dns_mode badcompress)
 for i in $(seq 1 "$WAIT_TRIES"); do
-	rc=0
-	{ [ "$(count_resolve_fail)" -gt "$BEFORE_5_FAIL" ] || [ "$(count_issued)" -gt "$BEFORE_5_ISSUED" ]; } || rc=1
-	if [ "$rc" -eq 0 ]; then break; fi
+	# count_issued deliberately excluded here too (see stage 4): a clean
+	# issuance would mean the compression-pointer reply was never actually
+	# malformed from nginx core's point of view -- that is a stage failure.
+	{ [ "$(count_resolve_fail)" -gt "$BEFORE_5_FAIL" ] && [ "$(count_dns_mode badcompress)" -gt "$BADCOMPRESS_BEFORE_5" ]; } && break
 	sleep 0.5
 	[ "$i" = "$WAIT_TRIES" ] && {
-		echo "::error::no observable progress under a malformed compression-pointer reply"
+		echo "::error::no resolve failure paired with a new badcompress-mode receipt under a malformed compression-pointer reply"
 		exit 1
 	}
 done
-echo "✓ bogus compression pointer did not wedge the resolve"
+echo "✓ bogus compression pointer (confirmed served by the fake peer) did not wedge the resolve"
 # Targeted oracle, not just the hang-guard above: the hang-guard alone is
 # VACUOUS against a fixture bug that accidentally builds a syntactically
 # VALID reply (a real regression this fixture hit -- see the comment on the
@@ -694,16 +782,22 @@ echo "✓ bogus compression pointer did not wedge the resolve"
 # dispatching to ngx_resolver_process_a() -- this is the one signal that
 # distinguishes "the packet was truly malformed and rejected" from "the
 # packet accidentally parsed as valid".
-[ "$(grep -c "unexpected compression pointer in DNS response" "$LOG" 2>/dev/null || true)" -gt "$BEFORE_5_REJECTED" ] || {
+AFTER_5_REJECTED=0
+[ -f "$LOG" ] && AFTER_5_REJECTED=$(grep -c "unexpected compression pointer in DNS response" "$LOG" || true)
+AFTER_5_REJECTED=${AFTER_5_REJECTED:-0}
+[ "$AFTER_5_REJECTED" -gt "$BEFORE_5_REJECTED" ] || {
 	echo "::error::nginx core never logged a compression-pointer rejection ('unexpected compression pointer in DNS response') -- the badcompress reply did not actually exercise the malformed-pointer path"
 	tail -40 "$LOG"
 	exit 1
 }
 echo "✓ nginx core's resolver logged the out-of-range compression-pointer rejection (the reply was genuinely malformed, not accidentally valid)"
 
-# ---- Stage 6: TC truncation forcing TCP retry, then TTL/address change --
+# ---- Stage 6: TC truncation forcing TCP retry --------------------------
 echo "== stage 6: TC-flag truncation forces TCP retry, which answers correctly =="
 echo "tc" >"$MODE_FILE"
+TCP_BEFORE_6=0
+[ -f "$DNS_LOG" ] && TCP_BEFORE_6=$(grep -c "tcp query mode=" "$DNS_LOG" || true)
+TCP_BEFORE_6=${TCP_BEFORE_6:-0}
 # The account may still be dead at this point (stages 2-5 can each burn a
 # full ~30s bootstrap kick-timer cycle -- see WAIT_TRIES above), so this must
 # budget for one more bootstrap cycle PLUS the order/challenge/finalize
@@ -712,6 +806,19 @@ wait_for "autocert: certificate provisioned for \"${NAME}\"" "$WAIT_TRIES" \
 	"issuance after TC truncation forced a TCP retry"
 echo "✓ issuance succeeded after a UDP truncation forced the TCP path"
 
+# The TCP receipt is what proves the truncation actually escalated to TCP,
+# rather than a UDP "tc"-mode answer somehow landing without ever forcing a
+# TCP round trip -- without this, the stage cannot distinguish "TC/TCP-retry
+# worked" from "a UDP answer happened to satisfy the resolve by luck".
+TCP_AFTER_6=0
+[ -f "$DNS_LOG" ] && TCP_AFTER_6=$(grep -c "tcp query mode=" "$DNS_LOG" || true)
+TCP_AFTER_6=${TCP_AFTER_6:-0}
+[ "$TCP_AFTER_6" -gt "$TCP_BEFORE_6" ] || {
+	echo "::error::no new 'tcp query mode=' receipt in $DNS_LOG -- issuance succeeded without the resolver ever falling back to TCP, so the TC truncation was not proven to have escalated to the TCP path"
+	exit 1
+}
+echo "✓ fake peer logged a new TCP-mode receipt -- the TC truncation genuinely forced a TCP retry"
+
 ISSUED_AFTER_TC=$(count_issued)
 [ "$ISSUED_AFTER_TC" -eq 1 ] || {
 	echo "::error::expected exactly one issuance after the TC/TCP-retry stage, got $ISSUED_AFTER_TC"
@@ -719,19 +826,31 @@ ISSUED_AFTER_TC=$(count_issued)
 }
 
 # ---- Stage 7: HUP while a resolution is in flight ------------------------
-# Force a fresh resolve attempt (renewal sweep, floored at 5s under
-# NGX_AUTOCERT_TEST) and send SIGHUP mid-flight by dropping replies again just
-# before the reload -- master_process off means SIGHUP drives
-# driver_reload()/cancel_inflight() in this very process (same technique as
-# reload-inflight.sh), so the in-flight resolve must be cancelled cleanly (no
-# crash, no leaked ctx) and the reloaded driver must pick the order back up
-# once the peer answers again.
+# KNOWN LIMITATION (reported, not silently worked around): after stage 6's
+# successful issuance there is no natural mechanism left in this fixture to
+# make the driver re-resolve DNS on its own before the reload --
+# ngx_autocert_sched_handler's periodic sweep only launches a new order when
+# a name is inside its renew_before window (now >= notAfter - renew_before),
+# and with the 2-day mock-CA leaf and this config's renew_before (10s, chosen
+# to keep the *sweep* interval itself at the 5s NGX_AUTOCERT_TEST floor --
+# interval = min(renew_before/2, 12h ceiling)) that window is ~2 days away.
+# Raising renew_before to force the cert "due" was tried and reverted: it
+# makes interval = min(renew_before/2, 12h) = 12h, i.e. the SAME change that
+# makes the cert due also pushes the next sweep tick out to the far side of
+# the 12h ceiling, so nothing ties the sweep to happening soon either way --
+# confirmed empirically (renew_before=3d: sweep never fired again in a 400s
+# run). So instead of waiting for a resolve that provably cannot arrive on
+# its own, force one the same way stage 8 already relies on: a reload resets
+# ca_states and re-arms bootstrap (driver_reload() in ngx_autocert_driver.c),
+# which itself issues a fresh DNS resolve as part of re-registering the ACME
+# account -- put the peer in "drop" mode BEFORE the reload so THAT resolve is
+# the one caught in flight, then confirm the reload actually produced a new
+# resolve failure afterward (the property under test: an HUP mid-resolve does
+# not wedge the driver, verified by wait_for_new below rather than assumed).
 echo "== stage 7: reload (HUP) while a resolution is in flight =="
+FAILS_BEFORE_7=$(count_resolve_fail)
 echo "drop" >"$MODE_FILE"
-wait_for 'autocert: resolve "'"${CA_HOST}"'" failed' 30 \
-	"a fresh drop-triggered resolve failure before the reload"
-echo "✓ resolve is failing again (peer back to dropping) ahead of the reload"
-
+sleep 0.2
 kill -HUP "$NGX_PID"
 sleep 1
 for i in $(seq 1 20); do
@@ -749,8 +868,19 @@ done
 }
 echo "✓ process survived SIGHUP with an in-flight resolve (pid unchanged, in-place reload)"
 
+# Confirm the reload actually drove a fresh resolve attempt against the
+# still-dropping peer (the property this stage is named for), rather than
+# just asserting the process is alive: the reloaded driver re-bootstraps
+# (driver_reload -> re-register ACME account -> resolve the CA host), and
+# with the peer still in "drop" mode that resolve must fail again.
+wait_for_new 'autocert: resolve "'"${CA_HOST}"'" failed' "$WAIT_TRIES" "$FAILS_BEFORE_7" \
+	"a fresh post-reload resolve failure while the peer is still dropping"
+echo "✓ the reload drove a genuinely fresh resolve attempt (not a stale pre-reload line), and it was cancelled/retried cleanly rather than wedging the driver"
+
 echo "== stage 8: recovery after reload -- peer starts answering again =="
-BOOTSTRAP_ATTEMPTS_BEFORE_8=$(grep -c "autocert: registering ACME account via" "$LOG" 2>/dev/null || true)
+BOOTSTRAP_ATTEMPTS_BEFORE_8=0
+[ -f "$LOG" ] && BOOTSTRAP_ATTEMPTS_BEFORE_8=$(grep -c "autocert: registering ACME account via" "$LOG" || true)
+BOOTSTRAP_ATTEMPTS_BEFORE_8=${BOOTSTRAP_ATTEMPTS_BEFORE_8:-0}
 echo "answer" >"$MODE_FILE"
 # Scope, matching the documented precedent in single-process-reload.sh /
 # reload-inflight.sh: nginx core does not cleanly rebuild its connection/
@@ -772,21 +902,24 @@ echo "✓ driver started a fresh bootstrap/resolve attempt after the reload (not
 ISSUED_TOTAL=$(count_issued)
 if [ "$ISSUED_TOTAL" -eq 2 ]; then
 	echo "✓ recovery went all the way to a second issuance (best case; not required by this stage's contract)"
+	echo "✓ exactly one NEW post-reload finalize was observed, and no duplicate/extra issuance beyond it -- exactly-once finalize holds across the reload"
 elif [ "$ISSUED_TOTAL" -eq 1 ]; then
 	echo "info: still 1 issuance total -- post-reload completion is blocked by the documented master_process-off connection-table limitation (see single-process-reload.sh), not asserted here"
+	echo "✓ no post-reload finalize was observed at all in this run, so exactly-once finalize trivially holds (nothing to duplicate) -- the property was not exercised across the reload"
 else
 	echo "::error::expected 1 or 2 issuances total after the reload, got $ISSUED_TOTAL"
 	grep autocert "$LOG" | grep -i "certificate provisioned\|order failed"
 	exit 1
 fi
-echo "✓ no duplicate/extra issuance beyond the pre-reload one -- exactly-once finalize holds across the reload"
 
 # Exactly-once finalize sanity across the whole run: every ACME order failure
 # or success line pairs 1:1 with an actual resolve attempt; no order should
 # ever report BOTH a failure and a success for the same attempt window. We
 # already assert a hard issuance count above; here we also make sure no
 # "order did not become valid" (order-level double-terminal bug) appeared.
-DOUBLE_TERMINAL=$(grep -c "autocert: order did not become valid" "$LOG" 2>/dev/null || true)
+DOUBLE_TERMINAL=0
+[ -f "$LOG" ] && DOUBLE_TERMINAL=$(grep -c "autocert: order did not become valid" "$LOG" || true)
+DOUBLE_TERMINAL=${DOUBLE_TERMINAL:-0}
 echo "info: order-did-not-become-valid lines: $DOUBLE_TERMINAL (informational; retries surfaced as resolve failures here, not order-poll failures)"
 
 # ---- Resource neutrality --------------------------------------------------
