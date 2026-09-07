@@ -2373,10 +2373,11 @@ ngx_autocert_runtime_seed_step(ngx_event_t *ev);
  * function plus NGX_AUTOCERT_SEED_CHUNK).
  *
  * `cfd` is the pinned store-container fd; `name` is a readdir entry name.
- * On success fills *host from `buf` (caller-owned, NGX_AUTOCERT_REQUEST_NAME_MAX
- * bytes) and returns NGX_OK. Returns NGX_DECLINED for every "not a runtime
- * entry" case — dotfile, non-directory, missing/!regular/mis-sized marker,
- * short read. These are skips, not errors: A6 is best-effort.
+ * On success fills *host from `buf` (caller-owned,
+ * NGX_AUTOCERT_REQUEST_NAME_MAX bytes) and returns NGX_OK. Returns
+ * NGX_DECLINED for every "not a runtime entry" case — dotfile,
+ * non-directory, missing/!regular/mis-sized marker, short read. These are
+ * skips, not errors: A6 is best-effort.
  */
 static ngx_int_t
 ngx_autocert_seed_read_marker(int cfd, const char *name, u_char *buf,
@@ -2651,7 +2652,8 @@ ngx_autocert_runtime_seed(ngx_cycle_t *cycle)
     ngx_autocert_seed_timer.handler = ngx_autocert_runtime_seed_step;
     ngx_autocert_seed_timer.data = cycle;
     ngx_autocert_seed_timer.log = cycle->log;
-    ngx_autocert_seed_timer.cancelable = 1; /* never pin a shutting-down worker */
+    /* never pin a shutting-down worker */
+    ngx_autocert_seed_timer.cancelable = 1;
 
     /*
      * Run the first chunk inline rather than only arming the timer. On a small
