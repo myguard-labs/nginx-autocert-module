@@ -22,6 +22,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -74,28 +75,155 @@ struct ngx_log_s { int dummy; };
 #define ngx_log_debug3(level, log, err, fmt, a1, a2, a3)      ((void)0)
 #define ngx_log_error(level, log, err, ...)                   ((void)0)
 
-/* --- pool shim (malloc-backed, tracked so the harness frees the lot) --- */
-#define NGX_HTTP_FUZZ_POOL_MAX_ALLOCS  4096
+/* --- pool shim with an allocation-budget oracle ---
+ *
+ * Malloc-backed and tracked so the harness frees the lot after every input.
+ *
+ * This registry used to be a fixed 4096-entry array whose allocator returned
+ * NULL once full.  That hid allocation blowup behind the parser's own
+ * out-of-memory path: a response asking for a million header allocations got
+ * NULL and produced a clean rejection, which looks identical to correct
+ * behaviour.  A pool-allocated overflow has no per-allocation redzone either,
+ * so ASan cannot see it.  The invariant has to be asserted directly.
+ *
+ * THE INVARIANT
+ *
+ * ngx_autocert_acme_parse_response / dechunk allocate at:
+ *   - the header array         (ngx_array_create, then doubling on push;
+ *                               cumulative growth is < 2x the final array)
+ *   - per-header name + value  (each a disjoint substring of the input)
+ *   - the dechunked body       (total decoded bytes <= input length)
+ *
+ * (ngx_autocert_acme_parse_url's host copy is NOT in this set: fuzz_http.c
+ *  calls only parse_response, so that site is unreachable from this harness.)
+ *
+ * Every one of those is charged to input bytes that are consumed once, so both
+ * the allocation count and the total allocated bytes are O(N) in the response
+ * length.  Measured worst cases:
+ *
+ *   "a:b\r\n" x 20000     alloc/len 0.40   bytes/len 21.4  (array doubling)
+ *   "1\r\nx\r\n" x 20000  alloc/len 0.00   bytes/len  0.17
+ *   minimal 19-byte 200   alloc/len 0.11   bytes/len 15.6  <- constant term
+ *
+ * The bounds carry headroom over those figures.  Superlinear growth exceeds
+ * any linear bound eventually, so slack costs detection latency, not detection
+ * power.  A violation abort()s and libFuzzer saves the offending input.
+ */
+
+/* allocs <= K1 * len + C1 */
+#define NGX_HTTP_FUZZ_ALLOC_COUNT_K   2
+#define NGX_HTTP_FUZZ_ALLOC_COUNT_C   8
+
+/* bytes  <= K2 * len + C2 */
+#define NGX_HTTP_FUZZ_ALLOC_BYTES_K   64
+#define NGX_HTTP_FUZZ_ALLOC_BYTES_C   4096
 
 typedef struct {
-    void       *allocs[NGX_HTTP_FUZZ_POOL_MAX_ALLOCS];
-    size_t      nallocs;
-    ngx_log_t  *log;
+    void       **allocs;      /* growable registry, realloc'd as needed */
+    size_t       nallocs;
+    size_t       cap;
+    size_t       nbytes;
+    size_t       input_len;   /* the budget is a function of this */
+    ngx_log_t   *log;
 } ngx_pool_t;
+
+/*
+ * NGX_HTTP_FUZZ_NO_BUDGET disables the budget for callers that are not fuzzing
+ * a sized input -- the unit suite drives fixed fixtures through this shim and
+ * has no meaningful input_len to charge against. It still uses the growable
+ * registry, so allocations are tracked and freed exactly as before.
+ */
+#define NGX_HTTP_FUZZ_NO_BUDGET  ((size_t) -1)
+
+static void
+ngx_http_fuzz_pool_charge(ngx_pool_t *pool, size_t size)
+{
+    size_t  max_allocs, max_bytes;
+
+    pool->nbytes += size;
+
+    if (pool->input_len == NGX_HTTP_FUZZ_NO_BUDGET) {
+        return;
+    }
+
+    max_allocs = (size_t) NGX_HTTP_FUZZ_ALLOC_COUNT_K * pool->input_len
+                 + NGX_HTTP_FUZZ_ALLOC_COUNT_C;
+    max_bytes  = (size_t) NGX_HTTP_FUZZ_ALLOC_BYTES_K * pool->input_len
+                 + NGX_HTTP_FUZZ_ALLOC_BYTES_C;
+
+    if (pool->nallocs + 1 > max_allocs) {
+        fprintf(stderr,
+                "ngx_http_fuzz: ALLOCATION BUDGET EXCEEDED (count): "
+                "input_len=%zu allocs=%zu budget=%zu\n",
+                pool->input_len, pool->nallocs + 1, max_allocs);
+        abort();
+    }
+
+    if (pool->nbytes > max_bytes) {
+        fprintf(stderr,
+                "ngx_http_fuzz: ALLOCATION BUDGET EXCEEDED (bytes): "
+                "input_len=%zu bytes=%zu budget=%zu\n",
+                pool->input_len, pool->nbytes, max_bytes);
+        abort();
+    }
+}
+
+/*
+ * Register a live pointer, growing the registry geometrically.  The registry
+ * must never be what fails -- a full registry returning NULL would reintroduce
+ * the blindness this oracle removes.  Only the budget assertion may stop a
+ * parse.
+ */
+static int
+ngx_http_fuzz_pool_register(ngx_pool_t *pool, void *p)
+{
+    void  **na;
+    size_t  ncap;
+
+    if (pool->nallocs == pool->cap) {
+        ncap = pool->cap ? pool->cap * 2 : 64;
+        na = (void **) realloc(pool->allocs, ncap * sizeof(void *));
+        if (na == NULL) {
+            /* Genuine host OOM growing a registry the budget already bounded:
+             * a machine limit, not a parser defect. */
+            free(p);
+            return 0;
+        }
+        pool->allocs = na;
+        pool->cap = ncap;
+    }
+
+    pool->allocs[pool->nallocs++] = p;
+    return 1;
+}
 
 static void *
 ngx_pnalloc(ngx_pool_t *pool, size_t size)
 {
     void *p;
-    if (pool->nallocs >= NGX_HTTP_FUZZ_POOL_MAX_ALLOCS) {
-        return NULL;
-    }
+
+    ngx_http_fuzz_pool_charge(pool, size);
+
     p = malloc(size ? size : 1);
     if (p == NULL) {
         return NULL;
     }
-    pool->allocs[pool->nallocs++] = p;
+    if (!ngx_http_fuzz_pool_register(pool, p)) {
+        return NULL;
+    }
     return p;
+}
+
+/* Initialise the pool for one input; input_len is the budget's denominator. */
+static void
+ngx_http_fuzz_pool_init(ngx_pool_t *pool, ngx_log_t *log, size_t input_len)
+{
+    pool->allocs = NULL;
+    pool->nallocs = 0;
+    pool->cap = 0;
+    pool->nbytes = 0;
+    pool->input_len = input_len;
+    pool->log = log;
 }
 
 static void
@@ -105,7 +233,11 @@ ngx_http_fuzz_pool_reset(ngx_pool_t *pool)
     for (i = 0; i < pool->nallocs; i++) {
         free(pool->allocs[i]);
     }
+    free(pool->allocs);
+    pool->allocs = NULL;
     pool->nallocs = 0;
+    pool->cap = 0;
+    pool->nbytes = 0;
 }
 
 /* --- ngx_array surface used by the header scan --- */

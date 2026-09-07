@@ -57,10 +57,15 @@ LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
      * dereferences pool->log in ngx_log_debug1 call sites (even though
      * our shim macro expands them to (void)0, the field read happens at
      * the call site before macro expansion in some compiler evaluations;
-     * giving it a valid address is the safe choice). */
+     * giving it a valid address is the safe choice).
+     *
+     * `size` is also the allocation budget's denominator: the shim aborts if
+     * the parser's total allocation count or byte total exceeds the linear
+     * bound derived from it (see ngx_shim.h). That abort is the oracle for
+     * allocation blowup, which neither ASan nor a NULL-returning cap can
+     * detect. */
     log.dummy = 0;
-    pool.nallocs = 0;
-    pool.log = &log;
+    ngx_fuzz_pool_init(&pool, &log, size);
 
     /*
      * Allocate EXACTLY `size` bytes (one byte when size == 0, since

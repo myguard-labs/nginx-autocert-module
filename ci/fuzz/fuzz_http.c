@@ -46,9 +46,13 @@ LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
     ngx_buf_t                    b;
     u_char                      *buf;
 
+    /* `size` is the allocation budget's denominator: the shim aborts if the
+     * parser's total allocation count or byte total exceeds the linear bound
+     * derived from it (see ngx_http_shim.h). That abort is the oracle for
+     * allocation blowup, which neither ASan nor a NULL-returning cap can
+     * detect. */
     log.dummy = 0;
-    pool.nallocs = 0;
-    pool.log = &log;
+    ngx_http_fuzz_pool_init(&pool, &log, size);
 
     /* Allocate EXACTLY `size` bytes (one when size == 0) with no NUL. */
     buf = (u_char *) malloc(size ? size : 1);
