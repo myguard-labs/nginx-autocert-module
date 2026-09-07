@@ -435,6 +435,71 @@ test_unicode_edge_bounded(void)
 
 
 static void
+test_string_span_prescan(void)
+{
+    /*
+     * Targets the closing-quote pre-scan added to size the string
+     * allocation to its own span (not the rest of the document). These
+     * cases exercise the pre-scan's boundary and its backslash handling
+     * specifically -- separate from the decode-loop escape coverage above.
+     */
+    ngx_autocert_json_value_t  *v;
+    ngx_str_t                   s;
+
+    /* single-char string value */
+    v = parse("{\"k\":\"x\"}");
+    CHECK(ngx_autocert_json_object_str(v, "k", &s) == NGX_OK
+          && streq(&s, "x"), "single-char string value");
+
+    /* closing quote is the very last byte of the buffer (c->last) */
+    {
+        static const u_char buf[] = { '"', 'x', 'y', '"' };
+        v = ngx_autocert_json_parse(pool, (u_char *) buf, sizeof(buf));
+        CHECK(v != NULL && v->type == NGX_AUTOCERT_JSON_STRING
+              && streq(&v->u.string, "xy"),
+              "closing quote as last byte before c->last accepted");
+    }
+
+    /*
+     * Basic escaped-quote decoding: the value contains the quote and
+     * continues to the real terminator. Too short to detect an escape-blind
+     * pre-scan on its own -- the long-tail case below is that oracle.
+     */
+    v = parse("{\"k\":\"a\\\"b\"}");
+    CHECK(ngx_autocert_json_object_str(v, "k", &s) == NGX_OK
+          && s.len == 3
+          && memcmp(s.data, "a\"b", 3) == 0,
+          "escaped quote inside string does not terminate pre-scan early");
+
+    /*
+     * The escape-blindness oracle. An escape-blind pre-scan would size this
+     * string's buffer to the 2-byte span ending at the escaped quote while
+     * the decode loop writes all 20 bytes, overflowing into the next pool
+     * allocation. A pool allocator has no per-allocation redzone, so ASan
+     * does not catch it: the trailing "k2" member forces a real adjacent
+     * allocation, and the decoded CONTENT is the only reliable oracle.
+     */
+    v = parse("{\"k\":\"a\\\"BBBBBBBBBBBBBBBBBB\",\"k2\":\"end\"}");
+    CHECK(ngx_autocert_json_object_str(v, "k", &s) == NGX_OK
+          && s.len == 20
+          && memcmp(s.data, "a\"BBBBBBBBBBBBBBBBBB", 20) == 0,
+          "escaped quote near string start: full decoded value intact "
+          "(not sized to the escaped quote's short span)");
+
+    /* trailing bare backslash at end of input (no byte to escape) */
+    {
+        static const u_char buf[] = { '"', 'a', '\\' };
+        v = ngx_autocert_json_parse(pool, (u_char *) buf, sizeof(buf));
+        CHECK(v == NULL, "trailing bare backslash at end of input rejected");
+    }
+
+    /* unterminated string (no closing quote at all) */
+    v = parse("\"abc");
+    CHECK(v == NULL, "unterminated string with no closing quote rejected");
+}
+
+
+static void
 test_depth_limit(void)
 {
     /* Nesting beyond the bound must be rejected, not recurse unbounded. */
@@ -529,6 +594,7 @@ main(void)
     test_malformed();
     test_no_overread();
     test_unicode_edge_bounded();
+    test_string_span_prescan();
     test_depth_limit();
 
     ngx_destroy_pool(p);
