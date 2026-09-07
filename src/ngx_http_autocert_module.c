@@ -16,6 +16,11 @@
  */
 
 #include <ngx_config.h>
+
+#if (NGX_THREADS)
+#include <ngx_thread_pool.h>
+#endif
+
 #include <ngx_core.h>
 #include <ngx_http.h>
 
@@ -1452,6 +1457,38 @@ ngx_http_autocert_postconfig(ngx_conf_t *cf)
     ngx_log_error(NGX_LOG_NOTICE, cf->log, 0,
                   "autocert: %ui name(s) enabled for issuance across %ui CA(s)",
                   amcf->names->nelts, amcf->ca_list->nelts);
+
+#if (NGX_THREADS)
+    /*
+     * RSA leaf keygen runs on the thread pool (ngx_autocert_order.c) because a
+     * prime search stalls the worker's event loop for 100s of ms. Reserve the
+     * "default" pool HERE, at config time: ngx_thread_pool_get() at runtime
+     * only finds pools that were added during configuration, and only
+     * ngx_thread_pool_add() causes init_conf to give "default" its built-in
+     * 32-thread / 65536-queue sizing. Without this the order path would always
+     * take its inline fallback and the offload would never engage.
+     *
+     * Only when an RSA key type is actually configured: EC keygen is tens of
+     * microseconds and stays inline, so an EC-only configuration should not
+     * spawn 32 threads it will never use. A user-declared `thread_pool default
+     * ...` is returned as-is by _add(), so an explicit sizing still wins.
+     */
+    if (amcf->enabled_servers != 0 && amcf->key_types != NGX_CONF_UNSET_PTR) {
+        ngx_uint_t  *kt = amcf->key_types->elts;
+
+        for (n = 0; n < amcf->key_types->nelts; n++) {
+            if (kt[n] == NGX_HTTP_AUTOCERT_KEY_RSA2048
+                || kt[n] == NGX_HTTP_AUTOCERT_KEY_RSA3072
+                || kt[n] == NGX_HTTP_AUTOCERT_KEY_RSA4096)
+            {
+                if (ngx_thread_pool_add(cf, NULL) == NULL) {
+                    return NGX_ERROR;
+                }
+                break;
+            }
+        }
+    }
+#endif
 
     /*
      * autolabel A1: the runtime cert-request registry, shared BY NAME with a
