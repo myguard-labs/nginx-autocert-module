@@ -59,7 +59,7 @@ fi
 start=$((start - 1))
 # ...and prove that is what we actually backed up onto. Without this, a
 # one-line definition or a dropped line starts the slice inside the block
-# comment; every later check still passes (all 7 symbols present, 7 braces)
+# comment; every later check still passes (all symbols present, braces intact)
 # and CI dies with a compiler syntax error instead of a layout-drift report.
 if ! sed -n "${start}p" "$SRC" | grep -qE '^static '; then
 	echo "✗ line $start of $SRC is not the return type of" >&2
@@ -90,10 +90,14 @@ fi
 	awk -v s="$start" -v e="$end" 'NR >= s && NR <= e { print }' "$SRC"
 } >"$OUT"
 
-for sym in ngx_autocert_keygen_is_rsa ngx_autocert_keygen_t \
-	ngx_autocert_keygen_abandon ngx_autocert_keygen_thread \
-	ngx_autocert_keygen_completion ngx_autocert_keygen_inline \
-	ngx_autocert_keygen_post; do
+# The six sliced FUNCTIONS. The slot typedef is checked separately below,
+# because the brace count derives from this list and a typedef's closer is not
+# a function closer.
+FUNCS=(ngx_autocert_keygen_is_rsa ngx_autocert_keygen_abandon
+	ngx_autocert_keygen_thread ngx_autocert_keygen_completion
+	ngx_autocert_keygen_inline ngx_autocert_keygen_post)
+
+for sym in "${FUNCS[@]}" ngx_autocert_keygen_t; do
 	if ! grep -q "$sym" "$OUT"; then
 		echo "✗ $sym missing from generated output (source layout changed?)" >&2
 		rm -f "$OUT"
@@ -114,11 +118,16 @@ done
 # tests run and a layout-drift message, masking the assertion that should have
 # gone red. Structural markers drift with the layout; behavioural markers must
 # be left to the test.
-braces=$(grep -c '^}' "$OUT" || true)
-if [ "${braces:-0}" -lt 7 ]; then
-	echo "✗ sliced region looks truncated: $braces complete function(s), expected 7" >&2
-	echo "  (is_rsa, abandon, thread, completion, inline, post, plus the" >&2
-	echo "   slot typedef's close)" >&2
+# Count only FUNCTION closers: `^}` alone also matches the slot typedef's
+# `} ngx_autocert_keygen_t;` closer, which would make the expected number a
+# mixed count of two different syntactic things and a constant to hand-maintain.
+# `^}$` is a clean function count, and the expectation derives from $FUNCS so
+# adding a function to the slice needs no second edit here.
+want=${#FUNCS[@]}
+braces=$(grep -c '^}$' "$OUT" || true)
+if [ "${braces:-0}" -lt "$want" ]; then
+	echo "✗ sliced region looks truncated: $braces complete function(s), expected $want" >&2
+	echo "  (${FUNCS[*]})" >&2
 	rm -f "$OUT"
 	exit 1
 fi

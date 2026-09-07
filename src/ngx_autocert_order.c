@@ -2037,7 +2037,18 @@ ngx_autocert_keygen_post(ngx_autocert_order_t *order, ngx_uint_t curve)
             /* Same policy as every other degraded path below: one stall on the
              * event loop beats losing this name's issuance attempt. Not
              * reachable from the unit slice — run.sh links the real
-             * ngx_alloc.o, so this branch is not injectable there. */
+             * ngx_alloc.o, so this branch is not injectable there.
+             *
+             * Clear .order defensively. It is provably already NULL here --
+             * _post() only reaches this allocation when !busy, and busy == 0
+             * implies .order == NULL today -- but that invariant is incidental,
+             * not enforced: it holds because every clear (post failure,
+             * _abandon(), the completion handler) happens to accompany a busy
+             * clear. This is the one early return that leaves the slot without
+             * passing the assignment below, so a future path that clears busy
+             * alone would park a stale order pointer in a process-lifetime
+             * static. One line to make it true by construction. */
+            ngx_autocert_keygen.order = NULL;
             ngx_log_error(NGX_LOG_WARN, order->log, 0,
                           "autocert: could not allocate the certificate "
                           "keygen task; generating the RSA certificate key "
