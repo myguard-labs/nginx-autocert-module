@@ -1951,10 +1951,28 @@ ngx_autocert_keygen_completion(ngx_event_t *ev)
 
 
 /*
+ * Every degraded path's shared answer: generate the key on the event loop and
+ * carry on. One stall is bad; losing the name's issuance attempt is worse, and
+ * the stall is exactly the pre-existing behaviour this change improves on.
+ */
+static ngx_int_t
+ngx_autocert_keygen_inline(ngx_autocert_order_t *order, ngx_uint_t curve)
+{
+    order->cert_key = ngx_http_autocert_key_generate(curve);
+    if (order->cert_key == NULL) {
+        ngx_log_error(NGX_LOG_ERR, order->log, 0,
+                      "autocert: certificate key generation failed");
+        return NGX_ERROR;
+    }
+    return ngx_autocert_order_finalize_csr(order);
+}
+
+
+/*
  * Post an RSA keygen to the thread pool. Returns NGX_AGAIN when the task is in
  * flight (the caller must NOT treat that as failure: the state machine resumes
- * from the completion handler), or NGX_ERROR when it could not be posted at
- * all. Never returns NGX_OK — finalize does not complete inline on this path.
+ * from the completion handler), NGX_OK when the key was generated inline by one
+ * of the degraded fallbacks below, or NGX_ERROR when even that failed.
  */
 static ngx_int_t
 ngx_autocert_keygen_post(ngx_autocert_order_t *order, ngx_uint_t curve)
@@ -1972,8 +1990,12 @@ ngx_autocert_keygen_post(ngx_autocert_order_t *order, ngx_uint_t curve)
          * orphan is still running. Failing here would lose that name's
          * issuance and log an ALERT blaming an invariant that is intact.
          *
-         * Generate inline instead — one stall, same fallback as the no-pool
-         * case below — and keep the ALERT for the genuinely impossible state:
+         * Generate inline instead — same fallback as the no-pool case below.
+         * This is one stall PER ORDER that reaches finalize inside the window,
+         * not one stall total: sched_pump() starts the next name on completion,
+         * so a long RSA-4096 orphan can cover a short burst. Bounded by the
+         * orphan finishing, and still better than losing those issuances.
+         * Keep the ALERT for the genuinely impossible state:
          * a busy slot still ATTACHED to an order, which would mean two orders
          * are in flight at once.
          */
@@ -1987,13 +2009,7 @@ ngx_autocert_keygen_post(ngx_autocert_order_t *order, ngx_uint_t curve)
                       "autocert: an abandoned keygen task is still in flight; "
                       "generating the RSA certificate key on the event loop "
                       "for \"%V\"", &order->domain);
-        order->cert_key = ngx_http_autocert_key_generate(curve);
-        if (order->cert_key == NULL) {
-            ngx_log_error(NGX_LOG_ERR, order->log, 0,
-                          "autocert: certificate key generation failed");
-            return NGX_ERROR;
-        }
-        return ngx_autocert_order_finalize_csr(order);
+        return ngx_autocert_keygen_inline(order, curve);
     }
 
     tp = ngx_thread_pool_get((ngx_cycle_t *) ngx_cycle, &name);
@@ -2004,13 +2020,7 @@ ngx_autocert_keygen_post(ngx_autocert_order_t *order, ngx_uint_t curve)
         ngx_log_error(NGX_LOG_WARN, order->log, 0,
                       "autocert: no \"default\" thread pool; generating the "
                       "RSA certificate key on the event loop");
-        order->cert_key = ngx_http_autocert_key_generate(curve);
-        if (order->cert_key == NULL) {
-            ngx_log_error(NGX_LOG_ERR, order->log, 0,
-                          "autocert: certificate key generation failed");
-            return NGX_ERROR;
-        }
-        return ngx_autocert_order_finalize_csr(order);
+        return ngx_autocert_keygen_inline(order, curve);
     }
 
     /* Allocated once from the CYCLE-INDEPENDENT process heap, not a pool: it
@@ -2043,10 +2053,40 @@ ngx_autocert_keygen_post(ngx_autocert_order_t *order, ngx_uint_t curve)
     ngx_autocert_keygen.task->event.log = ngx_cycle->log;
 
     if (ngx_thread_task_post(tp, ngx_autocert_keygen.task) != NGX_OK) {
+        /*
+         * DISCARD the cached task rather than reuse it. ngx_thread_task_post()
+         * sets task->event.active = 1 BEFORE the ngx_thread_cond_signal() that
+         * can fail, and that failure path returns without clearing it and
+         * without enqueueing the task — so nothing will ever clear `active`,
+         * because only ngx_thread_pool_handler() does. Every other nginx
+         * consumer allocates a fresh task per request and never notices; this
+         * slot reuses ONE task for the life of the worker, which would turn
+         * that into a permanent wedge: every later post would trip the
+         * "task #N already active" guard and RSA issuance would stop until the
+         * worker restarted.
+         *
+         * The poisoned task is deliberately LEAKED, not freed: it may still be
+         * referenced by a pool whose state we cannot reason about. The leak is
+         * one ngx_thread_task_t, bounded to a genuinely broken thread pool, and
+         * strictly better than wedging renewals. (The queue-overflow path
+         * returns before setting `active`, so this discards a still-usable task
+         * in that case — a negligible cost for not having to distinguish them.)
+         */
         ngx_autocert_keygen.order = NULL;
-        ngx_log_error(NGX_LOG_ERR, order->log, 0,
-                      "autocert: could not post the certificate keygen task");
-        return NGX_ERROR;
+        ngx_autocert_keygen.task = NULL;
+
+        /*
+         * Then fall back inline like every other degraded path. The dominant
+         * cause here is queue overflow, and this is nginx's SHARED "default"
+         * pool — co-tenanted with AIO and ngx_http_file_cache — so a busy
+         * cache-heavy server can legitimately fill it. Failing the order would
+         * lose the name's issuance attempt for a transient condition.
+         */
+        ngx_log_error(NGX_LOG_WARN, order->log, 0,
+                      "autocert: could not post the certificate keygen task; "
+                      "generating the RSA certificate key on the event loop "
+                      "for \"%V\"", &order->domain);
+        return ngx_autocert_keygen_inline(order, curve);
     }
 
     ngx_autocert_keygen.busy = 1;

@@ -6,12 +6,21 @@ Changes unreleased
        worker for the whole prime search -- measured at roughly 70ms, 200ms
        and 700ms respectively on one development host, with a long tail, and
        every connection that worker owned stopped being served for that time.
-       Issuance is unaffected otherwise, and no configuration needs to change:
-       the module uses nginx's "default" thread pool, which is provisioned
-       automatically. A build or configuration without threads, or without
-       that pool, falls back to generating the key inline exactly as before.
-       EC key types (the default) are unchanged and still generated inline --
-       at tens of microseconds they never stalled anything.
+       Issuance is unaffected otherwise and no configuration needs to change,
+       but note the resource cost: the module uses nginx's shared "default"
+       thread pool, and configuring an RSA key type provisions it at nginx's
+       built-in size of 32 threads and a 65536-entry queue IN EVERY WORKER.
+       An operator who wants it smaller declares it explicitly, which the
+       module then leaves alone:
+
+           thread_pool default threads=2 max_queue=64;
+
+       A build or configuration without threads, without that pool, or whose
+       pool refuses the task falls back to generating the key inline exactly
+       as before -- one stall, never a failed renewal. EC key types (the
+       default) are unchanged and still generated inline; at tens of
+       microseconds they never stalled anything, and an EC-only configuration
+       provisions no threads at all.
 
     *) Change: an unused shared-memory zone is no longer created. The zone
        published the set of autocert-enabled server names into shared memory

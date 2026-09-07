@@ -40,17 +40,25 @@
  *   - a keygen failure on the thread finishes the order with NGX_ERROR
  *     instead of resuming with a NULL key.
  *
- * WHAT THIS DOES NOT COVER: ngx_autocert_keygen_post(), which needs a live
- * cycle and a configured "default" thread pool (ngx_thread_pool_get /
- * ngx_thread_task_post) that this TU has no harness for -- including its
- * no-pool inline fallback. Those are exercised by the module's integration
- * path. The predicate that gates entry to _post() IS covered here.
+ *   - every DEGRADED path through _post(), which is where both of this
+ *     change's real bugs lived: no "default" pool, a post that fails, a slot
+ *     still busy with an orphan after a reload, and busy-and-attached. All but
+ *     the last must still ISSUE (inline) rather than lose the renewal, and a
+ *     failed post must DISCARD the cached task -- nginx leaves event.active=1
+ *     on its cond_signal failure path, and this slot reuses one task for the
+ *     life of the worker, so keeping it would wedge RSA issuance permanently.
+ *     _post()'s four external symbols (ngx_thread_pool_get,
+ *     ngx_thread_task_post, ngx_alloc, ngx_cycle) are supplied by this TU.
+ *
+ * WHAT THIS DOES NOT COVER: the real nginx thread pool -- no task is ever run
+ * on a real worker thread here, so the pool's own queueing and the genuine
+ * cross-thread memory publication are not exercised. Those are exercised by
+ * the module's integration path (ci/tests/e2e/rsa-issue.sh issues against
+ * Pebble with rsa2048).
  *
  * The slot is static in ngx_autocert_order.c, so this TU slices just it via
- * ci/tests/unit/extract_keygen.sh -- the whole .c is the ACME order state
- * machine and would drag in the account POST primitive, JSON, the shm zones
- * and the event loop to reach one struct. Locked to production code, no copy
- * drift.
+ * ci/tests/unit/extract_keygen.sh, whose header explains why the whole .c is
+ * not include-shimmed. Locked to production code, no copy drift.
  *
  * Exit 0 = all pass; non-zero on first failure.
  */
@@ -58,6 +66,7 @@
 #include <ngx_config.h>
 #include <ngx_core.h>
 #include <ngx_event.h>
+#include <ngx_thread_pool.h>
 
 #include <stdio.h>
 #include <string.h>
@@ -173,6 +182,55 @@ freed_exactly_once(EVP_PKEY *key)
 }
 
 
+/* --- the thread-pool seam _post() reaches the outside world through ------- */
+/*
+ * _post() touches exactly four external symbols: ngx_thread_pool_get(),
+ * ngx_thread_task_post(), ngx_alloc() and ngx_cycle. Supplying all four here
+ * (the same injection seam the orphan-reap test uses for waitpid) makes its
+ * DEGRADED paths testable with no real thread pool: no "default" pool, a slot
+ * still busy with an abandoned task, and a post that fails. Those paths are
+ * where the ownership bugs live, so they are the ones worth reaching.
+ */
+
+/* Opaque to us; _post() only ever passes the pointer straight back. */
+struct ngx_thread_pool_s { int placeholder; };
+
+static ngx_thread_pool_t   fake_pool;
+static ngx_thread_pool_t  *pool_get_result;      /* NULL models "no pool" */
+static ngx_int_t           task_post_result = NGX_OK;
+static int                 task_post_calls;
+static ngx_thread_task_t  *task_posted;
+
+ngx_thread_pool_t *
+ngx_thread_pool_get(ngx_cycle_t *cycle, ngx_str_t *name)
+{
+    (void) cycle; (void) name;
+    return pool_get_result;
+}
+
+ngx_int_t
+ngx_thread_task_post(ngx_thread_pool_t *tp, ngx_thread_task_t *task)
+{
+    (void) tp;
+    task_post_calls++;
+    task_posted = task;
+
+    if (task_post_result != NGX_OK) {
+        /*
+         * Model the REAL failure mode this fix exists for: nginx's
+         * ngx_thread_task_post() sets event.active = 1 before the
+         * ngx_thread_cond_signal() that can fail, and that failure path
+         * returns without clearing it and without enqueueing the task
+         * (nginx 1.31.4 src/core/ngx_thread_pool.c:251-258). A task left
+         * active is refused by every later post.
+         */
+        task->event.active = 1;
+    }
+
+    return task_post_result;
+}
+
+
 /* --- the two state-machine seams the completion handler calls ------------ */
 /*
  * These are the REAL production symbols as far as the slice is concerned: it
@@ -218,9 +276,18 @@ ngx_autocert_order_finish(ngx_autocert_order_t *order, ngx_int_t rc)
 static void
 reset_state(void)
 {
+    /* The slot caches one heap task for the life of the process; drop it here
+     * so each case starts clean without leaking it under LeakSanitizer. */
+    if (ngx_autocert_keygen.task != NULL) {
+        ngx_free(ngx_autocert_keygen.task);
+    }
     ngx_memzero(&ngx_autocert_keygen, sizeof(ngx_autocert_keygen));
     csr_calls = 0;
     csr_rc = NGX_OK;
+    pool_get_result = &fake_pool;
+    task_post_result = NGX_OK;
+    task_post_calls = 0;
+    task_posted = NULL;
     freed_n = 0;
     ngx_memzero(freed_keys, sizeof(freed_keys));
     finish_calls = 0;
@@ -424,6 +491,150 @@ main(void)
 
         EVP_PKEY_free(generated);       /* our own reference */
     }
+
+    printf("== keygen offload: _post() degraded paths ==\n");
+
+    /*
+     * These are the paths the first version of this change got wrong, and they
+     * are all failure-shaped: no thread pool, a post that fails, a slot still
+     * busy with an orphan. Each must still ISSUE, because losing a name's
+     * renewal attempt is worse than one stall on the event loop.
+     */
+
+    /* (a) no "default" thread pool -> inline, and the order still proceeds. */
+    reset_state();
+    ngx_memzero(&order, sizeof(order));
+    order.log = &test_log;
+    pool_get_result = NULL;
+
+    OK(ngx_autocert_keygen_post(&order, NGX_HTTP_AUTOCERT_CRYPTO_RSA2048)
+       == NGX_OK,
+       "no \"default\" pool: _post() reports the key was made inline (NGX_OK, "
+       "not NGX_ERROR)");
+    OK(task_post_calls == 0, "no \"default\" pool: nothing was posted");
+    OK(csr_calls == 1, "no \"default\" pool: the order still reached the CSR");
+    OK(order.cert_key != NULL, "no \"default\" pool: a real key was generated");
+    OK(ngx_autocert_keygen.busy == 0,
+       "no \"default\" pool: the slot was left free");
+    ngx_http_autocert_key_free(order.cert_key);
+    order.cert_key = NULL;
+
+    /* (b) the post fails -> inline, AND the poisoned task must be discarded.
+     * This is the wedge: nginx leaves event.active = 1 on the cond_signal
+     * failure path, and this slot reuses ONE task forever, so keeping it would
+     * make every later post fail with "task #N already active" until the
+     * worker restarted. */
+    reset_state();
+    ngx_memzero(&order, sizeof(order));
+    order.log = &test_log;
+    task_post_result = NGX_ERROR;
+
+    OK(ngx_autocert_keygen_post(&order, NGX_HTTP_AUTOCERT_CRYPTO_RSA2048)
+       == NGX_OK,
+       "failed post: _post() falls back inline instead of failing the order");
+    OK(task_post_calls == 1, "failed post: a post was actually attempted");
+    OK(csr_calls == 1, "failed post: the order still reached the CSR");
+    OK(order.cert_key != NULL, "failed post: a real key was generated");
+    OK(ngx_autocert_keygen.busy == 0, "failed post: the slot was left free");
+    OK(ngx_autocert_keygen.order == NULL,
+       "failed post: the slot was detached");
+    OK(ngx_autocert_keygen.task == NULL,
+       "failed post: the POISONED task was discarded (reusing it would wedge "
+       "RSA issuance for the life of the worker)");
+    OK(task_posted != NULL && task_posted->event.active == 1,
+       "failed post: the discarded task really was left active by the pool");
+    ngx_http_autocert_key_free(order.cert_key);
+    order.cert_key = NULL;
+
+    /* (c) the very next attempt must succeed -- proof the wedge is gone. A
+     * cached poisoned task would be refused here by the real pool. */
+    {
+        ngx_thread_task_t  *first = task_posted;
+
+        ngx_memzero(&order, sizeof(order));
+        order.log = &test_log;
+        csr_calls = 0;
+        task_post_calls = 0;
+        task_post_result = NGX_OK;
+
+        OK(ngx_autocert_keygen_post(&order, NGX_HTTP_AUTOCERT_CRYPTO_RSA2048)
+           == NGX_AGAIN,
+           "after a failed post the NEXT order posts normally (NGX_AGAIN)");
+        OK(task_post_calls == 1, "after a failed post: a post was attempted");
+        OK(task_posted != first,
+           "after a failed post: a FRESH task was allocated, not the poisoned "
+           "one");
+        OK(task_posted != NULL && task_posted->event.active == 0,
+           "after a failed post: the fresh task is not already active");
+        OK(ngx_autocert_keygen.busy == 1 && ngx_autocert_keygen.order == &order,
+           "after a failed post: the slot is properly armed");
+
+        /* Production deliberately leaks the poisoned task; free it here so the
+         * suite stays clean under LeakSanitizer. Guarded: if a regression left
+         * it cached in the slot, `first` is still the slot's task and freeing
+         * it would double-free at the next reset_state() -- an abort that would
+         * hide which assertion above went red. */
+        if (first != ngx_autocert_keygen.task) {
+            ngx_free(first);
+        }
+    }
+
+    /* (d) happy path: a successful post arms the slot and returns NGX_AGAIN,
+     * generating nothing inline. */
+    reset_state();
+    ngx_memzero(&order, sizeof(order));
+    order.log = &test_log;
+
+    OK(ngx_autocert_keygen_post(&order, NGX_HTTP_AUTOCERT_CRYPTO_RSA2048)
+       == NGX_AGAIN,
+       "happy path: _post() reports the task is in flight (NGX_AGAIN)");
+    OK(csr_calls == 0, "happy path: the CSR waits for the completion");
+    OK(order.cert_key == NULL, "happy path: no key was generated inline");
+    OK(ngx_autocert_keygen.busy == 1 && ngx_autocert_keygen.order == &order,
+       "happy path: the slot is armed and attached");
+    OK(ngx_autocert_keygen.key_type == NGX_HTTP_AUTOCERT_CRYPTO_RSA2048,
+       "happy path: the requested key type reached the slot");
+
+    /* (e) busy AND DETACHED (an orphan after a reload) -> inline, no ALERT,
+     * and the in-flight orphan is left strictly alone. */
+    {
+        ngx_thread_task_t  *orphan_task = ngx_autocert_keygen.task;
+
+        ngx_autocert_keygen_abandon(&order);     /* order_free()'s call */
+        csr_calls = 0;
+        task_post_calls = 0;
+
+        ngx_memzero(&other, sizeof(other));
+        other.log = &test_log;
+
+        OK(ngx_autocert_keygen_post(&other, NGX_HTTP_AUTOCERT_CRYPTO_RSA2048)
+           == NGX_OK,
+           "busy+detached: the next order generates inline rather than failing");
+        OK(task_post_calls == 0, "busy+detached: nothing new was posted");
+        OK(csr_calls == 1, "busy+detached: the order still reached the CSR");
+        OK(other.cert_key != NULL, "busy+detached: a real key was generated");
+        OK(ngx_autocert_keygen.busy == 1 && ngx_autocert_keygen.task
+           == orphan_task,
+           "busy+detached: the orphaned task was left untouched");
+        ngx_http_autocert_key_free(other.cert_key);
+        other.cert_key = NULL;
+    }
+
+    /* (f) busy AND ATTACHED is the one genuinely impossible state: two orders
+     * in flight at once. That still fails loudly. */
+    reset_state();
+    ngx_memzero(&order, sizeof(order));
+    ngx_memzero(&other, sizeof(other));
+    order.log = &test_log;
+    other.log = &test_log;
+    arm_slot(&order, NGX_HTTP_AUTOCERT_CRYPTO_RSA2048);
+
+    OK(ngx_autocert_keygen_post(&other, NGX_HTTP_AUTOCERT_CRYPTO_RSA2048)
+       == NGX_ERROR,
+       "busy+attached: two orders in flight is still a hard error");
+    OK(csr_calls == 0, "busy+attached: no key was generated inline");
+    OK(ngx_autocert_keygen.order == &order,
+       "busy+attached: the live order kept its slot");
 
     printf("== keygen offload: an abandoned task leaves the slot orphaned ==\n");
 

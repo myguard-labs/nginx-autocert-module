@@ -438,12 +438,9 @@ bash "$WORKSPACE/ci/tests/unit/extract_seedchunk.sh"
 # in-flight cancellation window would cost more than they save).
 # The hazard under test is ownership, not keygen: an nginx thread task CANNOT
 # be cancelled, while reload/shutdown frees the order and its pool underneath
-# it. extract_keygen.sh slices the whole cancellation state machine (is_rsa,
-# the slot, _abandon, _thread, _completion) out of the shipped order source --
-# the whole .c is the ACME order state machine, far too heavy to include-shim
-# -- so an ownership bug in order.c fails here. The abandoned-order case
-# asserts against a real EVP_PKEY refcount, so a leaked key is observable
-# rather than indistinguishable from a correct free.
+# it. extract_keygen.sh slices the state machine out of the shipped order
+# source and explains why (see its header comment); the TU's own header
+# documents what is and is not covered.
 # Needs -DNGX_THREADS=1: the slot is compiled under #if (NGX_THREADS), and the
 # module's own CI builds always configure --with-threads.
 # src/ngx_http_autocert_crypto.c is deliberately NOT linked: the TU defines

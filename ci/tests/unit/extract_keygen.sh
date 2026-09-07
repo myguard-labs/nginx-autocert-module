@@ -19,20 +19,24 @@
 #   ngx_autocert_keygen_abandon()    detach on order_free()
 #   ngx_autocert_keygen_thread()     the worker-thread body
 #   ngx_autocert_keygen_completion() the event-loop resume/cleanup decision
+#   ngx_autocert_keygen_inline()     the shared degraded-path fallback
+#   ngx_autocert_keygen_post()       pool lookup, task reuse and EVERY degraded
+#                                    path (no pool / busy slot / post failure)
 #
-# The test does NOT re-implement any of that: it drives the SHIPPED
-# _abandon()/_completion() pair directly, so an ownership bug introduced in
-# order.c (freeing into a dead order, leaking the key on the abandoned path,
-# releasing the slot too late) fails this suite.
+# The test does NOT re-implement any of that: it drives the SHIPPED functions
+# directly, so an ownership bug introduced in order.c (freeing into a dead
+# order, leaking the key on the abandoned path, releasing the slot too late,
+# wedging the cached task after a failed post) fails this suite.
 #
-# ngx_autocert_keygen_post() is deliberately NOT sliced: it calls
-# ngx_thread_pool_get()/ngx_thread_task_post() against a live cycle and thread
-# pool, which this TU has no harness for. It is exercised by the module's
-# integration path. Everything it decides that is testable without a pool --
-# the is_rsa predicate that gates entry to it -- IS sliced.
+# _post() reaches the outside world through exactly four symbols --
+# ngx_thread_pool_get(), ngx_thread_task_post(), ngx_alloc() and ngx_cycle --
+# so the test TU supplies all four, the same injection seam the orphan-reap
+# test uses for waitpid(). That is what makes the DEGRADED paths testable
+# without standing up a real thread pool; they are where the ownership bugs
+# live, so they are the paths most worth covering.
 #
 # The slice is anchored on exact production lines: from the is_rsa predicate
-# through the end of ngx_autocert_keygen_completion().
+# through the end of ngx_autocert_keygen_post().
 
 set -euo pipefail
 
@@ -53,20 +57,20 @@ fi
 # back up over the `static ngx_int_t` return-type line
 start=$((start - 1))
 
-endfn=$(grep -nE '^ngx_autocert_keygen_completion\(' "$SRC" | head -1 | cut -d: -f1 || true)
+endfn=$(grep -nE '^ngx_autocert_keygen_post\(' "$SRC" | head -1 | cut -d: -f1 || true)
 if [ -z "${endfn:-}" ]; then
-	echo "✗ could not locate ngx_autocert_keygen_completion in $SRC" >&2
+	echo "✗ could not locate ngx_autocert_keygen_post in $SRC" >&2
 	exit 1
 fi
 if [ "$endfn" -lt "$start" ]; then
-	echo "✗ ngx_autocert_keygen_completion precedes ngx_autocert_keygen_is_rsa" >&2
+	echo "✗ ngx_autocert_keygen_post precedes ngx_autocert_keygen_is_rsa" >&2
 	echo "  (source layout changed; the slice is no longer contiguous)" >&2
 	exit 1
 fi
-# first column-0 closing brace at or after the completion handler: its end
+# first column-0 closing brace at or after _post(): its end
 end=$(awk -v s="$endfn" 'NR >= s && $0 == "}" { print NR; exit }' "$SRC")
 if [ -z "${end:-}" ]; then
-	echo "✗ could not find the end of ngx_autocert_keygen_completion" >&2
+	echo "✗ could not find the end of ngx_autocert_keygen_post" >&2
 	exit 1
 fi
 
@@ -78,7 +82,8 @@ fi
 
 for sym in ngx_autocert_keygen_is_rsa ngx_autocert_keygen_t \
 	ngx_autocert_keygen_abandon ngx_autocert_keygen_thread \
-	ngx_autocert_keygen_completion; do
+	ngx_autocert_keygen_completion ngx_autocert_keygen_inline \
+	ngx_autocert_keygen_post; do
 	if ! grep -q "$sym" "$OUT"; then
 		echo "✗ $sym missing from generated output (source layout changed?)" >&2
 		rm -f "$OUT"
@@ -87,18 +92,23 @@ for sym in ngx_autocert_keygen_is_rsa ngx_autocert_keygen_t \
 done
 
 # The slice must be COMPLETE functions, not a prefix truncated at the first
-# nested closing brace. Without this the test would compile a fragment and the
-# failure would surface as a confusing syntax error rather than a layout-drift
-# report. These two lines are the load-bearing ownership decisions in the
-# completion handler -- their absence means the slice lost the very behaviour
-# the test exists to pin.
-if ! grep -q 'ngx_http_autocert_key_free(key);' "$OUT"; then
-	echo "✗ sliced completion handler lost the abandoned-order key free" >&2
-	rm -f "$OUT"
-	exit 1
-fi
-if ! grep -q 'ngx_autocert_order_finalize_csr(order)' "$OUT"; then
-	echo "✗ sliced completion handler lost the resume call" >&2
+# nested closing brace -- otherwise the test compiles a fragment and the failure
+# surfaces as a confusing syntax error rather than a layout-drift report.
+#
+# This is a STRUCTURAL check (every sliced function has a column-0 closing
+# brace), deliberately NOT a grep for the load-bearing calls themselves.
+# Guarding on `ngx_http_autocert_key_free(key);` or the resume call would abort
+# extraction whenever someone MUTATES one of those calls -- which is exactly the
+# mutation the test's oracle exists to catch. Because this suite aborts at the
+# first error, that turned a behavioural mutation into rc=1 with ZERO keygen
+# tests run and a layout-drift message, masking the assertion that should have
+# gone red. Structural markers drift with the layout; behavioural markers must
+# be left to the test.
+braces=$(grep -c '^}' "$OUT" || true)
+if [ "${braces:-0}" -lt 7 ]; then
+	echo "✗ sliced region looks truncated: $braces complete function(s), expected 7" >&2
+	echo "  (is_rsa, abandon, thread, completion, inline, post, plus the" >&2
+	echo "   slot typedef's close)" >&2
 	rm -f "$OUT"
 	exit 1
 fi
