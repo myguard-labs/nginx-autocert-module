@@ -799,16 +799,18 @@ parity_case(const char *label, const char *resp)
     {
         size_t  *feeds = malloc(len * sizeof(size_t));
 
-        CHECK(feeds != NULL, "parity: byte-at-a-time feed table allocated");
-        if (feeds != NULL) {
-            for (i = 0; i < len; i++) {
-                feeds[i] = i + 1;
-            }
-            rc = parse_resp_incremental(resp, feeds, len, &r);
-            assert_parity(&ref, rc, &r, label, -1);
-            ngx_http_fuzz_pool_reset(&pool);
-            free(feeds);
+        if (feeds == NULL) {
+            fprintf(stderr, "FATAL: parity byte-at-a-time feed table "
+                    "allocation failed\n");
+            abort();
         }
+        for (i = 0; i < len; i++) {
+            feeds[i] = i + 1;
+        }
+        rc = parse_resp_incremental(resp, feeds, len, &r);
+        assert_parity(&ref, rc, &r, label, -1);
+        ngx_http_fuzz_pool_reset(&pool);
+        free(feeds);
     }
 
     /*
@@ -818,7 +820,7 @@ parity_case(const char *label, const char *resp)
      * lands BETWEEN the two parses. Sizing the buffer below the first feed
      * instead would grow before any parse had run, and the case would prove
      * nothing. Verified by instrumentation: the growth branch executes for
-     * all 16 cases, always one byte before the end.
+     * every corpus case, always one byte before the end.
      *
      * SCOPE, honestly stated: this is a REGRESSION GUARD, not a test that
      * currently discriminates. Today parse_response recomputes
