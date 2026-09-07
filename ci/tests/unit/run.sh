@@ -377,6 +377,40 @@ bash "$WORKSPACE/ci/tests/unit/extract_orphan.sh"
 	"$WORKSPACE/ci/tests/unit/test_orphan_reap.c" $SANITIZE_LIBS
 "$BUILD_DIR/test_orphan_reap"
 
+# A6 chunked runtime-marker store walk (audit MINOR/Performance):
+# ngx_autocert_runtime_seed() used to readdir() the whole store top level
+# synchronously on worker 0's event loop, from BOTH init_process and the
+# relock handler -- a reload-time stall proportional to tenant count. The walk
+# is now bounded to NGX_AUTOCERT_SEED_CHUNK entries per tick and resumes from
+# the live DIR* cursor. This test plants a real store LARGER than one chunk and
+# pins that the chunked walk recovers exactly the one-shot walk's host set, at
+# every chunk size (no boundary is special), that skipped entry kinds
+# (dotfile/marker-less/plain file/empty/oversized/symlink/FIFO) behave as
+# before, and that a mid-walk abort releases the DIR* and its container fd.
+# It carries its own negative control: a variant that drops the resume cursor
+# must recover a DIFFERENT set, run to an OBSERVED fixed point (a full chunk
+# adding no new host) rather than an imposed tick cap, and its reach is
+# asserted against an independent enumeration of what one chunk actually
+# covers -- not against NGX_AUTOCERT_SEED_CHUNK, so raising the constant
+# cannot make the control vacuous.
+# extract_seedchunk.sh slices the chunk constant, the per-entry marker read
+# AND the chunk loop itself (ngx_autocert_seed_walk_chunk -- budget, readdir
+# cursor advance, exhaustion check) out of the shipped driver source (the
+# whole .c is the ACME driver -- order state machine, shm zones, OpenSSL,
+# event loop -- far too heavy to include-shim), so the loop the test executes
+# is the shipped one and a cursor bug in driver.c fails here. Not covered:
+# ngx_autocert_runtime_seed_step's wrapper (shutdown guard, per-tick config
+# re-fetch, ngx_add_timer re-arm) and the cycle-bound per-entry decisions
+# behind the loop's handler hook, which need a live event loop.
+bash "$WORKSPACE/ci/tests/unit/extract_seedchunk.sh"
+# shellcheck disable=SC2086
+"$CC" $SANITIZE_CFLAGS $EXTRA_CFLAGS -D_GNU_SOURCE -Wall -Wextra -Werror -Ici/tests/unit -I"$WORKSPACE" \
+	$CORE_INC \
+	-o "$BUILD_DIR/test_seed_chunk" \
+	"$WORKSPACE/ci/tests/unit/test_seed_chunk.c" \
+	"$NGX/objs/src/core/ngx_string.o" $SANITIZE_LIBS
+"$BUILD_DIR/test_seed_chunk"
+
 # Config-time name/contact validation (audit MINOR): server_name/
 # autocert_wildcard values land verbatim, unescaped, in the ACME newOrder
 # JSON and as a filesystem path segment; autocert_contact's email is
