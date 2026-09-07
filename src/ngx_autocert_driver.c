@@ -143,6 +143,7 @@ static void ngx_autocert_runtime_marker_remove(ngx_cycle_t *cycle,
 static void ngx_autocert_runtime_marker_write(ngx_cycle_t *cycle,
     ngx_autocert_conf_t *acf, ngx_str_t *host);
 static void ngx_autocert_runtime_seed(ngx_cycle_t *cycle);
+static void ngx_autocert_runtime_seed_stop(void);
 
 
 /*
@@ -2348,6 +2349,196 @@ ngx_autocert_runtime_marker_remove(ngx_cycle_t *cycle,
 }
 
 
+static void
+ngx_autocert_runtime_seed_step(ngx_event_t *ev);
+
+
+/*
+ * Chunk size: entries processed per event-loop tick before yielding.
+ *
+ * Each entry costs a handful of syscalls (openat x2, fstat, read, close x2)
+ * plus an shm rbtree lookup. 64 keeps a tick's worst case bounded on a worker
+ * that is simultaneously serving requests, while still amortising the
+ * timer-dispatch overhead over enough entries that a large store does not
+ * cost one tick per name.
+ */
+#define NGX_AUTOCERT_SEED_CHUNK   64
+
+
+/*
+ * Read one store entry's runtime marker. Pure syscall contract, factored out
+ * of the chunk loop so the resumable walk's per-entry decision can be unit
+ * tested against a real on-disk store without standing up a cycle, an shm
+ * zone or the event loop (ci/tests/unit/test_seed_chunk.c slices exactly this
+ * function plus NGX_AUTOCERT_SEED_CHUNK).
+ *
+ * `cfd` is the pinned store-container fd; `name` is a readdir entry name.
+ * On success fills *host from `buf` (caller-owned,
+ * NGX_AUTOCERT_REQUEST_NAME_MAX bytes) and returns NGX_OK. Returns
+ * NGX_DECLINED for every "not a runtime entry" case — dotfile,
+ * non-directory, missing/!regular/mis-sized marker, short read. These are
+ * skips, not errors: A6 is best-effort.
+ */
+static ngx_int_t
+ngx_autocert_seed_read_marker(int cfd, const char *name, u_char *buf,
+    ngx_str_t *host)
+{
+    int                  dfd, mfd;
+    ssize_t              n;
+    ngx_autocert_stat_t  mst;
+
+    if (name[0] == '.') {
+        return NGX_DECLINED;             /* ".", "..", any dotfile entry */
+    }
+
+    /* O_NOFOLLOW: a symlinked entry can't be used to read a marker from
+     * outside the pinned store dir. Non-directory entries fail harmlessly.
+     */
+    dfd = ngx_autocert_openat(cfd, name,
+                 O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (dfd == -1) {
+        return NGX_DECLINED;
+    }
+
+    /*
+     * O_NONBLOCK so a planted FIFO can't block worker-0 init while it
+     * holds the driver singleton lock (Codex A6 audit); the immediate
+     * fstat()+S_ISREG check below then refuses anything that isn't a
+     * plain file before reading (a FIFO opened O_NONBLOCK|O_RDONLY with
+     * no writer would otherwise return EOF/short-read, not hang — the
+     * type check is the actual gate, O_NONBLOCK just removes the hang
+     * as a possibility even before that check runs).
+     */
+    mfd = ngx_autocert_openat(dfd, NGX_AUTOCERT_RUNTIME_MARKER,
+                 NGX_AUTOCERT_MARKER_OPEN_READ);
+    if (mfd == -1) {
+        (void) ngx_autocert_close(dfd);
+        return NGX_DECLINED;  /* not a runtime dir (or config-only) */
+    }
+
+    if (ngx_autocert_fstat(mfd, &mst) == -1 || !S_ISREG(mst.st_mode)
+        || mst.st_size <= 0
+        || (size_t) mst.st_size > NGX_AUTOCERT_REQUEST_NAME_MAX)
+    {
+        (void) ngx_autocert_close(mfd);
+        (void) ngx_autocert_close(dfd);
+        return NGX_DECLINED;             /* not a plain, right-sized marker */
+    }
+
+    n = ngx_autocert_read(mfd, buf, NGX_AUTOCERT_REQUEST_NAME_MAX);
+    (void) ngx_autocert_close(mfd);
+    (void) ngx_autocert_close(dfd);
+
+    if (n <= 0 || (size_t) n != (size_t) mst.st_size) {
+        return NGX_DECLINED;   /* short read / raced truncate: ignore */
+    }
+
+    host->data = buf;
+    host->len = (size_t) n;
+
+    return NGX_OK;
+}
+
+
+/*
+ * Per-entry sink for the chunk walk. Returns NGX_OK when the entry was
+ * consumed and NGX_DECLINED when it was skipped; the walk treats both the
+ * same (it only advances), so the distinction exists for the caller's own
+ * bookkeeping and for tests that need to observe which entries reached the
+ * sink. `ctx` is the caller's opaque state.
+ */
+typedef ngx_int_t (*ngx_autocert_seed_entry_pt)(void *ctx, ngx_str_t *host);
+
+
+/*
+ * Advance the seed walk's readdir cursor by at most `budget` entries,
+ * handing every entry that carries a valid runtime marker to `handler`.
+ *
+ * THIS IS THE CHUNK LOOP ITSELF — the cursor discipline whose failure modes
+ * (an entry dropped at a chunk boundary, an exhaustion check that eats the
+ * last entry of a chunk, a cursor that fails to resume) are the correctness
+ * risk chunking introduces. It is factored out of
+ * ngx_autocert_runtime_seed_step() precisely so it can be sliced into
+ * ci/tests/unit/test_seed_chunk.c and executed by the unit suite: everything
+ * here depends only on syscalls, ngx_str and ngx_autocert_seed_read_marker(),
+ * with the cycle-bound per-entry decisions (name_is_config / name_due /
+ * requests_ensure / set_state) living behind `handler` in the caller.
+ *
+ * `dh` is the live DIR* carrying the resume cursor and `cfd` the pinned
+ * store-container fd it was opened over; neither is closed here — release is
+ * ngx_autocert_runtime_seed_stop()'s job on every exit path.
+ *
+ * Returns NGX_DONE when readdir() exhausted the enumeration (the caller must
+ * stop and release the walk) and NGX_AGAIN when the budget was spent with
+ * entries still pending (the caller must yield and resume from this cursor).
+ * `buf` is caller-owned scratch of NGX_AUTOCERT_REQUEST_NAME_MAX bytes that
+ * backs the ngx_str_t handed to `handler`; it is not retained past the call.
+ */
+static ngx_int_t
+ngx_autocert_seed_walk_chunk(ngx_autocert_dir_t *dh, int cfd,
+    ngx_uint_t budget, u_char *buf, ngx_autocert_seed_entry_pt handler,
+    void *ctx)
+{
+    ngx_str_t              host;
+    ngx_uint_t             processed;
+    ngx_autocert_dirent_t *de;
+
+    for (processed = 0; processed < budget; processed++) {
+
+        de = ngx_autocert_readdir(dh);
+        if (de == NULL) {
+            return NGX_DONE;             /* enumeration exhausted */
+        }
+
+        if (ngx_autocert_seed_read_marker(cfd, de->d_name, buf, &host)
+            != NGX_OK)
+        {
+            continue;                    /* not a runtime entry: skip */
+        }
+
+        (void) handler(ctx, &host);
+    }
+
+    return NGX_AGAIN;                    /* budget spent, entries pending */
+}
+
+
+/*
+ * A6 seed walk state, module-scoped because it must survive across ticks.
+ *
+ * `dh` is the live DIR* mid-walk and is the ONLY owner of the store-container
+ * fd (ngx_autocert_closedir closes the fd handed to ngx_autocert_fdopendir —
+ * ngx_autocert_shared.h § Store-scan directory enumeration). `dh != NULL` is
+ * therefore exactly the "a walk is in flight" predicate, and every exit path
+ * — completion, shutdown, error, re-entry and process teardown — routes
+ * through ngx_autocert_runtime_seed_stop() so the fd cannot leak.
+ */
+static ngx_autocert_dir_t          *ngx_autocert_seed_dh;
+static int                          ngx_autocert_seed_cfd = -1;
+static ngx_event_t                  ngx_autocert_seed_timer;
+static ngx_uint_t                   ngx_autocert_seed_key_type;
+
+
+/*
+ * Release the walk. Idempotent, and safe to call when no walk is in flight.
+ * Cancels the resume timer first so a stop from inside teardown cannot leave
+ * a timer pointing at a freed cycle, then drops the DIR* (which closes cfd).
+ */
+static void
+ngx_autocert_runtime_seed_stop(void)
+{
+    if (ngx_autocert_seed_timer.timer_set) {
+        ngx_del_timer(&ngx_autocert_seed_timer);
+    }
+
+    if (ngx_autocert_seed_dh != NULL) {
+        (void) ngx_autocert_closedir(ngx_autocert_seed_dh);
+        ngx_autocert_seed_dh = NULL;
+        ngx_autocert_seed_cfd = -1;      /* closedir() already closed it */
+    }
+}
+
+
 /*
  * A6 persist (read side): rebuild of the requests shm zone from on-disk
  * markers. Called from ngx_autocert_driver_init_process() on every
@@ -2360,6 +2551,15 @@ ngx_autocert_runtime_marker_remove(ngx_cycle_t *cycle,
  * USR2 upgrade the new master maps a fresh shm zone, so the seed is a full
  * rebuild there.
  *
+ * WHY THIS IS NOT GATED TO FIRST BOOT. The obvious "optimisation" — run the
+ * scan only on true first boot and skip it on the relock/reload paths — is
+ * WRONG, for the reason the paragraph above states: after a USR2 binary
+ * upgrade the new master maps a FRESH shm zone, so the seed reached via
+ * ngx_autocert_relock_handler() is a full rebuild, not a redundant repeat of
+ * a boot scan. Gating it would silently drop the entire requests-zone state
+ * across every USR2 upgrade. The cost is addressed by bounding the walk
+ * instead (below), which is free of that correctness risk.
+ *
  * For each top-level directory entry in the store container that carries the
  * marker: read the literal host, skip it if a config name now covers it (the
  * config sweep owns it), otherwise re-insert it as ISSUED if a valid fullchain
@@ -2369,6 +2569,24 @@ ngx_autocert_runtime_marker_remove(ngx_cycle_t *cycle,
  *
  * Failure anywhere (open/read/enumerate) is logged and skipped per-entry —
  * A6 is a best-effort warm start, never a hard boot dependency.
+ *
+ * CHUNKED (audit MINOR/Performance). This used to run the whole readdir walk
+ * synchronously, inline on worker 0's event loop, from BOTH callers. On a
+ * large multi-tenant store that stalls worker 0 at exactly the moment an
+ * operator reloads. It now processes at most NGX_AUTOCERT_SEED_CHUNK entries
+ * per tick and yields with a 0 ms timer, resuming from the live DIR* cursor.
+ * Per-entry decisions, their ordering-independence and their logging are
+ * byte-identical to the one-shot walk — only WHEN each entry is visited
+ * changes.
+ *
+ * RE-ENTRANCY POLICY: RESTART. A second seed request while one is in flight
+ * (init_process then a relock, or a master_process-off reload) aborts and
+ * releases the in-flight walk and starts a fresh one. Restart, not ignore:
+ * the second request may be a post-USR2 fresh-zone map whose rebuild the
+ * first walk's older cursor would only partially cover, and the seed is
+ * idempotent (ensure()+set_state() only fill or confirm gaps), so re-walking
+ * from the top is always safe and never double-counts. Ignoring would risk an
+ * incomplete zone; queueing would buy nothing a restart does not.
  */
 static void
 ngx_autocert_runtime_seed(ngx_cycle_t *cycle)
@@ -2377,15 +2595,12 @@ ngx_autocert_runtime_seed(ngx_cycle_t *cycle)
     u_char                container[NGX_MAX_PATH];
     u_char                *p;
     size_t                content_len;
-    ngx_autocert_dir_t    *dh;
-    ngx_autocert_dirent_t *de;
-    int                   dfd, mfd, cfd;
-    ssize_t               n;
-    ngx_autocert_stat_t   mst;
-    u_char                hostbuf[NGX_AUTOCERT_REQUEST_NAME_MAX];
-    ngx_str_t             host;
-    ngx_uint_t            key_type;
-    ngx_int_t             rc;
+    int                   cfd;
+
+    /* Re-entrancy: drop any walk still in flight before starting a new one
+     * (policy + rationale in the docblock above). This also releases the old
+     * DIR* + fd, so the restart cannot leak the first walk's descriptor. */
+    ngx_autocert_runtime_seed_stop();
 
     if (ngx_autocert_get_conf(cycle, &acf) != NGX_OK
         || acf.requests_zone == NULL
@@ -2411,102 +2626,171 @@ ngx_autocert_runtime_seed(ngx_cycle_t *cycle)
         return;                          /* no store yet: nothing to seed */
     }
 
-    dh = ngx_autocert_fdopendir(cfd);
-    if (dh == NULL) {
+    ngx_autocert_seed_dh = ngx_autocert_fdopendir(cfd);
+    if (ngx_autocert_seed_dh == NULL) {
+        /* fdopendir() failure does NOT transfer ownership (shared.h contract):
+         * we still own cfd and must close it ourselves. */
         (void) ngx_autocert_close(cfd);
         return;
     }
+    ngx_autocert_seed_cfd = cfd;
 
-    key_type = (acf.cert_key_types != NULL && acf.cert_key_types->nelts > 0)
-             ? ((ngx_uint_t *) acf.cert_key_types->elts)[0]
-             : NGX_HTTP_AUTOCERT_KEY_P256;
+    /*
+     * The key type is read once, here, rather than per tick: it selects which
+     * key's fullchain ngx_autocert_name_due() consults, and re-deriving it
+     * mid-walk from a config that changed under us would make the walk's
+     * decisions depend on WHERE the reload landed in the enumeration. Pinning
+     * it keeps the chunked walk's outcome ordering-independent, which is the
+     * invariant the one-shot walk had for free.
+     */
+    ngx_autocert_seed_key_type =
+        (acf.cert_key_types != NULL && acf.cert_key_types->nelts > 0)
+      ? ((ngx_uint_t *) acf.cert_key_types->elts)[0]
+      : NGX_HTTP_AUTOCERT_KEY_P256;
 
-    while ((de = ngx_autocert_readdir(dh)) != NULL) {
-        if (de->d_name[0] == '.') {
-            continue;                    /* skip ".", "..", any dotfile entry */
-        }
+    ngx_memzero(&ngx_autocert_seed_timer, sizeof(ngx_event_t));
+    ngx_autocert_seed_timer.handler = ngx_autocert_runtime_seed_step;
+    ngx_autocert_seed_timer.data = cycle;
+    ngx_autocert_seed_timer.log = cycle->log;
+    /* never pin a shutting-down worker */
+    ngx_autocert_seed_timer.cancelable = 1;
 
-        /* O_NOFOLLOW: a symlinked entry can't be used to read a marker from
-         * outside the pinned store dir. Non-directory entries fail harmlessly.
-         */
-        dfd = ngx_autocert_openat(cfd, de->d_name,
-                     O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
-        if (dfd == -1) {
-            continue;
-        }
+    /*
+     * Run the first chunk inline rather than only arming the timer. On a small
+     * store (the overwhelmingly common case) the whole walk then completes
+     * before this function returns, exactly as the one-shot version did — no
+     * behavioural change and no wasted timer dispatch. Only a store larger
+     * than one chunk pays for a yield.
+     */
+    ngx_autocert_runtime_seed_step(&ngx_autocert_seed_timer);
+}
 
-        /*
-         * O_NONBLOCK so a planted FIFO can't block worker-0 init while it
-         * holds the driver singleton lock (Codex A6 audit); the immediate
-         * fstat()+S_ISREG check below then refuses anything that isn't a
-         * plain file before reading (a FIFO opened O_NONBLOCK|O_RDONLY with
-         * no writer would otherwise return EOF/short-read, not hang — the
-         * type check is the actual gate, O_NONBLOCK just removes the hang
-         * as a possibility even before that check runs).
-         */
-        mfd = ngx_autocert_openat(dfd, NGX_AUTOCERT_RUNTIME_MARKER,
-                     NGX_AUTOCERT_MARKER_OPEN_READ);
-        if (mfd == -1) {
-            (void) ngx_autocert_close(dfd);
-            continue; /* not a runtime dir (or config-only) */
-        }
 
-        if (ngx_autocert_fstat(mfd, &mst) == -1 || !S_ISREG(mst.st_mode)
-            || mst.st_size <= 0
-            || (size_t) mst.st_size > NGX_AUTOCERT_REQUEST_NAME_MAX)
-        {
-            (void) ngx_autocert_close(mfd);
-            (void) ngx_autocert_close(dfd);
-            continue;                    /* not a plain, right-sized marker */
-        }
+/*
+ * Per-entry seed decision: the cycle-bound half of the old inline chunk loop,
+ * now reached through ngx_autocert_seed_walk_chunk()'s handler hook. Every
+ * decision, its ordering and its logging are byte-identical to the inline
+ * version — only the call path changed.
+ */
+typedef struct {
+    ngx_cycle_t          *cycle;
+    ngx_autocert_conf_t  *acf;
+} ngx_autocert_seed_ctx_t;
 
-        n = ngx_autocert_read(mfd, hostbuf, sizeof(hostbuf));
-        (void) ngx_autocert_close(mfd);
-        (void) ngx_autocert_close(dfd);
 
-        if (n <= 0 || (size_t) n != (size_t) mst.st_size) {
-            continue; /* short read / raced truncate: ignore */
-        }
+static ngx_int_t
+ngx_autocert_seed_restore_entry(void *data, ngx_str_t *host)
+{
+    ngx_autocert_seed_ctx_t  *ctx = data;
 
-        host.data = hostbuf;
-        host.len = (size_t) n;
+    ngx_cycle_t          *cycle = ctx->cycle;
+    ngx_autocert_conf_t  *acf = ctx->acf;
+    ngx_int_t             rc;
 
-        if (ngx_autocert_name_is_config(&host, NULL)) {
-            continue;                    /* config sweep owns it now */
-        }
-
-        if (ngx_autocert_name_due(cycle, &acf, &host, key_type)) {
-            /* Cert gone/expired while the process was down. Nothing valid to
-             * seed; do not fabricate an ISSUED state. Next label-autoconf
-             * discovery re-enqueues it via a fresh ensure(). */
-            continue;
-        }
-
-        /* REQ_UNKNOWN means the insert did not happen (bad zone/host), and
-         * REQ_DENIED is terminal — in neither case is there a node to move to
-         * ISSUED, so claiming a restore would be fail-open. Only log the
-         * restore once set_state() has actually committed it. */
-        rc = ngx_autocert_requests_ensure(acf.requests_zone, &host);
-        if (rc == NGX_AUTOCERT_REQ_UNKNOWN || rc == NGX_AUTOCERT_REQ_DENIED) {
-            continue;
-        }
-
-        if (ngx_autocert_requests_set_state(acf.requests_zone, &host,
-                                            NGX_AUTOCERT_REQ_ISSUED, 0)
-            != NGX_OK)
-        {
-            ngx_log_error(NGX_LOG_WARN, cycle->log, 0,
-                          "autocert: A6 could not restore runtime name \"%V\"",
-                          &host);
-            continue;
-        }
-
-        ngx_log_error(NGX_LOG_NOTICE, cycle->log, 0,
-                      "autocert: A6 restored runtime name \"%V\" from disk",
-                      &host);
+    if (ngx_autocert_name_is_config(host, NULL)) {
+        return NGX_DECLINED;             /* config sweep owns it now */
     }
 
-    (void) ngx_autocert_closedir(dh);     /* also closes cfd via fdopendir */
+    if (ngx_autocert_name_due(cycle, acf, host,
+                              ngx_autocert_seed_key_type))
+    {
+        /* Cert gone/expired while the process was down. Nothing valid to
+         * seed; do not fabricate an ISSUED state. Next label-autoconf
+         * discovery re-enqueues it via a fresh ensure(). */
+        return NGX_DECLINED;
+    }
+
+    /* REQ_UNKNOWN means the insert did not happen (bad zone/host), and
+     * REQ_DENIED is terminal — in neither case is there a node to move to
+     * ISSUED, so claiming a restore would be fail-open. Only log the
+     * restore once set_state() has actually committed it. */
+    rc = ngx_autocert_requests_ensure(acf->requests_zone, host);
+    if (rc == NGX_AUTOCERT_REQ_UNKNOWN || rc == NGX_AUTOCERT_REQ_DENIED) {
+        return NGX_DECLINED;
+    }
+
+    if (ngx_autocert_requests_set_state(acf->requests_zone, host,
+                                        NGX_AUTOCERT_REQ_ISSUED, 0)
+        != NGX_OK)
+    {
+        ngx_log_error(NGX_LOG_WARN, cycle->log, 0,
+                      "autocert: A6 could not restore runtime name \"%V\"",
+                      host);
+        return NGX_DECLINED;
+    }
+
+    ngx_log_error(NGX_LOG_NOTICE, cycle->log, 0,
+                  "autocert: A6 restored runtime name \"%V\" from disk",
+                  host);
+
+    return NGX_OK;
+}
+
+
+/*
+ * One chunk of the A6 seed walk. Processes up to NGX_AUTOCERT_SEED_CHUNK
+ * entries from the live DIR* cursor, then either re-arms at 0 ms (more
+ * entries pending) or stops and releases the walk (enumeration exhausted).
+ */
+static void
+ngx_autocert_runtime_seed_step(ngx_event_t *ev)
+{
+    ngx_cycle_t             *cycle = ev->data;
+    ngx_autocert_conf_t      acf;
+    ngx_autocert_seed_ctx_t  ctx;
+    u_char                   hostbuf[NGX_AUTOCERT_REQUEST_NAME_MAX];
+
+    if (ngx_autocert_seed_dh == NULL) {
+        return;                          /* no walk in flight (stale timer) */
+    }
+
+    /*
+     * Shutdown aborts the walk and releases the DIR* + fd. The seed is a
+     * best-effort warm start, so there is nothing to finish on the way out —
+     * and holding a descriptor open while the worker exits is the leak this
+     * guard exists to prevent. Mirrors ngx_autocert_relock_handler's guard.
+     */
+    if (ngx_quit || ngx_terminate || ngx_exiting) {
+        ngx_autocert_runtime_seed_stop();
+        return;
+    }
+
+    /*
+     * Re-fetch the config every tick instead of carrying the stack copy the
+     * one-shot walk used: acf.path / acf.requests_zone point into cycle-owned
+     * memory, and a cycle that retires between ticks would leave a stale copy
+     * dangling. A conf that has gone away (or lost its zone) means there is
+     * nothing left to seed into — abort rather than write through a pointer
+     * whose backing may already be freed.
+     */
+    if (ngx_autocert_get_conf(cycle, &acf) != NGX_OK
+        || acf.requests_zone == NULL
+        || acf.path.len == 0)
+    {
+        ngx_autocert_runtime_seed_stop();
+        return;
+    }
+
+    ctx.cycle = cycle;
+    ctx.acf = &acf;
+
+    if (ngx_autocert_seed_walk_chunk(ngx_autocert_seed_dh,
+                                     ngx_autocert_seed_cfd,
+                                     NGX_AUTOCERT_SEED_CHUNK, hostbuf,
+                                     ngx_autocert_seed_restore_entry, &ctx)
+        == NGX_DONE)
+    {
+        ngx_autocert_runtime_seed_stop();   /* enumeration exhausted */
+        return;
+    }
+
+    /*
+     * Chunk budget spent with entries still pending: yield to the event loop
+     * and resume from the DIR* cursor on the next tick. 0 ms (not 1) so the
+     * walk continues on the very next loop iteration — this is a fairness
+     * yield, not a delay.
+     */
+    ngx_add_timer(&ngx_autocert_seed_timer, 0);
 }
 
 
@@ -2865,6 +3149,14 @@ ngx_autocert_relock_handler(ngx_event_t *ev)
          * taken here, so this worker's shm view may still be missing markers
          * a prior generation never got to (or a fresh restart never had). */
         ngx_autocert_runtime_seed(cycle);
+        /* ARM ORDERING: arm immediately, do NOT chain arm behind the seed's
+         * completion. The seed is documented above as a best-effort warm
+         * start, never a hard boot dependency, so delaying the driver's arm
+         * until a large store finishes enumerating would convert a
+         * performance fix into a behaviour regression — the exact stall this
+         * change exists to remove, just moved from the event loop to the
+         * driver's start time. The seed continues in the background across
+         * ticks; the kick timer's own work is independent of it. */
         ngx_autocert_driver_arm(cycle);
         return;                             /* acquired; stop retrying */
 
@@ -2900,6 +3192,14 @@ ngx_autocert_driver_init_process(ngx_cycle_t *cycle)
          * ngx_autocert_name_is_config/name_due for anything already settled).
          */
         ngx_autocert_runtime_seed(cycle);
+        /* ARM ORDERING: arm immediately, do NOT chain arm behind the seed's
+         * completion. The seed is documented above as a best-effort warm
+         * start, never a hard boot dependency, so delaying the driver's arm
+         * until a large store finishes enumerating would convert a
+         * performance fix into a behaviour regression — the exact stall this
+         * change exists to remove, just moved from the event loop to the
+         * driver's start time. The seed continues in the background across
+         * ticks; the kick timer's own work is independent of it. */
         ngx_autocert_driver_arm(cycle);
         break;
 
@@ -2941,6 +3241,14 @@ ngx_autocert_driver_cancel_timers(void)
     if (ngx_autocert_relock_timer.timer_set) {
         ngx_del_timer(&ngx_autocert_relock_timer);
     }
+
+    /* The A6 seed walk is a timer too, and it additionally owns a live DIR*
+     * (and the store-container fd inside it) between ticks. Cancelling the
+     * timer alone would leak that descriptor for the life of the process, so
+     * route through the stop helper, which cancels AND releases. Covers both
+     * callers of this function: exit_process and the master_process-off
+     * reload. */
+    ngx_autocert_runtime_seed_stop();
 
     /* The dns-01 orphan reaper is module-scoped inside order.c but lives in
      * this cycle's timer tree like the three above, so it is cancelled with
