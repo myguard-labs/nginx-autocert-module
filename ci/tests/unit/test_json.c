@@ -461,12 +461,9 @@ test_string_span_prescan(void)
     }
 
     /*
-     * Escaped quote inside the string must NOT terminate the pre-scan early.
-     * If the pre-scan ignored backslash escaping it would stop at the FIRST
-     * '"' (right after \"), sizing the allocation too small for the real
-     * span up to the true closing quote -- exactly the bug class the
-     * pre-scan exists to avoid. The decoded value must contain the escaped
-     * quote and continue to the real terminator.
+     * Basic escaped-quote decoding: the value contains the quote and
+     * continues to the real terminator. Too short to detect an escape-blind
+     * pre-scan on its own -- the long-tail case below is that oracle.
      */
     v = parse("{\"k\":\"a\\\"b\"}");
     CHECK(ngx_autocert_json_object_str(v, "k", &s) == NGX_OK
@@ -475,19 +472,12 @@ test_string_span_prescan(void)
           "escaped quote inside string does not terminate pre-scan early");
 
     /*
-     * Same defect, but with a long tail after the escaped quote AND a
-     * second member following it. An escape-blind pre-scan sizes the first
-     * string's allocation to the SHORT span ending at the escaped quote (2
-     * bytes: 'a' and the backslash) while the decode loop still walks to
-     * the true closing quote and writes the full 20-byte decoded value into
-     * that undersized buffer -- overflowing into whatever the pool hands
-     * out next (here, the "k2" key/value). A pool allocator has no
-     * per-allocation redzone, so this survives even under ASan/UBSan
-     * (verified: it does not abort, and with nothing allocated after it in
-     * a large pool the overflow can land on never-touched memory and read
-     * back "correct" by pure luck -- the trailing member exists specifically
-     * to force a real adjacent allocation to corrupt). The only reliable
-     * oracle is the exact decoded CONTENT of the returned string.
+     * The escape-blindness oracle. An escape-blind pre-scan would size this
+     * string's buffer to the 2-byte span ending at the escaped quote while
+     * the decode loop writes all 20 bytes, overflowing into the next pool
+     * allocation. A pool allocator has no per-allocation redzone, so ASan
+     * does not catch it: the trailing "k2" member forces a real adjacent
+     * allocation, and the decoded CONTENT is the only reliable oracle.
      */
     v = parse("{\"k\":\"a\\\"BBBBBBBBBBBBBBBBBB\",\"k2\":\"end\"}");
     CHECK(ngx_autocert_json_object_str(v, "k", &s) == NGX_OK
