@@ -21,6 +21,7 @@
 #include "../../fuzz/generated_http.inc"
 
 #include <stdio.h>
+#include <assert.h>
 
 
 static int          failures;
@@ -377,7 +378,7 @@ parse_resp_incremental(const char *resp, const size_t *feed_sizes,
     for (i = 0; i < nfeeds; i++) {
         size_t  upto = feed_sizes[i];
 
-        CHECK(upto <= total, "incremental: feed size within buffer");
+        assert(upto <= total);   /* harness invariant; see parse_resp_grow */
         memcpy(b->start, resp, upto);
         b->last = b->start + upto;
 
@@ -507,22 +508,52 @@ test_hdr_scan_cursor(void)
  * whatever the whole-parse verdict is (accept or reject) is also the
  * required split verdict.
  *
- * A captured header ngx_str_t is a POOL COPY (see the "Copy into the pool"
- * comment in ngx_autocert_acme_parse_response), not an alias into the recv
- * buffer, so comparing captured bytes after the recv buffer is torn down /
- * reallocated is exactly the aliasing hazard this harness is built to catch:
- * if a future change captured a pointer into the recv buffer instead, a
- * grown-and-copied buffer (below) would leave that pointer dangling into the
- * abandoned old allocation, and the byte comparison here would read
- * whatever garbage now occupies that freed memory.
+ * Captured header names/values ARE pool copies (see the "Copy into the pool"
+ * comment in ngx_autocert_acme_parse_response), but the non-chunked body is
+ * NOT: parse_response sets body_out.data = b->start + body_offset, a raw
+ * alias into the recv buffer. So the reference must be deep-copied out of
+ * BOTH the pool and the recv buffer before either is reset or reallocated --
+ * which is what snapshot_result does with malloc'd storage.
+ *
+ * That aliasing is also precisely the hazard the grow variant probes: a
+ * grown-and-copied recv buffer abandons the old allocation, so an aliased
+ * body pointer captured before the growth dangles into freed memory, and the
+ * byte comparison here reads whatever now occupies it.
  */
+
+/*
+ * Header-array bound for a captured result. Asserted, never silently
+ * clamped -- see snapshot_result.
+ */
+#define PARITY_MAX_HDRS  32
+
+
+/*
+ * malloc that aborts instead of dereferencing NULL. Abort, not CHECK: this
+ * runs once per captured header per delivery (thousands of times), so a
+ * CHECK here would bury the parser's own assertions under harness noise --
+ * and an OOM in a fixture-sized test is an environment failure, not a
+ * parser result worth counting.
+ */
+static void *
+parity_dup(const void *src, size_t len)
+{
+    void  *p = malloc(len);
+
+    if (p == NULL) {
+        fprintf(stderr, "FATAL: parity snapshot allocation failed\n");
+        abort();
+    }
+    memcpy(p, src, len);
+    return p;
+}
 
 typedef struct {
     ngx_int_t   rc;
     ngx_uint_t  status;
     ngx_uint_t  nheaders;
-    ngx_str_t   hnames[32];
-    ngx_str_t   hvalues[32];
+    ngx_str_t   hnames[PARITY_MAX_HDRS];
+    ngx_str_t   hvalues[PARITY_MAX_HDRS];
     off_t       content_length;
     ngx_str_t   body;
 } parse_result_t;
@@ -544,28 +575,38 @@ snapshot_result(ngx_int_t rc, ngx_autocert_acme_request_t *r,
     if (rc == NGX_DONE) {
         out->body.len = r->body_out.len;
         if (out->body.len) {
-            out->body.data = malloc(out->body.len);
-            memcpy(out->body.data, r->body_out.data, out->body.len);
+            out->body.data = parity_dup(r->body_out.data, out->body.len);
         }
     }
 
     if (r->headers != NULL) {
         n = r->headers->nelts;
-        if (n > 32) {
-            n = 32;         /* corpus never exceeds this; guard, not a clamp */
+
+        /*
+         * Assert the bound rather than clamping to it. A silent clamp would
+         * leave nheaders unclamped while comparing only the first
+         * PARITY_MAX_HDRS entries, so a parser that dropped header 33 on a
+         * split delivery would match on count and never be compared past the
+         * bound -- a divergence the harness exists to catch, reported as a
+         * pass. Raise PARITY_MAX_HDRS if a corpus case ever needs more.
+         */
+        if (n > PARITY_MAX_HDRS) {
+            CHECK(0, "parity: header count within PARITY_MAX_HDRS");
+            n = PARITY_MAX_HDRS;
         }
-        out->nheaders = r->headers->nelts;
+
+        out->nheaders = n;
         for (i = 0; i < n; i++) {
             ngx_autocert_acme_header_t  *h =
                 &((ngx_autocert_acme_header_t *) r->headers->elts)[i];
 
             out->hnames[i].len = h->name.len;
-            out->hnames[i].data = malloc(h->name.len ? h->name.len : 1);
-            memcpy(out->hnames[i].data, h->name.data, h->name.len);
+            out->hnames[i].data = parity_dup(h->name.data,
+                                             h->name.len ? h->name.len : 1);
 
             out->hvalues[i].len = h->value.len;
-            out->hvalues[i].data = malloc(h->value.len ? h->value.len : 1);
-            memcpy(out->hvalues[i].data, h->value.data, h->value.len);
+            out->hvalues[i].data = parity_dup(h->value.data,
+                                              h->value.len ? h->value.len : 1);
         }
     }
 }
@@ -575,7 +616,7 @@ free_result(parse_result_t *res)
 {
     ngx_uint_t  i, n;
 
-    n = res->nheaders > 32 ? 32 : res->nheaders;
+    n = res->nheaders > PARITY_MAX_HDRS ? PARITY_MAX_HDRS : res->nheaders;
     for (i = 0; i < n; i++) {
         free(res->hnames[i].data);
         free(res->hvalues[i].data);
@@ -609,7 +650,10 @@ parse_resp_grow(const char *resp, size_t len, const size_t *feeds,
         size_t  upto = feeds[i];
         size_t  used = b->last - b->start;
 
-        CHECK(upto <= len, "grow: feed size within response length");
+        /* Harness invariant on a caller-computed constant, not a parser
+         * constraint: assert it without inflating the assertion count
+         * (it would otherwise fire once per feed, thousands of times). */
+        assert(upto <= len);
 
         if (upto > cap) {
             /* grow: fresh allocation, copy live bytes, abandon the old one --
