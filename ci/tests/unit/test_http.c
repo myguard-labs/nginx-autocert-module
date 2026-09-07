@@ -820,7 +820,7 @@ parity_case(const char *label, const char *resp)
      * lands BETWEEN the two parses. Sizing the buffer below the first feed
      * instead would grow before any parse had run, and the case would prove
      * nothing. Verified by instrumentation: the growth branch executes for
-     * all 16 cases, always one byte before the end.
+     * every corpus case, always one byte before the end.
      *
      * SCOPE, honestly stated: this is a REGRESSION GUARD, not a test that
      * currently discriminates. Today parse_response recomputes
