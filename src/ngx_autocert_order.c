@@ -2034,7 +2034,15 @@ ngx_autocert_keygen_post(ngx_autocert_order_t *order, ngx_uint_t curve)
         ngx_autocert_keygen.task = ngx_alloc(sizeof(ngx_thread_task_t),
                                              order->log);
         if (ngx_autocert_keygen.task == NULL) {
-            return NGX_ERROR;
+            /* Same policy as every other degraded path below: one stall on the
+             * event loop beats losing this name's issuance attempt. Not
+             * reachable from the unit slice — run.sh links the real
+             * ngx_alloc.o, so this branch is not injectable there. */
+            ngx_log_error(NGX_LOG_WARN, order->log, 0,
+                          "autocert: could not allocate the certificate "
+                          "keygen task; generating the RSA certificate key "
+                          "on the event loop for \"%V\"", &order->domain);
+            return ngx_autocert_keygen_inline(order, curve);
         }
         ngx_memzero(ngx_autocert_keygen.task, sizeof(ngx_thread_task_t));
     }

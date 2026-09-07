@@ -28,12 +28,13 @@
 # order, leaking the key on the abandoned path, releasing the slot too late,
 # wedging the cached task after a failed post) fails this suite.
 #
-# _post() reaches the outside world through exactly four symbols --
-# ngx_thread_pool_get(), ngx_thread_task_post(), ngx_alloc() and ngx_cycle --
-# so the test TU supplies all four, the same injection seam the orphan-reap
-# test uses for waitpid(). That is what makes the DEGRADED paths testable
-# without standing up a real thread pool; they are where the ownership bugs
-# live, so they are the paths most worth covering.
+# _post() reaches the outside world through four symbols --
+# ngx_thread_pool_get(), ngx_thread_task_post(), ngx_cycle and ngx_alloc().
+# The test TU supplies the first THREE, the same injection seam the orphan-reap
+# test uses for waitpid(). That is what makes most of the DEGRADED paths
+# testable without standing up a real thread pool; they are where the ownership
+# bugs live. ngx_alloc() is the REAL one (run.sh links ngx_alloc.o), so the
+# task-allocation-failure branch is not injectable and is not covered.
 #
 # The slice is anchored on exact production lines: from the is_rsa predicate
 # through the end of ngx_autocert_keygen_post().
@@ -56,6 +57,15 @@ if [ -z "${start:-}" ]; then
 fi
 # back up over the `static ngx_int_t` return-type line
 start=$((start - 1))
+# ...and prove that is what we actually backed up onto. Without this, a
+# one-line definition or a dropped line starts the slice inside the block
+# comment; every later check still passes (all 7 symbols present, 7 braces)
+# and CI dies with a compiler syntax error instead of a layout-drift report.
+if ! sed -n "${start}p" "$SRC" | grep -qE '^static '; then
+	echo "✗ line $start of $SRC is not the return type of" >&2
+	echo "  ngx_autocert_keygen_is_rsa (source layout changed)" >&2
+	exit 1
+fi
 
 endfn=$(grep -nE '^ngx_autocert_keygen_post\(' "$SRC" | head -1 | cut -d: -f1 || true)
 if [ -z "${endfn:-}" ]; then

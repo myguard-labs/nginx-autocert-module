@@ -47,8 +47,11 @@
  *     failed post must DISCARD the cached task -- nginx leaves event.active=1
  *     on its cond_signal failure path, and this slot reuses one task for the
  *     life of the worker, so keeping it would wedge RSA issuance permanently.
- *     _post()'s four external symbols (ngx_thread_pool_get,
- *     ngx_thread_task_post, ngx_alloc, ngx_cycle) are supplied by this TU.
+ *     _post() reaches outside through ngx_thread_pool_get(),
+ *     ngx_thread_task_post(), ngx_cycle and ngx_alloc(). The first three are
+ *     supplied by this TU; ngx_alloc() is the REAL one (run.sh links
+ *     ngx_alloc.o), so the task-allocation-failure branch is not injectable
+ *     here and is not covered.
  *
  * WHAT THIS DOES NOT COVER: the real nginx thread pool -- no task is ever run
  * on a real worker thread here, so the pool's own queueing and the genuine
@@ -184,12 +187,14 @@ freed_exactly_once(EVP_PKEY *key)
 
 /* --- the thread-pool seam _post() reaches the outside world through ------- */
 /*
- * _post() touches exactly four external symbols: ngx_thread_pool_get(),
- * ngx_thread_task_post(), ngx_alloc() and ngx_cycle. Supplying all four here
- * (the same injection seam the orphan-reap test uses for waitpid) makes its
- * DEGRADED paths testable with no real thread pool: no "default" pool, a slot
- * still busy with an abandoned task, and a post that fails. Those paths are
- * where the ownership bugs live, so they are the ones worth reaching.
+ * _post() touches four external symbols: ngx_thread_pool_get(),
+ * ngx_thread_task_post(), ngx_cycle and ngx_alloc(). The first THREE are
+ * supplied here (the same injection seam the orphan-reap test uses for
+ * waitpid), which makes most of its DEGRADED paths testable with no real
+ * thread pool: no "default" pool, a slot still busy with an abandoned task,
+ * and a post that fails. Those paths are where the ownership bugs live.
+ * ngx_alloc() is NOT injected -- run.sh links the real ngx_alloc.o -- so the
+ * task-allocation-failure path is the one degraded branch not covered here.
  */
 
 /* Opaque to us; _post() only ever passes the pointer straight back. */
