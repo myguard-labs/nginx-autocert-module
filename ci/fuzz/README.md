@@ -135,9 +135,16 @@ Measured worst-case densities the bounds are derived from (per input byte):
 | `"aaaa...a"` | ~0 | 1.0 |
 | `a:b\r\n` x N (HTTP) | 0.40 | 21.4 |
 
-The bounds carry deliberate headroom. A linear bound with slack still catches
-superlinear growth, since superlinear growth exceeds *any* linear bound once the
-document is long enough — the slack only decides how long "long enough" is.
+A linear bound catches superlinear growth whatever its slack, since superlinear
+growth exceeds *any* linear bound once the document is long enough — slack only
+decides how long "long enough" is.
+
+The two bounds are not equally slack. `K2 = 64` bytes/len has real headroom over
+the 40.0 worst case above. `K1 = 2` allocs/len is **exact**: `[[[[[[` saturates
+it at 2.00 allocs per input byte, and stays under budget only because `C1 = 8`
+absorbs it and `NGX_AUTOCERT_JSON_MAX_DEPTH` (32) truncates the family at 64
+allocations. A parser change adding an allocation per value on the array path
+must re-derive `K1`, not raise it.
 
 A violation prints `ALLOCATION BUDGET EXCEEDED` and `abort()`s, so libFuzzer
 records it as a crash with the offending input saved.

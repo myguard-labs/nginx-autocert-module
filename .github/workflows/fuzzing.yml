@@ -1,4 +1,4 @@
-# sync-sha: ae2031e3d4c185c226fa0fdd98a54f07e927d663c38f7139be4bfa1744898843
+# sync-sha: 03e4775ca4f84fe3d8a8bc573965b7eb7776cb41bcfd67c9bb698632cc7265e0
 name: Fuzzing
 
 # Fast fuzz regression — 30s/target on the JSON + HTTP + base64url ACME parsers
@@ -57,12 +57,14 @@ jobs:
       # count or byte total exceeds a linear bound in the input length, so a
       # superlinear blowup is only visible if the fuzzer can generate a document
       # long enough to exceed that bound. 4096 bytes is too short to leave much
-      # margin. 32768 measured as the largest value with no incremental
-      # throughput cost on this host: fuzz_json ~176k exec/s (~168k at the 4096
-      # default), fuzz_b64 ~460k (~297k), fuzz_http ~35k -- and fuzz_http sits at
-      # 34-36k exec/s anywhere from 8192 to 32768, so the step down from default
-      # is paid at any raise and buying the extra length is free. The 30s lane
-      # still gets ~1M+ executions per target.
+      # margin, so 32768 buys the length the oracle needs. It is not free for
+      # every target: measured here over 12s runs against an empty corpus,
+      # raising 4096 -> 32768 moves fuzz_json +13% (3.34M -> 3.79M execs) and
+      # fuzz_b64 -2%, but costs fuzz_http -18% (2.22M -> 1.82M). That 18% is
+      # accepted deliberately -- an oracle that cannot see the blowup is worth
+      # less than the executions it costs. The 30s lane still gets on the order
+      # of millions of executions per target. Re-measure before retuning; these
+      # figures are host-specific.
       - name: Run each target 30s
         run: |
           set -euo pipefail

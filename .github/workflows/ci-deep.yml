@@ -1,4 +1,4 @@
-# sync-sha: dfb5a742effeb7c50b110d6f0f326f98c67bcf40c874c07f5118f7c6c4f5c58a
+# sync-sha: 9f13fa9fa2d12c6a17646373994b3d810266c8052e8fdcf748ff37d5078f2a8e
 name: CI Deep
 
 # Exhaustive dynamic analysis — monthly cron, release, and on-demand only,
@@ -90,8 +90,9 @@ jobs:
       # -max_len must match fuzzing.yml's fast lane: the shims' allocation-budget
       # oracle can only observe a superlinear blowup on a document long enough to
       # exceed its linear bound, and libFuzzer's 4096-byte default leaves little
-      # margin. Leaving the deep lane at the default would spend 14400s/target
-      # blind to exactly the class this oracle exists to catch.
+      # margin. Leaving the deep lane at the default would spend its whole
+      # per-target budget (FUZZ_SECS, 3600s by default below) blind to exactly
+      # the class this oracle exists to catch.
       - name: Fuzz each target
         run: |
           set -euo pipefail

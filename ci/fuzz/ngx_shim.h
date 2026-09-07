@@ -112,12 +112,19 @@ struct ngx_log_s {
  *   "aaaa...a"          alloc/len 0.00   bytes/len  1.0
  *   `0` (one byte)      alloc/len 1.00   bytes/len 24.0   <- constant-term case
  *
- * The bounds below carry deliberate headroom over those measurements.  A
- * linear bound with slack still catches superlinear growth, because
+ * A linear bound catches superlinear growth whatever its slack, because
  * superlinear growth exceeds ANY linear bound once the document is long
- * enough -- the slack only decides how long "long enough" is.  Headroom costs
- * detection latency, not detection power, and buys immunity to a legitimate
- * future parser change that allocates a little more per byte.
+ * enough -- slack only decides how long "long enough" is, so it costs
+ * detection latency, not detection power.
+ *
+ * The two bounds are NOT equally slack.  K2 = 64 bytes/len has real headroom
+ * over the 40.0 worst case measured above.  K1 = 2 allocs/len is EXACT: an
+ * exhaustive sweep of every six-byte document over `[]{}",:0` finds `[[[[[[`
+ * saturating it at 2.00 allocs per input byte with zero coefficient slack.
+ * That family stays under budget only because C1 = 8 absorbs it and
+ * NGX_AUTOCERT_JSON_MAX_DEPTH (32) truncates it at 64 allocations.  A future
+ * parser change that adds even one allocation per value on the array path
+ * will make `[[[...` abort here: re-derive K1 rather than raising it blindly.
  *
  * A violation abort()s, so libFuzzer records it as a crash with the offending
  * input, exactly like a sanitizer finding.
@@ -141,16 +148,16 @@ typedef struct {
 } ngx_pool_t;
 
 /*
- * Charge one allocation against the budget and abort if either bound is
- * exceeded.  Called AFTER the size is known and BEFORE the pointer is handed
- * back, so the aborting input is the one libFuzzer saves.
- */
-/*
  * NGX_FUZZ_NO_BUDGET disables the budget for callers that are not fuzzing a
  * sized input. The growable registry still tracks and frees every allocation.
  */
 #define NGX_FUZZ_NO_BUDGET  ((size_t) -1)
 
+/*
+ * Charge one allocation against the budget and abort if either bound is
+ * exceeded.  Called AFTER the size is known and BEFORE the pointer is handed
+ * back, so the aborting input is the one libFuzzer saves.
+ */
 static void
 ngx_fuzz_pool_charge(ngx_pool_t *pool, size_t size)
 {

@@ -89,11 +89,13 @@ struct ngx_log_s { int dummy; };
  * THE INVARIANT
  *
  * ngx_autocert_acme_parse_response / dechunk allocate at:
- *   - the host copy            (r->host.len + 1, a substring of the input)
  *   - the header array         (ngx_array_create, then doubling on push;
  *                               cumulative growth is < 2x the final array)
  *   - per-header name + value  (each a disjoint substring of the input)
  *   - the dechunked body       (total decoded bytes <= input length)
+ *
+ * (ngx_autocert_acme_parse_url's host copy is NOT in this set: fuzz_http.c
+ *  calls only parse_response, so that site is unreachable from this harness.)
  *
  * Every one of those is charged to input bytes that are consumed once, so both
  * the allocation count and the total allocated bytes are O(N) in the response
