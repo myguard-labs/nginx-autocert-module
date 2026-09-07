@@ -697,19 +697,30 @@ assert_parity(const parse_result_t *ref, ngx_int_t rc,
 
     snapshot_result(rc, r, &got);
 
+    /*
+     * status, content_length and the header array are populated on the
+     * NGX_AGAIN and NGX_ERROR paths too, so they are compared for EVERY
+     * verdict -- a split delivery that rejects with a different status, or
+     * having captured half the headers, is a parity failure even though the
+     * rc matches. Only the body is gated on NGX_DONE, since that is the only
+     * verdict that produces one.
+     */
     if (got.rc != ref->rc) {
         ok = 0;
-    } else if (ref->rc == NGX_DONE) {
+    } else {
         if (got.status != ref->status
             || got.content_length != ref->content_length
             || got.nheaders != ref->nheaders
-            || got.body.len != ref->body.len
-            || (got.body.len
-                && memcmp(got.body.data, ref->body.data, got.body.len) != 0))
+            || (ref->rc == NGX_DONE
+                && (got.body.len != ref->body.len
+                    || (got.body.len
+                        && memcmp(got.body.data, ref->body.data,
+                                  got.body.len) != 0))))
         {
             ok = 0;
         } else {
-            n = ref->nheaders > 32 ? 32 : ref->nheaders;
+            n = ref->nheaders > PARITY_MAX_HDRS
+                ? PARITY_MAX_HDRS : ref->nheaders;
             for (i = 0; i < n; i++) {
                 if (got.hnames[i].len != ref->hnames[i].len
                     || memcmp(got.hnames[i].data, ref->hnames[i].data,
@@ -783,26 +794,41 @@ parity_case(const char *label, const char *resp)
         }
     }
 
-    /* (d) forced buffer growth: start at a quarter of the response (at least
-     * 8 bytes so short responses still force one realloc before EOF), split
-     * at the midpoint so growth happens mid-parse rather than on the last
-     * feed. */
+    /*
+     * (d) forced buffer growth. The ORDERING is the point: the first feed must
+     * FIT the initial buffer so the first parse_response runs against the old
+     * allocation, and the second feed must then exceed it so the realloc
+     * lands BETWEEN the two parses. Sizing the buffer below the first feed
+     * instead would grow before any parse had run, and the case would prove
+     * nothing. Verified by instrumentation: the growth branch executes for
+     * all 16 cases, always one byte before the end.
+     *
+     * SCOPE, honestly stated: this is a REGRESSION GUARD, not a test that
+     * currently discriminates. Today parse_response recomputes
+     * body_out.data = b->start + body_offset on the parse that returns
+     * NGX_DONE, so no pointer captured by an earlier parse survives the
+     * growth, and poisoning the abandoned buffer changes no result (measured).
+     * It would catch a future change that CACHED a recv-buffer pointer across
+     * NGX_AGAIN returns -- but only once a case exists whose body completes
+     * across the growth boundary rather than on the final feed. Adding one is
+     * TODO; do not read this case as already covering that hazard.
+     */
     {
-        size_t  buf_init = len / 4;
+        size_t  buf_init;
         size_t  feeds[2];
 
-        if (buf_init < 8) {
-            buf_init = 8;
-        }
-        if (buf_init >= len) {
-            buf_init = len > 1 ? len - 1 : 1;
-        }
-
-        feeds[0] = len / 2 ? len / 2 : 1;
-        if (feeds[0] < buf_init) {
-            feeds[0] = buf_init;
-        }
+        /*
+         * The first feed must also be LATE enough for the first parse to get
+         * past the header boundary and populate the body/state that a later
+         * growth could invalidate. len-1 is the latest feed that still leaves
+         * a second one, so it maximises what the pre-growth parse has done;
+         * len/2 would return NGX_AGAIN in the header scan for most cases and
+         * the growth would invalidate nothing.
+         */
+        feeds[0] = len > 1 ? len - 1 : 1;
         feeds[1] = len;
+
+        buf_init = feeds[0];
 
         rc = parse_resp_grow(resp, len, feeds, 2, buf_init, &r);
         assert_parity(&ref, rc, &r, label, -2);
