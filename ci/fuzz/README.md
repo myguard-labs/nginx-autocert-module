@@ -129,6 +129,7 @@ Measured worst-case densities the bounds are derived from (per input byte):
 
 | document | allocs/byte | bytes/byte |
 |---|---|---|
+| `[[[[...` (32 deep) | 2.00 | 40.0 |
 | `[0,0,0,...]` | 1.00 | 20.0 |
 | `["","",...]` | 1.00 | 13.3 |
 | `{"":0,"":0,...}` | 0.60 | 11.2 |
@@ -140,8 +141,9 @@ growth exceeds *any* linear bound once the document is long enough — slack onl
 decides how long "long enough" is.
 
 The two bounds are not equally slack. `K2 = 64` bytes/len has real headroom over
-the 40.0 worst case above. `K1 = 2` allocs/len is **exact**: `[[[[[[` saturates
-it at 2.00 allocs per input byte, and stays under budget only because `C1 = 8`
+the 40.0 bytes/byte worst case above. `K1 = 2` allocs/len is **exact**:
+`[[[[[[` saturates it at 2.00 allocs per byte, and stays under budget only
+because `C1 = 8`
 absorbs it and `NGX_AUTOCERT_JSON_MAX_DEPTH` (32) truncates the family at 64
 allocations. A parser change adding an allocation per value on the array path
 must re-derive `K1`, not raise it.

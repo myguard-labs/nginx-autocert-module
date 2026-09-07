@@ -106,6 +106,7 @@ struct ngx_log_s {
  * that can be written (all ratios below are allocations, or bytes, per input
  * byte):
  *
+ *   [[[[...  (32 deep)  alloc/len 2.00   bytes/len 40.0   <- both worst cases
  *   [0,0,0,...]         alloc/len 1.00   bytes/len 20.0   (24 + 16 per 2 bytes)
  *   ["","",...]         alloc/len 1.00   bytes/len 13.3
  *   {"":0,"":0,...}     alloc/len 0.60   bytes/len 11.2   (24 + 32 per 5 bytes)
@@ -118,7 +119,7 @@ struct ngx_log_s {
  * detection latency, not detection power.
  *
  * The two bounds are NOT equally slack.  K2 = 64 bytes/len has real headroom
- * over the 40.0 worst case measured above.  K1 = 2 allocs/len is EXACT: an
+ * over the 40.0 bytes/len worst case above.  K1 = 2 allocs/len is EXACT: an
  * exhaustive sweep of every six-byte document over `[]{}",:0` finds `[[[[[[`
  * saturating it at 2.00 allocs per input byte with zero coefficient slack.
  * That family stays under budget only because C1 = 8 absorbs it and

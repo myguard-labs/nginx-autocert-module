@@ -1,4 +1,4 @@
-# sync-sha: 9f13fa9fa2d12c6a17646373994b3d810266c8052e8fdcf748ff37d5078f2a8e
+# sync-sha: cdf80e32aa0ea42ac8a8741876bae08a6ab917845d07754c7c39ac94ebd71e55
 name: CI Deep
 
 # Exhaustive dynamic analysis — monthly cron, release, and on-demand only,
@@ -9,7 +9,7 @@ name: CI Deep
 # SARIF-upload path is removed too — the scanners still run and GATE on
 # findings, they just don't upload.
 #
-# Jobs: fuzz (14400s/target) · memcheck soak · helgrind soak · scanners ·
+# Jobs: fuzz (FUZZ_SECS, 3600s default) · memcheck soak · helgrind soak · scanners ·
 #       e2e-angie (the Pebble suite on angie).
 #   * e2e-angie moved here out of build-test.yml: at ~11.5 minutes it was the
 #     per-PR wall-clock, while covering the same module logic as the nginx leg
