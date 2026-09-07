@@ -143,9 +143,8 @@ decides how long "long enough" is.
 The two bounds are not equally slack. `K2 = 64` bytes/len has real headroom over
 the 40.0 bytes/byte worst case above. `K1 = 2` allocs/len is **exact**:
 `[[[[[[` saturates it at 2.00 allocs per byte, and stays under budget only
-because `C1 = 8`
-absorbs it and `NGX_AUTOCERT_JSON_MAX_DEPTH` (32) truncates the family at 64
-allocations. A parser change adding an allocation per value on the array path
+because `C1 = 8` absorbs it and `NGX_AUTOCERT_JSON_MAX_DEPTH` (32) truncates
+the family at 64 allocations. A parser change adding an allocation per value on the array path
 must re-derive `K1`, not raise it.
 
 A violation prints `ALLOCATION BUDGET EXCEEDED` and `abort()`s, so libFuzzer
