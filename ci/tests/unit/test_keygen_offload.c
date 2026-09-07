@@ -425,6 +425,35 @@ main(void)
         EVP_PKEY_free(generated);       /* our own reference */
     }
 
+    printf("== keygen offload: an abandoned task leaves the slot orphaned ==\n");
+
+    /*
+     * The state _post() must distinguish. After _abandon(), the slot is busy
+     * with NO owner, and stays that way until the orphaned keygen finishes.
+     * A reload runs drop_order() inside the live event loop and re-arms the
+     * kick, so the next order can reach finalize inside that window; _post()
+     * treats busy+detached as "generate inline this once", and reserves the
+     * ALERT for busy+ATTACHED, which really would mean two orders in flight.
+     *
+     * _post() itself needs a live cycle and thread pool and is not sliced, so
+     * what is pinned here is the predicate it branches on -- that the two busy
+     * states are distinguishable at all, which is what makes the fix possible.
+     */
+    reset_state();
+    ngx_memzero(&order, sizeof(order));
+    order.log = &test_log;
+    arm_slot(&order, NGX_HTTP_AUTOCERT_CRYPTO_RSA2048);
+
+    OK(ngx_autocert_keygen.busy == 1 && ngx_autocert_keygen.order == &order,
+       "a live task is busy AND attached (two orders in flight would be a "
+       "real invariant break)");
+
+    ngx_autocert_keygen_abandon(&order);
+
+    OK(ngx_autocert_keygen.busy == 1 && ngx_autocert_keygen.order == NULL,
+       "an abandoned task is busy but DETACHED (reachable after a reload; "
+       "not an invariant break)");
+
     printf("== keygen offload: _abandon() is scoped to its own order ==\n");
 
     reset_state();
@@ -439,11 +468,16 @@ main(void)
     OK(ngx_autocert_keygen.order == &order,
        "_abandon(other) left this order's task attached");
 
-    /* And with nothing in flight, _abandon() is a harmless no-op. */
+    /* And with nothing in flight, _abandon() is a harmless no-op. Leave a
+     * sentinel it must not touch: reset_state() has already zeroed order and
+     * busy, so re-checking only those two would pass with the call deleted. */
     reset_state();
+    ngx_autocert_keygen.key = (EVP_PKEY *) 0x1;   /* must not be touched */
     ngx_autocert_keygen_abandon(&order);
-    OK(ngx_autocert_keygen.order == NULL && ngx_autocert_keygen.busy == 0,
+    OK(ngx_autocert_keygen.order == NULL && ngx_autocert_keygen.busy == 0
+       && ngx_autocert_keygen.key == (EVP_PKEY *) 0x1,
        "_abandon() with no task in flight is a no-op");
+    ngx_autocert_keygen.key = NULL;
 
     /* An idle slot must also not be detached by a stale pointer match: busy=0
      * means there is no completion coming, so nothing to abandon. */

@@ -1963,11 +1963,37 @@ ngx_autocert_keygen_post(ngx_autocert_order_t *order, ngx_uint_t curve)
     ngx_str_t           name = ngx_string("default");
 
     if (ngx_autocert_keygen.busy) {
-        /* One in-flight order per worker, so this cannot happen; fail the
-         * order rather than corrupt the slot if the invariant ever breaks. */
-        ngx_log_error(NGX_LOG_ALERT, order->log, 0,
-                      "autocert: certificate keygen slot busy");
-        return NGX_ERROR;
+        /*
+         * REACHABLE, and not an invariant break: _abandon() deliberately
+         * leaves an abandoned task in flight (busy=1, order=NULL) for the
+         * remainder of its prime search, because a posted task cannot be
+         * withdrawn. A reload runs drop_order() inside the live event loop and
+         * re-arms the kick, so the next order can reach finalize while that
+         * orphan is still running. Failing here would lose that name's
+         * issuance and log an ALERT blaming an invariant that is intact.
+         *
+         * Generate inline instead — one stall, same fallback as the no-pool
+         * case below — and keep the ALERT for the genuinely impossible state:
+         * a busy slot still ATTACHED to an order, which would mean two orders
+         * are in flight at once.
+         */
+        if (ngx_autocert_keygen.order != NULL) {
+            ngx_log_error(NGX_LOG_ALERT, order->log, 0,
+                          "autocert: certificate keygen slot busy");
+            return NGX_ERROR;
+        }
+
+        ngx_log_error(NGX_LOG_WARN, order->log, 0,
+                      "autocert: an abandoned keygen task is still in flight; "
+                      "generating the RSA certificate key on the event loop "
+                      "for \"%V\"", &order->domain);
+        order->cert_key = ngx_http_autocert_key_generate(curve);
+        if (order->cert_key == NULL) {
+            ngx_log_error(NGX_LOG_ERR, order->log, 0,
+                          "autocert: certificate key generation failed");
+            return NGX_ERROR;
+        }
+        return ngx_autocert_order_finalize_csr(order);
     }
 
     tp = ngx_thread_pool_get((ngx_cycle_t *) ngx_cycle, &name);

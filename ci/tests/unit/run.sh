@@ -452,7 +452,7 @@ bash "$WORKSPACE/ci/tests/unit/extract_seedchunk.sh"
 bash "$WORKSPACE/ci/tests/unit/extract_keygen.sh"
 # shellcheck disable=SC2086
 "$CC" $SANITIZE_CFLAGS $EXTRA_CFLAGS -D_GNU_SOURCE -DNGX_THREADS=1 \
-	-Wall -Wextra -Werror -Ici/tests/unit -I"$WORKSPACE" \
+	-Wall -Wextra -Werror -I"$WORKSPACE/ci/tests/unit" -I"$WORKSPACE" \
 	$HTTP_INC \
 	-o "$BUILD_DIR/test_keygen_offload" \
 	"$WORKSPACE/ci/tests/unit/test_keygen_offload.c" \
