@@ -377,6 +377,30 @@ bash "$WORKSPACE/ci/tests/unit/extract_orphan.sh"
 	"$WORKSPACE/ci/tests/unit/test_orphan_reap.c" $SANITIZE_LIBS
 "$BUILD_DIR/test_orphan_reap"
 
+# A6 chunked runtime-marker store walk (audit MINOR/Performance):
+# ngx_autocert_runtime_seed() used to readdir() the whole store top level
+# synchronously on worker 0's event loop, from BOTH init_process and the
+# relock handler -- a reload-time stall proportional to tenant count. The walk
+# is now bounded to NGX_AUTOCERT_SEED_CHUNK entries per tick and resumes from
+# the live DIR* cursor. This test plants a real store LARGER than one chunk and
+# pins that the chunked walk recovers exactly the one-shot walk's host set, at
+# every chunk size (no boundary is special), that skipped entry kinds
+# (dotfile/marker-less/plain file/empty/oversized/symlink/FIFO) behave as
+# before, and that a mid-walk abort releases the DIR* and its container fd.
+# It carries its own negative control: a variant that drops the resume cursor
+# must recover a DIFFERENT set. extract_seedchunk.sh slices the chunk constant
+# and the per-entry marker read out of the shipped driver source (the whole .c
+# is the ACME driver -- order state machine, shm zones, OpenSSL, event loop --
+# far too heavy to include-shim), so the test stays locked to production code.
+bash "$WORKSPACE/ci/tests/unit/extract_seedchunk.sh"
+# shellcheck disable=SC2086
+"$CC" $SANITIZE_CFLAGS $EXTRA_CFLAGS -D_GNU_SOURCE -Wall -Wextra -Werror -Ici/tests/unit -I"$WORKSPACE" \
+	$CORE_INC \
+	-o "$BUILD_DIR/test_seed_chunk" \
+	"$WORKSPACE/ci/tests/unit/test_seed_chunk.c" \
+	"$NGX/objs/src/core/ngx_string.o" $SANITIZE_LIBS
+"$BUILD_DIR/test_seed_chunk"
+
 # Config-time name/contact validation (audit MINOR): server_name/
 # autocert_wildcard values land verbatim, unescaped, in the ACME newOrder
 # JSON and as a filesystem path segment; autocert_contact's email is
