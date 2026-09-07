@@ -388,10 +388,20 @@ bash "$WORKSPACE/ci/tests/unit/extract_orphan.sh"
 # (dotfile/marker-less/plain file/empty/oversized/symlink/FIFO) behave as
 # before, and that a mid-walk abort releases the DIR* and its container fd.
 # It carries its own negative control: a variant that drops the resume cursor
-# must recover a DIFFERENT set. extract_seedchunk.sh slices the chunk constant
-# and the per-entry marker read out of the shipped driver source (the whole .c
-# is the ACME driver -- order state machine, shm zones, OpenSSL, event loop --
-# far too heavy to include-shim), so the test stays locked to production code.
+# must recover a DIFFERENT set, run to an OBSERVED fixed point (a full chunk
+# adding no new host) rather than an imposed tick cap, and its reach is
+# asserted against an independent enumeration of what one chunk actually
+# covers -- not against NGX_AUTOCERT_SEED_CHUNK, so raising the constant
+# cannot make the control vacuous.
+# extract_seedchunk.sh slices the chunk constant, the per-entry marker read
+# AND the chunk loop itself (ngx_autocert_seed_walk_chunk -- budget, readdir
+# cursor advance, exhaustion check) out of the shipped driver source (the
+# whole .c is the ACME driver -- order state machine, shm zones, OpenSSL,
+# event loop -- far too heavy to include-shim), so the loop the test executes
+# is the shipped one and a cursor bug in driver.c fails here. Not covered:
+# ngx_autocert_runtime_seed_step's wrapper (shutdown guard, per-tick config
+# re-fetch, ngx_add_timer re-arm) and the cycle-bound per-entry decisions
+# behind the loop's handler hook, which need a live event loop.
 bash "$WORKSPACE/ci/tests/unit/extract_seedchunk.sh"
 # shellcheck disable=SC2086
 "$CC" $SANITIZE_CFLAGS $EXTRA_CFLAGS -D_GNU_SOURCE -Wall -Wextra -Werror -Ici/tests/unit -I"$WORKSPACE" \

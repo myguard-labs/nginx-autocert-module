@@ -25,8 +25,11 @@
  *      several different chunk budgets (1, 2, 7, CHUNK, CHUNK+1, huge)
  *      recovers an identical set, so no boundary is special;
  *   3. the DIR* cursor is not reset by a yield — resuming reads the NEXT
- *      entry, never the first one again (the mutation this test is the
- *      negative control for);
+ *      entry, never the first one again. The negative control drives the same
+ *      shipped loop with the cursor dropped at each yield, runs it to an
+ *      OBSERVED fixed point (a full chunk adding no new host) rather than a
+ *      tick cap, and asserts its reach equals an independent enumeration of
+ *      what one chunk actually covers;
  *   4. non-runtime entries (dotfile, plain file, marker-less dir, empty
  *      marker, oversized marker, FIFO marker, symlinked entry) are skipped
  *      exactly as the one-shot walk skipped them, and skips do NOT consume a
@@ -36,18 +39,27 @@
  *      counting live fds around an aborted walk, and under ASan/LSan in the
  *      sanitized lane.
  *
- * WHAT THIS DOES NOT COVER: the shm half of each entry's decision
- * (ngx_autocert_name_is_config / ngx_autocert_name_due /
- * ngx_autocert_requests_ensure) and the ngx_add_timer re-arm. Those need a
- * live cycle, an initialized requests zone and the nginx event loop, which
- * this suite has no harness for; they are unchanged by this commit (the
- * chunked loop calls them in the same order, with the same arguments, on the
- * same entries) and are exercised by ci/tests/e2e/runtime-issue.sh.
+ * THE LOOP UNDER TEST IS THE SHIPPED ONE. ngx_autocert_seed_walk_chunk() —
+ * the budget accounting, the readdir cursor advance and the exhaustion check
+ * — is sliced out of ngx_autocert_driver.c by
+ * ci/tests/unit/extract_seedchunk.sh and executed here, alongside
+ * NGX_AUTOCERT_SEED_CHUNK and ngx_autocert_seed_read_marker(). The tests
+ * supply the DIR*, the budget and the per-entry handler exactly as
+ * ngx_autocert_runtime_seed_step() does in production; they do not
+ * re-implement the loop. A cursor bug introduced in driver.c — an exhaustion
+ * check moved so a chunk's last entry is dropped, an off-by-one in the budget
+ * — therefore fails this suite. The primitives are static in the driver (the
+ * whole ACME driver, far too heavy to include-shim), hence the slice rather
+ * than a link; it is locked to production code, with no copy drift.
  *
- * The primitives are static in ngx_autocert_driver.c — the whole ACME driver,
- * far too heavy to include-shim — so ci/tests/unit/extract_seedchunk.sh slices
- * JUST NGX_AUTOCERT_SEED_CHUNK and ngx_autocert_seed_read_marker() out of the
- * shipped source. Locked to production code, no copy drift.
+ * WHAT THIS DOES NOT COVER: ngx_autocert_runtime_seed_step()'s wrapper around
+ * the loop — the shutdown guard, the per-tick config re-fetch and the
+ * ngx_add_timer re-arm — and the shm half of each entry's decision
+ * (ngx_autocert_name_is_config / ngx_autocert_name_due /
+ * ngx_autocert_requests_ensure), which sits behind the loop's handler hook in
+ * the driver's ngx_autocert_seed_restore_entry(). Those need a live cycle, an
+ * initialized requests zone and the nginx event loop, which this suite has no
+ * harness for; they are exercised by ci/tests/e2e/runtime-issue.sh.
  *
  * Exit 0 = all pass; non-zero on first failure.
  */
@@ -117,7 +129,14 @@ ok(int cond, const char *what)
 
 /* ---------------------------------------------------------------- fixture */
 
-#define MAX_HOSTS  512
+/*
+ * Fixture capacity. Derived from NGX_AUTOCERT_SEED_CHUNK rather than fixed,
+ * because the store this suite plants is deliberately larger than one chunk:
+ * a hard-coded ceiling would turn a raised chunk constant into a fixture
+ * overflow ("one-shot walk failed") instead of a meaningful test run, which
+ * would quietly cost the cursor negative control its ability to discriminate.
+ */
+#define MAX_HOSTS  (NGX_AUTOCERT_SEED_CHUNK + 64)
 
 typedef struct {
     char    host[MAX_HOSTS][64];
@@ -210,7 +229,59 @@ plant_entry(const char *root, const char *dir, const char *content,
 
 
 /*
- * The chunked walk, reconstructed around the sliced production primitives.
+ * Per-entry sink handed to the SHIPPED chunk loop. Mirrors the driver's
+ * ngx_autocert_seed_restore_entry() in shape; here it just records the host
+ * into a set, because the cycle-bound decisions the driver makes at this
+ * point (name_is_config / name_due / requests_ensure) need an event loop and
+ * an shm zone this suite has no harness for.
+ *
+ * Records a SET, not a bag: the production walk visits each entry exactly
+ * once, so dedup is a no-op for it, but it matters for the cursor-reset
+ * mutation below, whose re-reads would otherwise inflate the count with
+ * duplicates and let a "recovered fewer hosts" assertion pass for the wrong
+ * reason. `*added` counts entries this call newly inserted, which is what the
+ * fixed-point detection in walk_chunked() observes.
+ */
+typedef struct {
+    host_set_t  *out;
+    size_t       added;
+    int          overflow;
+} collect_ctx_t;
+
+
+static ngx_int_t
+collect_host(void *data, ngx_str_t *host)
+{
+    collect_ctx_t  *ctx = data;
+    char            h[64];
+
+    if (ctx->out->n >= MAX_HOSTS || host->len >= sizeof(ctx->out->host[0])) {
+        ctx->overflow = 1;
+        return NGX_DECLINED;
+    }
+
+    memcpy(h, host->data, host->len);
+    h[host->len] = '\0';
+
+    if (host_set_has(ctx->out, h)) {
+        return NGX_DECLINED;
+    }
+
+    memcpy(ctx->out->host[ctx->out->n], h, host->len + 1);
+    ctx->out->n++;
+    ctx->added++;
+
+    return NGX_OK;
+}
+
+
+/*
+ * Drive the SHIPPED chunk loop, ngx_autocert_seed_walk_chunk(), sliced out of
+ * ngx_autocert_driver.c. This function supplies only what
+ * ngx_autocert_runtime_seed_step() supplies in production — the DIR*, the
+ * budget, the scratch buffer, the handler — and the yield/resume decision
+ * driven by the loop's own NGX_DONE / NGX_AGAIN verdict. The cursor
+ * discipline under test is the shipped code's, not a re-implementation.
  *
  * `chunk` is the per-tick budget (NGX_AUTOCERT_SEED_CHUNK in production; the
  * tests vary it to prove no boundary is special). `*ticks` receives how many
@@ -219,22 +290,29 @@ plant_entry(const char *root, const char *dir, const char *content,
  *
  * `reset_cursor` models the mutation this walk must not have: re-opening the
  * directory at every yield instead of resuming from the live DIR* cursor.
- * The negative control drives the real walk and the mutated one over the same
- * store and requires them to disagree.
+ * It is NOT bounded by a tick cap — that would make the mutated walk's
+ * inability to advance an artefact of the test rather than a measured
+ * property. Instead it terminates on an OBSERVED FIXED POINT: a full chunk
+ * that adds no new host to the set. WALK_SPIN_LIMIT is a runaway guard only;
+ * hitting it is a FAILURE (returns -2), never a silent pass.
  */
+#define WALK_SPIN_LIMIT  1024
+
 static int
 walk_chunked(const char *root, size_t chunk, host_set_t *out, size_t *ticks,
     int reset_cursor)
 {
     DIR            *dh;
-    struct dirent  *de;
     int             cfd;
-    size_t          processed;
     u_char          buf[NGX_AUTOCERT_REQUEST_NAME_MAX];
-    ngx_str_t       host;
+    collect_ctx_t   ctx;
+    ngx_int_t       rc;
 
     out->n = 0;
     *ticks = 0;
+
+    ctx.out = out;
+    ctx.overflow = 0;
 
     cfd = open(root, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
     if (cfd == -1) {
@@ -249,56 +327,49 @@ walk_chunked(const char *root, size_t chunk, host_set_t *out, size_t *ticks,
     for ( ;; ) {
         (*ticks)++;
 
-        for (processed = 0; processed < chunk; processed++) {
+        ctx.added = 0;
 
-            de = readdir(dh);
-            if (de == NULL) {
-                (void) closedir(dh);     /* also closes cfd */
-                return 0;                /* enumeration exhausted */
-            }
+        /* THE SHIPPED LOOP. Budget accounting, readdir cursor advance and
+         * the exhaustion check all live in driver.c. */
+        rc = ngx_autocert_seed_walk_chunk(dh, cfd, (ngx_uint_t) chunk, buf,
+                                          collect_host, &ctx);
 
-            if (ngx_autocert_seed_read_marker(cfd, de->d_name, buf, &host)
-                != NGX_OK)
-            {
-                continue;
-            }
+        if (ctx.overflow) {
+            (void) closedir(dh);
+            return -1;
+        }
 
-            if (out->n >= MAX_HOSTS || host.len >= sizeof(out->host[0])) {
-                (void) closedir(dh);
-                return -1;
-            }
-
-            {
-                char  h[64];
-
-                memcpy(h, host.data, host.len);
-                h[host.len] = '\0';
-
-                /*
-                 * Recover a SET, not a bag. The production walk visits each
-                 * entry exactly once, so dedup is a no-op for it; but it
-                 * matters for the mutated walk below, whose re-reads would
-                 * otherwise inflate the count with duplicates and let a
-                 * "recovered fewer hosts" assertion pass for the wrong
-                 * reason.
-                 */
-                if (host_set_has(out, h)) {
-                    continue;
-                }
-                memcpy(out->host[out->n], h, host.len + 1);
-                out->n++;
-            }
+        if (rc == NGX_DONE) {
+            (void) closedir(dh);         /* also closes cfd */
+            return 0;                    /* enumeration exhausted */
         }
 
         /* Yield boundary. */
         if (reset_cursor) {
             /*
              * MUTATION MODEL: drop the resume cursor. A walk that re-opens
-             * the container at every yield never advances past its first
-             * chunk, so it recovers only the first chunk's hosts (and, for a
-             * store larger than one chunk, spins). Bounded here so the
-             * mutated walk terminates and the test can compare sets.
+             * the container at every yield re-reads the same reachable
+             * entries forever and never advances past them.
+             *
+             * Terminate on the OBSERVED fixed point: this chunk consumed its
+             * whole budget and contributed nothing new, so no further
+             * identical chunk ever will. That the mutated walk cannot make
+             * progress is thus measured here, not imposed by a tick cap.
              */
+            if (ctx.added == 0) {
+                (void) closedir(dh);
+                return 0;
+            }
+
+            if (*ticks >= WALK_SPIN_LIMIT) {
+                /* Not a fixed point after a very generous number of chunks:
+                 * the mutation model no longer behaves as described. Fail
+                 * loudly rather than returning a set the caller would treat
+                 * as meaningful. */
+                (void) closedir(dh);
+                return -2;
+            }
+
             (void) closedir(dh);
             cfd = open(root, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
             if (cfd == -1) {
@@ -309,12 +380,50 @@ walk_chunked(const char *root, size_t chunk, host_set_t *out, size_t *ticks,
                 (void) close(cfd);
                 return -1;
             }
-            if (*ticks >= 4) {           /* enough to show the divergence */
-                (void) closedir(dh);
-                return 0;
-            }
         }
     }
+}
+
+
+/*
+ * How many DISTINCT hosts a single chunk of `chunk` entries can reach from a
+ * fresh cursor, enumerated directly rather than assumed from
+ * NGX_AUTOCERT_SEED_CHUNK. This is the oracle the cursor-reset negative
+ * control is asserted against: it is derived from what one chunk of this
+ * store actually yields (entries that are not runtime markers consume budget
+ * without contributing a host), so raising NGX_AUTOCERT_SEED_CHUNK moves both
+ * the mutated walk's reach and this expectation together, and the assertion
+ * keeps discriminating instead of going vacuous.
+ */
+static int
+first_chunk_hosts(const char *root, size_t chunk, host_set_t *out)
+{
+    DIR            *dh;
+    int             cfd;
+    u_char          buf[NGX_AUTOCERT_REQUEST_NAME_MAX];
+    collect_ctx_t   ctx;
+
+    out->n = 0;
+
+    ctx.out = out;
+    ctx.added = 0;
+    ctx.overflow = 0;
+
+    cfd = open(root, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (cfd == -1) {
+        return -1;
+    }
+    dh = fdopendir(cfd);
+    if (dh == NULL) {
+        (void) close(cfd);
+        return -1;
+    }
+
+    (void) ngx_autocert_seed_walk_chunk(dh, cfd, (ngx_uint_t) chunk, buf,
+                                        collect_host, &ctx);
+    (void) closedir(dh);
+
+    return ctx.overflow ? -1 : 0;
 }
 
 
@@ -480,29 +589,52 @@ main(void)
     }
 
     /* --- 3. NEGATIVE CONTROL: a walk that drops the resume cursor ---- */
-    if (walk_chunked(root, NGX_AUTOCERT_SEED_CHUNK, &mutated, &ticks, 1) != 0) {
-        fprintf(stderr, "mutated walk failed\n");
-        return 2;
+    {
+        int  mrc = walk_chunked(root, NGX_AUTOCERT_SEED_CHUNK, &mutated,
+                                &ticks, 1);
+
+        /* -2 is the runaway guard: the cursor-reset walk kept finding new
+         * hosts for WALK_SPIN_LIMIT chunks, so it never reached a fixed
+         * point and the mutation model no longer describes the code. That is
+         * a test failure, not a reason to accept whatever set came back. */
+        ok(mrc != -2,
+           "cursor-reset walk reaches a fixed point (runaway guard not hit)");
+        if (mrc != 0) {
+            fprintf(stderr, "mutated walk failed (rc=%d)\n", mrc);
+            return 2;
+        }
     }
     host_set_sort(&mutated);
     ok(!host_set_equal(&oneshot, &mutated),
        "dropping the resume cursor loses entries (negative control diverges)");
 
     /*
-     * Pin the SPECIFIC property, not merely "the sets differ". A walk that
-     * re-opens the container at every yield never advances past its first
-     * chunk, so it can recover AT MOST one chunk's worth of hosts and must
-     * therefore miss part of a store that is larger than one chunk. Set
-     * inequality alone would also be satisfied by the mutated walk merely
-     * duplicating hosts, which is a different (and weaker) failure.
+     * Pin the SPECIFIC property, not merely "the sets differ". Set inequality
+     * alone would also be satisfied by the mutated walk merely duplicating
+     * hosts, which is a different (and weaker) failure.
+     *
+     * The expectation is ENUMERATED, not derived from NGX_AUTOCERT_SEED_CHUNK:
+     * first_chunk_hosts() runs one chunk of the shipped loop over this same
+     * store from a fresh cursor and reports what it actually reaches. A walk
+     * that re-opens the container at every yield can never reach more than
+     * that, and the walk above terminated on an observed fixed point rather
+     * than a tick cap — so this compares two measurements of the code under
+     * test, and raising NGX_AUTOCERT_SEED_CHUNK moves both together instead of
+     * making the assertion vacuous.
      *
      * Asserted as a count rather than against one named entry: readdir order
      * is not specified, so WHICH hosts land in the reachable first chunk is
      * filesystem-dependent, but HOW MANY can ever be reached is not.
      */
-    ok(mutated.n <= NGX_AUTOCERT_SEED_CHUNK && mutated.n < oneshot.n,
-       "the resume-cursor mutation reaches at most one chunk, never the "
-       "whole store");
+    if (first_chunk_hosts(root, NGX_AUTOCERT_SEED_CHUNK, &sized) != 0) {
+        fprintf(stderr, "first_chunk_hosts failed\n");
+        return 2;
+    }
+    ok(mutated.n == sized.n,
+       "the resume-cursor mutation reaches exactly the hosts one chunk "
+       "enumerates, and no more");
+    ok(mutated.n < oneshot.n,
+       "the resume-cursor mutation never reaches the whole store");
 
     /* --- 4. non-runtime entries are skipped -------------------------- */
     {

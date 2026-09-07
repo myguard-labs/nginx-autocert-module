@@ -2356,15 +2356,11 @@ ngx_autocert_runtime_seed_step(ngx_event_t *ev);
 /*
  * Chunk size: entries processed per event-loop tick before yielding.
  *
- * Each entry costs at most openat(dir) + openat(marker) + fstat + read +
- * close x2 — five to six syscalls on already-warm dentries, plus an shm
- * rbtree lookup. 64 keeps a tick's worst case in the low hundreds of
- * microseconds even on a cold store, which is well inside the latency budget
- * of a worker that is simultaneously serving requests, while still amortising
- * the timer-dispatch overhead over enough entries that a 10k-name store
- * finishes in ~160 ticks rather than 10k. A power of two carries no
- * arithmetic benefit here; it is chosen for the same reason nginx's own
- * batch limits are — a round, easily-reasoned-about number.
+ * Each entry costs a handful of syscalls (openat x2, fstat, read, close x2)
+ * plus an shm rbtree lookup. 64 keeps a tick's worst case bounded on a worker
+ * that is simultaneously serving requests, while still amortising the
+ * timer-dispatch overhead over enough entries that a large store does not
+ * cost one tick per name.
  */
 #define NGX_AUTOCERT_SEED_CHUNK   64
 
@@ -2440,6 +2436,69 @@ ngx_autocert_seed_read_marker(int cfd, const char *name, u_char *buf,
     host->len = (size_t) n;
 
     return NGX_OK;
+}
+
+
+/*
+ * Per-entry sink for the chunk walk. Returns NGX_OK when the entry was
+ * consumed and NGX_DECLINED when it was skipped; the walk treats both the
+ * same (it only advances), so the distinction exists for the caller's own
+ * bookkeeping and for tests that need to observe which entries reached the
+ * sink. `ctx` is the caller's opaque state.
+ */
+typedef ngx_int_t (*ngx_autocert_seed_entry_pt)(void *ctx, ngx_str_t *host);
+
+
+/*
+ * Advance the seed walk's readdir cursor by at most `budget` entries,
+ * handing every entry that carries a valid runtime marker to `handler`.
+ *
+ * THIS IS THE CHUNK LOOP ITSELF — the cursor discipline whose failure modes
+ * (an entry dropped at a chunk boundary, an exhaustion check that eats the
+ * last entry of a chunk, a cursor that fails to resume) are the correctness
+ * risk chunking introduces. It is factored out of
+ * ngx_autocert_runtime_seed_step() precisely so it can be sliced into
+ * ci/tests/unit/test_seed_chunk.c and executed by the unit suite: everything
+ * here depends only on syscalls, ngx_str and ngx_autocert_seed_read_marker(),
+ * with the cycle-bound per-entry decisions (name_is_config / name_due /
+ * requests_ensure / set_state) living behind `handler` in the caller.
+ *
+ * `dh` is the live DIR* carrying the resume cursor and `cfd` the pinned
+ * store-container fd it was opened over; neither is closed here — release is
+ * ngx_autocert_runtime_seed_stop()'s job on every exit path.
+ *
+ * Returns NGX_DONE when readdir() exhausted the enumeration (the caller must
+ * stop and release the walk) and NGX_AGAIN when the budget was spent with
+ * entries still pending (the caller must yield and resume from this cursor).
+ * `buf` is caller-owned scratch of NGX_AUTOCERT_REQUEST_NAME_MAX bytes that
+ * backs the ngx_str_t handed to `handler`; it is not retained past the call.
+ */
+static ngx_int_t
+ngx_autocert_seed_walk_chunk(ngx_autocert_dir_t *dh, int cfd,
+    ngx_uint_t budget, u_char *buf, ngx_autocert_seed_entry_pt handler,
+    void *ctx)
+{
+    ngx_str_t              host;
+    ngx_uint_t             processed;
+    ngx_autocert_dirent_t *de;
+
+    for (processed = 0; processed < budget; processed++) {
+
+        de = ngx_autocert_readdir(dh);
+        if (de == NULL) {
+            return NGX_DONE;             /* enumeration exhausted */
+        }
+
+        if (ngx_autocert_seed_read_marker(cfd, de->d_name, buf, &host)
+            != NGX_OK)
+        {
+            continue;                    /* not a runtime entry: skip */
+        }
+
+        (void) handler(ctx, &host);
+    }
+
+    return NGX_AGAIN;                    /* budget spent, entries pending */
 }
 
 
@@ -2606,6 +2665,67 @@ ngx_autocert_runtime_seed(ngx_cycle_t *cycle)
 
 
 /*
+ * Per-entry seed decision: the cycle-bound half of the old inline chunk loop,
+ * now reached through ngx_autocert_seed_walk_chunk()'s handler hook. Every
+ * decision, its ordering and its logging are byte-identical to the inline
+ * version — only the call path changed.
+ */
+typedef struct {
+    ngx_cycle_t          *cycle;
+    ngx_autocert_conf_t  *acf;
+} ngx_autocert_seed_ctx_t;
+
+
+static ngx_int_t
+ngx_autocert_seed_restore_entry(void *data, ngx_str_t *host)
+{
+    ngx_autocert_seed_ctx_t  *ctx = data;
+
+    ngx_cycle_t          *cycle = ctx->cycle;
+    ngx_autocert_conf_t  *acf = ctx->acf;
+    ngx_int_t             rc;
+
+    if (ngx_autocert_name_is_config(host, NULL)) {
+        return NGX_DECLINED;             /* config sweep owns it now */
+    }
+
+    if (ngx_autocert_name_due(cycle, acf, host,
+                              ngx_autocert_seed_key_type))
+    {
+        /* Cert gone/expired while the process was down. Nothing valid to
+         * seed; do not fabricate an ISSUED state. Next label-autoconf
+         * discovery re-enqueues it via a fresh ensure(). */
+        return NGX_DECLINED;
+    }
+
+    /* REQ_UNKNOWN means the insert did not happen (bad zone/host), and
+     * REQ_DENIED is terminal — in neither case is there a node to move to
+     * ISSUED, so claiming a restore would be fail-open. Only log the
+     * restore once set_state() has actually committed it. */
+    rc = ngx_autocert_requests_ensure(acf->requests_zone, host);
+    if (rc == NGX_AUTOCERT_REQ_UNKNOWN || rc == NGX_AUTOCERT_REQ_DENIED) {
+        return NGX_DECLINED;
+    }
+
+    if (ngx_autocert_requests_set_state(acf->requests_zone, host,
+                                        NGX_AUTOCERT_REQ_ISSUED, 0)
+        != NGX_OK)
+    {
+        ngx_log_error(NGX_LOG_WARN, cycle->log, 0,
+                      "autocert: A6 could not restore runtime name \"%V\"",
+                      host);
+        return NGX_DECLINED;
+    }
+
+    ngx_log_error(NGX_LOG_NOTICE, cycle->log, 0,
+                  "autocert: A6 restored runtime name \"%V\" from disk",
+                  host);
+
+    return NGX_OK;
+}
+
+
+/*
  * One chunk of the A6 seed walk. Processes up to NGX_AUTOCERT_SEED_CHUNK
  * entries from the live DIR* cursor, then either re-arms at 0 ms (more
  * entries pending) or stops and releases the walk (enumeration exhausted).
@@ -2613,13 +2733,10 @@ ngx_autocert_runtime_seed(ngx_cycle_t *cycle)
 static void
 ngx_autocert_runtime_seed_step(ngx_event_t *ev)
 {
-    ngx_cycle_t           *cycle = ev->data;
-    ngx_autocert_conf_t    acf;
-    ngx_autocert_dirent_t *de;
-    u_char                 hostbuf[NGX_AUTOCERT_REQUEST_NAME_MAX];
-    ngx_str_t              host;
-    ngx_int_t              rc;
-    ngx_uint_t             processed;
+    ngx_cycle_t             *cycle = ev->data;
+    ngx_autocert_conf_t      acf;
+    ngx_autocert_seed_ctx_t  ctx;
+    u_char                   hostbuf[NGX_AUTOCERT_REQUEST_NAME_MAX];
 
     if (ngx_autocert_seed_dh == NULL) {
         return;                          /* no walk in flight (stale timer) */
@@ -2645,61 +2762,24 @@ ngx_autocert_runtime_seed_step(ngx_event_t *ev)
      * whose backing may already be freed.
      */
     if (ngx_autocert_get_conf(cycle, &acf) != NGX_OK
-        || acf.requests_zone == NULL)
+        || acf.requests_zone == NULL
+        || acf.path.len == 0)
     {
         ngx_autocert_runtime_seed_stop();
         return;
     }
 
-    for (processed = 0; processed < NGX_AUTOCERT_SEED_CHUNK; processed++) {
+    ctx.cycle = cycle;
+    ctx.acf = &acf;
 
-        de = ngx_autocert_readdir(ngx_autocert_seed_dh);
-        if (de == NULL) {
-            ngx_autocert_runtime_seed_stop();   /* enumeration exhausted */
-            return;
-        }
-
-        if (ngx_autocert_seed_read_marker(ngx_autocert_seed_cfd, de->d_name,
-                                          hostbuf, &host) != NGX_OK)
-        {
-            continue;                    /* not a runtime entry: skip */
-        }
-
-        if (ngx_autocert_name_is_config(&host, NULL)) {
-            continue;                    /* config sweep owns it now */
-        }
-
-        if (ngx_autocert_name_due(cycle, &acf, &host,
-                                  ngx_autocert_seed_key_type))
-        {
-            /* Cert gone/expired while the process was down. Nothing valid to
-             * seed; do not fabricate an ISSUED state. Next label-autoconf
-             * discovery re-enqueues it via a fresh ensure(). */
-            continue;
-        }
-
-        /* REQ_UNKNOWN means the insert did not happen (bad zone/host), and
-         * REQ_DENIED is terminal — in neither case is there a node to move to
-         * ISSUED, so claiming a restore would be fail-open. Only log the
-         * restore once set_state() has actually committed it. */
-        rc = ngx_autocert_requests_ensure(acf.requests_zone, &host);
-        if (rc == NGX_AUTOCERT_REQ_UNKNOWN || rc == NGX_AUTOCERT_REQ_DENIED) {
-            continue;
-        }
-
-        if (ngx_autocert_requests_set_state(acf.requests_zone, &host,
-                                            NGX_AUTOCERT_REQ_ISSUED, 0)
-            != NGX_OK)
-        {
-            ngx_log_error(NGX_LOG_WARN, cycle->log, 0,
-                          "autocert: A6 could not restore runtime name \"%V\"",
-                          &host);
-            continue;
-        }
-
-        ngx_log_error(NGX_LOG_NOTICE, cycle->log, 0,
-                      "autocert: A6 restored runtime name \"%V\" from disk",
-                      &host);
+    if (ngx_autocert_seed_walk_chunk(ngx_autocert_seed_dh,
+                                     ngx_autocert_seed_cfd,
+                                     NGX_AUTOCERT_SEED_CHUNK, hostbuf,
+                                     ngx_autocert_seed_restore_entry, &ctx)
+        == NGX_DONE)
+    {
+        ngx_autocert_runtime_seed_stop();   /* enumeration exhausted */
+        return;
     }
 
     /*
