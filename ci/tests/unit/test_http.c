@@ -496,6 +496,360 @@ test_hdr_scan_cursor(void)
 }
 
 
+/*
+ * ---- fragmentation-parity harness ----
+ *
+ * For one response, the WHOLE-parse result (rc, status, every captured
+ * header name/value, content_length, decoded body) is the reference. Every
+ * split delivery of the SAME bytes -- at every offset 1..len-1 as a two-feed
+ * delivery, plus one byte at a time -- must reach an IDENTICAL result. This
+ * tests invariance under fragmentation, not what the parser should decide:
+ * whatever the whole-parse verdict is (accept or reject) is also the
+ * required split verdict.
+ *
+ * A captured header ngx_str_t is a POOL COPY (see the "Copy into the pool"
+ * comment in ngx_autocert_acme_parse_response), not an alias into the recv
+ * buffer, so comparing captured bytes after the recv buffer is torn down /
+ * reallocated is exactly the aliasing hazard this harness is built to catch:
+ * if a future change captured a pointer into the recv buffer instead, a
+ * grown-and-copied buffer (below) would leave that pointer dangling into the
+ * abandoned old allocation, and the byte comparison here would read
+ * whatever garbage now occupies that freed memory.
+ */
+
+typedef struct {
+    ngx_int_t   rc;
+    ngx_uint_t  status;
+    ngx_uint_t  nheaders;
+    ngx_str_t   hnames[32];
+    ngx_str_t   hvalues[32];
+    off_t       content_length;
+    ngx_str_t   body;
+} parse_result_t;
+
+/* Deep-copy r's observable result out of the pool before ngx_http_fuzz_pool_reset
+ * frees it, so a reference captured from the whole-parse run survives long
+ * enough to be compared against later split runs. */
+static void
+snapshot_result(ngx_int_t rc, ngx_autocert_acme_request_t *r,
+    parse_result_t *out)
+{
+    ngx_uint_t  i, n;
+
+    memset(out, 0, sizeof(*out));
+    out->rc = rc;
+    out->status = r->status;
+    out->content_length = r->content_length;
+
+    if (rc == NGX_DONE) {
+        out->body.len = r->body_out.len;
+        if (out->body.len) {
+            out->body.data = malloc(out->body.len);
+            memcpy(out->body.data, r->body_out.data, out->body.len);
+        }
+    }
+
+    if (r->headers != NULL) {
+        n = r->headers->nelts;
+        if (n > 32) {
+            n = 32;         /* corpus never exceeds this; guard, not a clamp */
+        }
+        out->nheaders = r->headers->nelts;
+        for (i = 0; i < n; i++) {
+            ngx_autocert_acme_header_t  *h =
+                &((ngx_autocert_acme_header_t *) r->headers->elts)[i];
+
+            out->hnames[i].len = h->name.len;
+            out->hnames[i].data = malloc(h->name.len ? h->name.len : 1);
+            memcpy(out->hnames[i].data, h->name.data, h->name.len);
+
+            out->hvalues[i].len = h->value.len;
+            out->hvalues[i].data = malloc(h->value.len ? h->value.len : 1);
+            memcpy(out->hvalues[i].data, h->value.data, h->value.len);
+        }
+    }
+}
+
+static void
+free_result(parse_result_t *res)
+{
+    ngx_uint_t  i, n;
+
+    n = res->nheaders > 32 ? 32 : res->nheaders;
+    for (i = 0; i < n; i++) {
+        free(res->hnames[i].data);
+        free(res->hvalues[i].data);
+    }
+    free(res->body.data);
+}
+
+/* Feed resp[0,len) into parse_response via 'feeds' cumulative sizes, starting
+ * the recv buffer at buf_init bytes and growing it (copy old->new, exactly
+ * like ngx_autocert_acme_read_handler's single jump-to-ceiling realloc) the
+ * moment a feed needs more than the buffer currently holds. Returns the final
+ * rc and leaves *r populated for snapshotting. */
+static ngx_int_t
+parse_resp_grow(const char *resp, size_t len, const size_t *feeds,
+    size_t nfeeds, size_t buf_init, ngx_autocert_acme_request_t *r)
+{
+    ngx_buf_t  *b;
+    size_t      cap = buf_init;
+    size_t      i;
+    ngx_int_t   rc = NGX_AGAIN;
+
+    req_init(r);
+    b = ngx_pnalloc(&pool, sizeof(ngx_buf_t));
+    b->start = ngx_pnalloc(&pool, cap ? cap : 1);
+    b->pos = b->start;
+    b->last = b->start;
+    b->end = b->start + cap;
+    r->recv = b;
+
+    for (i = 0; i < nfeeds; i++) {
+        size_t  upto = feeds[i];
+        size_t  used = b->last - b->start;
+
+        CHECK(upto <= len, "grow: feed size within response length");
+
+        if (upto > cap) {
+            /* grow: fresh allocation, copy live bytes, abandon the old one --
+             * mirrors the real read handler's realloc-and-copy exactly. */
+            u_char  *nb;
+
+            cap = len > cap * 2 ? len : cap * 2;
+            nb = ngx_pnalloc(&pool, cap);
+            memcpy(nb, b->start, used);
+            b->start = nb;
+            b->pos = nb;
+            b->last = nb + used;
+            b->end = nb + cap;
+        }
+
+        memcpy((void *) (b->start + used), resp + used, upto - used);
+        b->last = b->start + upto;
+
+        rc = ngx_autocert_acme_parse_response(r);
+        if (rc != NGX_AGAIN) {
+            break;
+        }
+    }
+
+    return rc;
+}
+
+static int  parity_failures;
+
+/* Compare a split/grown run's result against the whole-parse reference.
+ * Names the case and the split offset in the failure message so a
+ * regression is diagnosable, per the item's done criterion. */
+static void
+assert_parity(const parse_result_t *ref, ngx_int_t rc,
+    ngx_autocert_acme_request_t *r, const char *case_label, long split)
+{
+    parse_result_t  got;
+    char            msg[256];
+    int             ok = 1;
+    ngx_uint_t      i, n;
+
+    snapshot_result(rc, r, &got);
+
+    if (got.rc != ref->rc) {
+        ok = 0;
+    } else if (ref->rc == NGX_DONE) {
+        if (got.status != ref->status
+            || got.content_length != ref->content_length
+            || got.nheaders != ref->nheaders
+            || got.body.len != ref->body.len
+            || (got.body.len
+                && memcmp(got.body.data, ref->body.data, got.body.len) != 0))
+        {
+            ok = 0;
+        } else {
+            n = ref->nheaders > 32 ? 32 : ref->nheaders;
+            for (i = 0; i < n; i++) {
+                if (got.hnames[i].len != ref->hnames[i].len
+                    || memcmp(got.hnames[i].data, ref->hnames[i].data,
+                              got.hnames[i].len) != 0
+                    || got.hvalues[i].len != ref->hvalues[i].len
+                    || memcmp(got.hvalues[i].data, ref->hvalues[i].data,
+                              got.hvalues[i].len) != 0)
+                {
+                    ok = 0;
+                    break;
+                }
+            }
+        }
+    }
+
+    snprintf(msg, sizeof(msg),
+             "parity[%s]: split@%ld matches whole-parse reference "
+             "(rc=%ld vs ref rc=%ld)",
+             case_label, split, (long) got.rc, (long) ref->rc);
+    CHECK(ok, msg);
+    if (!ok) {
+        parity_failures++;
+    }
+    free_result(&got);
+}
+
+/*
+ * Drive one response case through: (a) whole-shot reference, (b) every
+ * two-feed split point i in 1..len-1, (c) byte-at-a-time, (d) a grown-buffer
+ * variant that starts small (below the response length, forcing at least one
+ * realloc) split at a hand-picked interior point. All must match (a).
+ */
+static void
+parity_case(const char *label, const char *resp)
+{
+    ngx_autocert_acme_request_t  r;
+    parse_result_t                ref;
+    ngx_int_t                     rc;
+    size_t                        len = strlen(resp);
+    size_t                        i;
+
+    /* (a) whole-shot reference */
+    rc = parse_resp(resp, len, &r);
+    snapshot_result(rc, &r, &ref);
+    ngx_http_fuzz_pool_reset(&pool);
+
+    /* (b) every two-feed split point */
+    for (i = 1; i < len; i++) {
+        size_t  feeds[2];
+
+        feeds[0] = i;
+        feeds[1] = len;
+        rc = parse_resp_incremental(resp, feeds, 2, &r);
+        assert_parity(&ref, rc, &r, label, (long) i);
+        ngx_http_fuzz_pool_reset(&pool);
+    }
+
+    /* (c) byte-at-a-time (worst-case fragmentation) */
+    {
+        size_t  *feeds = malloc(len * sizeof(size_t));
+
+        for (i = 0; i < len; i++) {
+            feeds[i] = i + 1;
+        }
+        rc = parse_resp_incremental(resp, feeds, len, &r);
+        assert_parity(&ref, rc, &r, label, -1);
+        ngx_http_fuzz_pool_reset(&pool);
+        free(feeds);
+    }
+
+    /* (d) forced buffer growth: start at a quarter of the response (at least
+     * 8 bytes so short responses still force one realloc before EOF), split
+     * at the midpoint so growth happens mid-parse rather than on the last
+     * feed. */
+    {
+        size_t  buf_init = len / 4;
+        size_t  feeds[2];
+
+        if (buf_init < 8) {
+            buf_init = 8;
+        }
+        if (buf_init >= len) {
+            buf_init = len > 1 ? len - 1 : 1;
+        }
+
+        feeds[0] = len / 2 ? len / 2 : 1;
+        if (feeds[0] < buf_init) {
+            feeds[0] = buf_init;
+        }
+        feeds[1] = len;
+
+        rc = parse_resp_grow(resp, len, feeds, 2, buf_init, &r);
+        assert_parity(&ref, rc, &r, label, -2);
+        ngx_http_fuzz_pool_reset(&pool);
+    }
+
+    free_result(&ref);
+}
+
+static void
+test_hdr_split_parity(void)
+{
+    /* status line variants (both accepted and rejected whole-parse) */
+    parity_case("status HTTP/1.1 200",
+                "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n");
+    parity_case("status HTTP/1.0 404",
+                "HTTP/1.0 404 Not Found\r\nContent-Length: 0\r\n\r\n");
+    parity_case("status HTTP/2.0 rejected",
+                "HTTP/2.0 200 OK\r\nContent-Length: 0\r\n\r\n");
+    parity_case("status out-of-range 600 rejected",
+                "HTTP/1.1 600 X\r\nContent-Length: 0\r\n\r\n");
+    parity_case("status non-numeric rejected",
+                "HTTP/1.1 2zz OK\r\nContent-Length: 0\r\n\r\n");
+
+    /* CRLF placement: a lone CR / bare LF inside header content is not a
+     * line terminator (only CRLF is) -- both must still parse consistently
+     * (as whatever the whole-parse decides) under fragmentation. */
+    parity_case("lone CR in header value",
+                "HTTP/1.1 200 OK\r\nX-Odd: a\rb\r\nContent-Length: 0\r\n\r\n");
+    parity_case("bare LF in header value",
+                "HTTP/1.1 200 OK\r\nX-Odd: a\nb\r\nContent-Length: 0\r\n\r\n");
+
+    /* multiple headers, duplicate header names, empty header value */
+    parity_case("multiple + duplicate + empty-value headers",
+                "HTTP/1.1 200 OK\r\n"
+                "X-A: 1\r\n"
+                "X-B: 2\r\n"
+                "X-A: 3\r\n"
+                "X-Empty:\r\n"
+                "Content-Length: 0\r\n\r\n");
+
+    /* "obs-fold" (leading-whitespace continuation line): this parser has no
+     * defined folding behavior -- it splits strictly on CRLF and ":", so a
+     * folded continuation is just another line. It has no colon, so the
+     * generic "skip a line with no colon" path applies and the continuation
+     * contributes nothing to the preceding header's value. That is the
+     * whole-parse verdict under test here, not a claim it is RFC-correct. */
+    parity_case("obs-fold-shaped continuation (no colon on cont. line)",
+                "HTTP/1.1 200 OK\r\n"
+                "X-Folded: start\r\n"
+                " continued\r\n"
+                "Content-Length: 0\r\n\r\n");
+
+    /* chunk extensions on a non-final chunk */
+    parity_case("chunk extension on data chunk",
+                "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n"
+                "5;ext=1\r\nhello\r\n0\r\n\r\n");
+    parity_case("chunk extension with quoted-ish value",
+                "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n"
+                "a;name=value\r\n0123456789\r\n0\r\n\r\n");
+
+    /* multi-chunk body */
+    parity_case("multi-chunk body",
+                "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n"
+                "4\r\nWiki\r\n5\r\npedia\r\n"
+                "E\r\n in\r\n\r\nchunks.\r\n0\r\n\r\n");
+
+    /* trailer WITH closing empty line (accepted) */
+    parity_case("trailer with closing empty line",
+                "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n"
+                "5\r\nhello\r\n0\r\nFoo: x\r\n\r\n");
+
+    /* trailer WITHOUT closing empty line (incomplete, AGAIN whole-parse) */
+    parity_case("trailer without closing empty line",
+                "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n"
+                "5\r\nhello\r\n0\r\nFoo: x\r\n");
+
+    /* Content-Length vs chunked conflict (rejected) */
+    parity_case("Content-Length + chunked conflict",
+                "HTTP/1.1 200 OK\r\nContent-Length: 5\r\n"
+                "Transfer-Encoding: chunked\r\n\r\nhello");
+
+    /* Content-Length body, exact and short (AGAIN) */
+    parity_case("Content-Length exact body",
+                "HTTP/1.1 200 OK\r\nContent-Length: 11\r\n\r\nhello world");
+    parity_case("Content-Length short body stays AGAIN",
+                "HTTP/1.1 200 OK\r\nContent-Length: 11\r\n\r\nhello");
+
+    CHECK(parity_failures == 0,
+          "hdr_split_parity: no split/grow delivery diverged from any "
+          "whole-parse reference");
+}
+
+
 int
 main(void)
 {
@@ -507,6 +861,7 @@ main(void)
     test_status_line();
     test_body_framing();
     test_hdr_scan_cursor();
+    test_hdr_split_parity();
 
     if (failures) {
         fprintf(stderr, "\n%d test(s) FAILED\n", failures);
