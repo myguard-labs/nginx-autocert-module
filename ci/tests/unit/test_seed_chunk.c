@@ -34,10 +34,13 @@
  *      marker, oversized marker, FIFO marker, symlinked entry) are skipped
  *      exactly as the one-shot walk skipped them, and skips do NOT consume a
  *      wrong slot in the recovered set;
- *   5. closedir() on the DIR* releases the container fd — mid-walk abort
- *      (the shutdown path) leaks neither the DIR* nor the fd. Checked by
- *      counting live fds around an aborted walk, and under ASan/LSan in the
- *      sanitized lane.
+ *   5. closedir() on a DIR* abandoned mid-enumeration releases the container
+ *      fd it was handed — the OWNERSHIP CONTRACT that
+ *      ngx_autocert_runtime_seed_stop() relies on. Checked by counting live
+ *      fds around a chunk driven through the shipped loop, and under ASan/LSan
+ *      in the sanitized lane. NOTE: seed_stop() itself is NOT executed here —
+ *      it touches file-scope seed state and a timer, neither of which is
+ *      sliced. This pins the contract, not that call site.
  *
  * THE LOOP UNDER TEST IS THE SHIPPED ONE. ngx_autocert_seed_walk_chunk() —
  * the budget accounting, the readdir cursor advance and the exhaustion check
@@ -528,7 +531,7 @@ main(void)
 
     if (mkdtemp(root) == NULL) {
         fprintf(stderr, "mkdtemp failed\n");
-        return 2;
+        goto fail;
     }
 
     /* --- plant a store larger than one chunk ------------------------- */
@@ -537,14 +540,14 @@ main(void)
         (void) snprintf(content, sizeof(content), "e%03zu.example.com", i);
         if (plant_entry(root, name, content, strlen(content)) != 0) {
             fprintf(stderr, "plant_entry failed for %s\n", name);
-            return 2;
+            goto fail;
         }
     }
 
     /* --- 1. chunked walk recovers the whole store -------------------- */
     if (walk_oneshot(root, &oneshot) != 0) {
         fprintf(stderr, "one-shot walk failed\n");
-        return 2;
+        goto fail;
     }
     host_set_sort(&oneshot);
     ok(oneshot.n == n_entries,
@@ -555,7 +558,7 @@ main(void)
        "chunked walk advances its cursor (runaway guard not hit)");
     if (crc != 0) {
         fprintf(stderr, "chunked walk failed (rc=%d)\n", crc);
-        return 2;
+        goto fail;
     }
     host_set_sort(&chunked);
 
@@ -614,7 +617,7 @@ main(void)
            "cursor-reset walk reaches a fixed point (runaway guard not hit)");
         if (mrc != 0) {
             fprintf(stderr, "mutated walk failed (rc=%d)\n", mrc);
-            return 2;
+            goto fail;
         }
     }
     host_set_sort(&mutated);
@@ -641,7 +644,7 @@ main(void)
      */
     if (first_chunk_hosts(root, NGX_AUTOCERT_SEED_CHUNK, &sized) != 0) {
         fprintf(stderr, "first_chunk_hosts failed\n");
-        return 2;
+        goto fail;
     }
     ok(mutated.n == sized.n,
        "the resume-cursor mutation reaches exactly the hosts one chunk "
@@ -693,7 +696,7 @@ main(void)
            "skip-fixture walk advances its cursor (runaway guard not hit)");
         if (krc != 0) {
             fprintf(stderr, "skip walk failed (rc=%d)\n", krc);
-            return 2;
+            goto fail;
         }
         host_set_sort(&chunked);
 
@@ -715,27 +718,45 @@ main(void)
         cfd = open(root, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
         if (cfd == -1) {
             fprintf(stderr, "open store for abort test failed\n");
-            return 2;
+            goto fail;
         }
         dh = fdopendir(cfd);
         if (dh == NULL) {
             (void) close(cfd);
             fprintf(stderr, "fdopendir for abort test failed\n");
-            return 2;
+            goto fail;
         }
 
-        /* consume one chunk, then abort as the shutdown guard does */
-        for (i = 0; i < NGX_AUTOCERT_SEED_CHUNK; i++) {
-            if (readdir(dh) == NULL) {
-                break;
-            }
+        /*
+         * Consume one chunk through the SHIPPED loop, then release exactly as
+         * ngx_autocert_runtime_seed_stop() does: closedir() alone, which owns
+         * the container fd it was handed (shared.h's fdopendir contract).
+         *
+         * This pins the OWNERSHIP CONTRACT the driver's shutdown path relies
+         * on -- that a DIR* abandoned mid-enumeration needs no separate
+         * close(cfd). It does NOT execute ngx_autocert_runtime_seed_stop()
+         * itself: that function touches the file-scope seed state and a timer,
+         * neither of which is sliced here.
+         */
+        {
+            u_char         abuf[NGX_AUTOCERT_REQUEST_NAME_MAX];
+            collect_ctx_t  actx;
+            host_set_t     aset;
+
+            aset.n = 0;
+            actx.out = &aset;
+            actx.added = 0;
+            actx.overflow = 0;
+
+            (void) ngx_autocert_seed_walk_chunk(dh, cfd,
+                       NGX_AUTOCERT_SEED_CHUNK, abuf, collect_host, &actx);
         }
         (void) closedir(dh);             /* the ONLY release, closes cfd too */
 
         fds_after = count_open_fds();
         ok(fds_after == fds_before,
-           "aborting the walk mid-enumeration leaks neither the DIR* nor "
-           "the container fd");
+           "closedir() on a mid-enumeration DIR* releases the container fd "
+           "(the ownership contract seed_stop() depends on)");
     }
 
     /* --- cleanup ----------------------------------------------------- */
@@ -747,4 +768,13 @@ main(void)
     }
     printf("\nall tests passed\n");
     return 0;
+
+    /*
+     * Harness bail-out (setup/syscall failure, not an assertion failure).
+     * Every such path routes here so the mkdtemp'd store is removed instead of
+     * being left behind in /tmp on each run.
+     */
+fail:
+    remove_store(root);
+    return 2;
 }
