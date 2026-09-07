@@ -600,13 +600,22 @@ snapshot_result(ngx_int_t rc, ngx_autocert_acme_request_t *r,
             ngx_autocert_acme_header_t  *h =
                 &((ngx_autocert_acme_header_t *) r->headers->elts)[i];
 
+            /*
+             * A zero-length name/value is copied as NULL rather than a
+             * 1-byte allocation: dup'ing one byte of a zero-length source
+             * reads an uninitialized byte (ASan does not see it, MSan
+             * would). free(NULL) and memcmp(..., 0) are both safe on the
+             * paths that touch these, so NULL is the honest representation.
+             */
             out->hnames[i].len = h->name.len;
-            out->hnames[i].data = parity_dup(h->name.data,
-                                             h->name.len ? h->name.len : 1);
+            out->hnames[i].data = h->name.len
+                                  ? parity_dup(h->name.data, h->name.len)
+                                  : NULL;
 
             out->hvalues[i].len = h->value.len;
-            out->hvalues[i].data = parity_dup(h->value.data,
-                                              h->value.len ? h->value.len : 1);
+            out->hvalues[i].data = h->value.len
+                                   ? parity_dup(h->value.data, h->value.len)
+                                   : NULL;
         }
     }
 }
@@ -722,12 +731,20 @@ assert_parity(const parse_result_t *ref, ngx_int_t rc,
             n = ref->nheaders > PARITY_MAX_HDRS
                 ? PARITY_MAX_HDRS : ref->nheaders;
             for (i = 0; i < n; i++) {
+                /*
+                 * Length first, and bytes only when there ARE bytes: a
+                 * zero-length field is snapshotted as NULL, and
+                 * memcmp(NULL, NULL, 0) is undefined (UBSan rejects a NULL
+                 * argument to a nonnull parameter even with n == 0).
+                 */
                 if (got.hnames[i].len != ref->hnames[i].len
-                    || memcmp(got.hnames[i].data, ref->hnames[i].data,
-                              got.hnames[i].len) != 0
+                    || (got.hnames[i].len
+                        && memcmp(got.hnames[i].data, ref->hnames[i].data,
+                                  got.hnames[i].len) != 0)
                     || got.hvalues[i].len != ref->hvalues[i].len
-                    || memcmp(got.hvalues[i].data, ref->hvalues[i].data,
-                              got.hvalues[i].len) != 0)
+                    || (got.hvalues[i].len
+                        && memcmp(got.hvalues[i].data, ref->hvalues[i].data,
+                                  got.hvalues[i].len) != 0))
                 {
                     ok = 0;
                     break;
