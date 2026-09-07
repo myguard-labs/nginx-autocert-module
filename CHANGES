@@ -1,5 +1,15 @@
 Changes unreleased
 
+    *) Change: an unused shared-memory zone is no longer created. The zone
+       published the set of autocert-enabled server names into shared memory
+       on every load and reload, but nothing ever read it: the consumer it was
+       staged for was never built. It is removed rather than given an invented
+       consumer. Each reload now maps 256 KB less shared memory, and a
+       configuration with enough enabled names to exhaust that zone no longer
+       fails to reload for a reason that had no functional effect. The zone was
+       never documented and no directive sized or named it, so no configuration
+       needs to change.
+
     *) Change: the store directory and the stored private key are refused if
        they carry any group or other permission bits, or are not owned by the
        worker's effective uid. A store that previously worked while group-
