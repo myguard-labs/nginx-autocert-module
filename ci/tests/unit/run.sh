@@ -341,6 +341,24 @@ bash ci/tests/unit/extract_jsonsafe.sh
 	"$NGX/objs/src/os/unix/ngx_alloc.o" $SANITIZE_LIBS
 "$BUILD_DIR/test_account_jsonsafe"
 
+# Slice ngx_autocert_acme_log_safe from the shipped acme source. This helper
+# bounds and JSON-escapes CA-controlled bytes (URLs, response headers, problem
+# documents) before they reach the error log, preventing log injection attacks.
+# The function calls nginx core's ngx_escape_json (ngx_string.o) and uses
+# ngx_pnalloc (ngx_palloc.o) but never touches ngx_cycle itself — those are
+# only pulled in because ngx_string.o/ngx_palloc.o are linked as whole objects
+# and OTHER functions in them reference ngx_cycle/ngx_log_error_core. Same
+# stub-link idiom as test_ratecap.c.
+bash ci/tests/unit/extract_acme_logsafe.sh
+# shellcheck disable=SC2086
+"$CC" $SANITIZE_CFLAGS $EXTRA_CFLAGS -Wall -Wextra -Werror -Ici/tests/unit $CORE_INC \
+	-o "$BUILD_DIR/test_acme_logsafe" \
+	"$WORKSPACE/ci/tests/unit/test_acme_logsafe.c" \
+	"$NGX/objs/src/core/ngx_string.o" \
+	"$NGX/objs/src/core/ngx_palloc.o" \
+	"$NGX/objs/src/os/unix/ngx_alloc.o" $SANITIZE_LIBS
+"$BUILD_DIR/test_acme_logsafe"
+
 # Cert-cache freshness key (audit MINOR): mtime alone is whole-second
 # resolution and blind to an atomic rename landing a different file with a
 # coincidentally equal mtime, or two renewals inside one second. Slices the
