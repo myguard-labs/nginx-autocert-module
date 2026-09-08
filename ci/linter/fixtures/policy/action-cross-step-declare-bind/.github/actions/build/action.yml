@@ -1,0 +1,11 @@
+name: build
+description: fixture -- one step declares TEST_BASE_PORT, a sibling step binds it
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        TEST_BASE_PORT: '19820'
+      run: bash ci/tools/max-port.sh "$TEST_BASE_PORT"
+    - shell: bash
+      run: python3 ci/tools/test_runtime.py --port "$TEST_BASE_PORT"

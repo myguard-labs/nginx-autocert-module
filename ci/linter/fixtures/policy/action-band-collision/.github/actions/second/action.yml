@@ -1,0 +1,11 @@
+name: second
+description: fixture -- claims the SAME TEST_BASE_PORT 19830 as ../first
+env:
+  TEST_BASE_PORT: '19830'
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: bash ci/tools/max-port.sh "$TEST_BASE_PORT"
+    - shell: bash
+      run: python3 ci/tools/test_runtime.py --port "$TEST_BASE_PORT"

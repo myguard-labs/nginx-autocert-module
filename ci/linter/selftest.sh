@@ -148,6 +148,19 @@ policy_ 1 verify-after-bind ports
 # band left this check green.
 policy_ 1 prove-only-binder-exempt ports
 
+# Composite-action port checking must be at ACTION granularity, mirroring the
+# job-level treatment above -- not per-step, which cannot see an action-level
+# `env:` or a declaration made in a sibling step, and cannot enforce the
+# verifier-precedes-binder order rule inside `runs.steps` at all.
+policy_ 0 action-level-env-declared ports
+policy_ 0 action-cross-step-declare-bind ports
+
+# Two composite actions are both named action.yml, so a `where` built from
+# `path.name` alone names the same string for both sides of a collision and
+# identifies neither. Assert the message actually distinguishes them by path.
+policy_msg_ action-band-collision ports \
+    'actions/first/action\.yml and .*actions/second/action\.yml both claim TEST_BASE_PORT 19830'
+
 # Direct master `push:` and `schedule:` are deliberate member entry points;
 # neither duplicates the PR invocation. These green controls ensure cadence
 # remains focused on a second `pull_request:` trigger.

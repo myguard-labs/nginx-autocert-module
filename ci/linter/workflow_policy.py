@@ -369,6 +369,99 @@ def _order_finding(where: str, node: dict) -> str | None:
     )
 
 
+# Inline shell-assigned bands: `AC_TEST_PORT=18185 \` / `AC_TEST_PORT2=18191 \`
+# ahead of a script invocation. These never go through a YAML `env:` mapping,
+# so TEST_BASE_PORT's regex cannot see them -- but they claim a port exactly
+# like a declared band does, and the one action that actually binds ports
+# this way (build-module's e2e steps) must enter the uniqueness set or the
+# whole check is vacuous for it.
+#
+# NOT anchored to line-start: a multi-line `run:` block containing a shell
+# comment, `${{ }}` expression, or other special YAML character forces
+# yaml.safe_dump to re-emit it as one escaped double-quoted scalar, with the
+# original newlines flattened to literal "\n" text -- `(?m)^` never matches
+# mid-line, so the assignment would be invisible in exactly the body this
+# check exists to read.
+INLINE_PORT_RE = re.compile(r"(?:^|\\n)\s*AC_TEST_PORT[0-9]*=(\d+)\b")
+
+
+def _check_port_node(
+    where: str,
+    body: str,
+    bands: dict[str, str],
+    errors: list[str],
+    collision_scope: str,
+) -> None:
+    """The uniqueness/wiring checks shared by a workflow job and a composite
+    action, run once against ONE body string covering the whole node.
+
+    `where` identifies the node in error text; `collision_scope` is the tail
+    of the uniqueness-collision message ("ALL workflows" vs "ALL workflows and
+    actions") so the two call sites keep their existing wording.
+    """
+    declared = re.search(r"(?m)^\s*TEST_BASE_PORT:\s*[\"']?(\d+)", body)
+    starts_runtime = RUNTIME_DRIVER in body
+    binds_band = BINDER_RE.search(body) is not None
+
+    inline_ports = INLINE_PORT_RE.findall(body)
+    for port in inline_ports:
+        if port in bands:
+            errors.append(
+                f"{where} and {bands[port]} both claim AC_TEST_PORT "
+                f"{port} -- bands must be disjoint across {collision_scope}"
+            )
+        else:
+            bands[port] = where
+
+    # THE CHECK THAT MATTERS MOST. A new runtime-bearing job added later
+    # with no band is invisible to the uniqueness check below (it
+    # declares nothing to collide), silently takes the driver's default
+    # --port, and reintroduces exactly the cross-job collision the bands
+    # exist to prevent: two jobs pinned to the same runner, disjoint
+    # concurrency groups, nothing serialising them, both binding 18880.
+    # Any BINDER (not just the runtime driver) owes this declaration --
+    # `prove` and coverage.sh are binders too (see BINDERS above), and a
+    # job whose only binder is `prove` was exempt here while still being
+    # treated as a binder by the ordering check. That gap is a live
+    # negative-control failure downstream: deleting a prove-only job's
+    # band left this check GREEN.
+    if binds_band and not declared and not inline_ports:
+        errors.append(
+            f"{where} binds a port (via "
+            f"{RUNTIME_DRIVER if starts_runtime else 'prove/coverage.sh'}) "
+            "without declaring TEST_BASE_PORT -- it would take the "
+            "default port and collide with any other runtime job on "
+            "the same runner"
+        )
+        return
+
+    if not declared:
+        return
+
+    port = declared.group(1)
+    if port in bands:
+        errors.append(
+            f"{where} and {bands[port]} both claim TEST_BASE_PORT "
+            f"{port} -- bands must be disjoint across {collision_scope}"
+        )
+    else:
+        bands[port] = where
+
+    # A declared band that is not passed through is decoration: the
+    # driver still binds its default.
+    if starts_runtime and "--port" not in body:
+        errors.append(
+            f"{where} declares TEST_BASE_PORT but never passes --port; "
+            "the driver would bind its default anyway"
+        )
+    if starts_runtime and "TEST_BASE_PORT" not in body.split("--port")[-1][:40]:
+        errors.append(
+            f"{where} passes --port with something other than "
+            "$TEST_BASE_PORT -- the declaration and the bind must be "
+            "the same value or they drift"
+        )
+
+
 def check_ports() -> int:
     errors: list[str] = []
     bands: dict[str, str] = {}  # port value -> "file:job" that claimed it
@@ -376,63 +469,13 @@ def check_ports() -> int:
     for path in workflows():
         doc = load(path)
         for job, node in jobs(doc):
-            body = _body(node)
-            declared = re.search(r"(?m)^\s*TEST_BASE_PORT:\s*[\"']?(\d+)", body)
-            starts_runtime = RUNTIME_DRIVER in body
-            binds_band = BINDER_RE.search(body) is not None
             where = f"{path.name}:{job}"
 
             order = _order_finding(where, node)
             if order:
                 errors.append(order)
 
-            # THE CHECK THAT MATTERS MOST. A new runtime-bearing job added later
-            # with no band is invisible to the uniqueness check below (it
-            # declares nothing to collide), silently takes the driver's default
-            # --port, and reintroduces exactly the cross-job collision the bands
-            # exist to prevent: two jobs pinned to the same runner, disjoint
-            # concurrency groups, nothing serialising them, both binding 18880.
-            # Any BINDER (not just the runtime driver) owes this declaration --
-            # `prove` and coverage.sh are binders too (see BINDERS above), and a
-            # job whose only binder is `prove` was exempt here while still being
-            # treated as a binder by the ordering check. That gap is a live
-            # negative-control failure downstream: deleting a prove-only job's
-            # band left this check GREEN.
-            if binds_band and not declared:
-                errors.append(
-                    f"{where} binds a port (via "
-                    f"{RUNTIME_DRIVER if starts_runtime else 'prove/coverage.sh'}) "
-                    "without declaring TEST_BASE_PORT -- it would take the "
-                    "default port and collide with any other runtime job on "
-                    "the same runner"
-                )
-                continue
-
-            if not declared:
-                continue
-
-            port = declared.group(1)
-            if port in bands:
-                errors.append(
-                    f"{where} and {bands[port]} both claim TEST_BASE_PORT "
-                    f"{port} -- bands must be disjoint across ALL workflows"
-                )
-            else:
-                bands[port] = where
-
-            # A declared band that is not passed through is decoration: the
-            # driver still binds its default.
-            if starts_runtime and "--port" not in body:
-                errors.append(
-                    f"{where} declares TEST_BASE_PORT but never passes --port; "
-                    "the driver would bind its default anyway"
-                )
-            if starts_runtime and "TEST_BASE_PORT" not in body.split("--port")[-1][:40]:
-                errors.append(
-                    f"{where} passes --port with something other than "
-                    "$TEST_BASE_PORT -- the declaration and the bind must be "
-                    "the same value or they drift"
-                )
+            _check_port_node(where, _body(node), bands, errors, "ALL workflows")
 
     for path in actions():
         doc = load(path)
@@ -442,48 +485,26 @@ def check_ports() -> int:
         steps = runs.get("steps")
         if not isinstance(steps, list):
             continue
-        for idx, step in enumerate(steps):
-            if not isinstance(step, dict):
-                continue
-            body = _body(step)
-            declared = re.search(r"(?m)^\s*TEST_BASE_PORT:\s*[\"']?(\d+)", body)
-            starts_runtime = RUNTIME_DRIVER in body
-            binds_band = BINDER_RE.search(body) is not None
-            where = f"{path.name}:runs.steps[{idx}]"
 
-            if binds_band and not declared:
-                errors.append(
-                    f"{where} binds a port (via "
-                    f"{RUNTIME_DRIVER if starts_runtime else 'prove/coverage.sh'}) "
-                    "without declaring TEST_BASE_PORT -- it would take the "
-                    "default port and collide with any other runtime job on "
-                    "the same runner"
-                )
-                continue
+        # Action-granularity, mirroring the job-level treatment above: an
+        # action-level `env:` sits on `doc`, not on any one step, and a
+        # declare-then-bind split across two sibling steps is invisible if
+        # each step's body is checked in isolation. Rooting the body dump
+        # at `doc` (which contains `runs`, which contains every step) puts
+        # the whole action's declarations and every step's binder calls in
+        # ONE substring search, closing both the action-level-env false
+        # positive and the cross-step-declaration false negative. The order
+        # check gets the same treatment: `runs` carries exactly the `steps`
+        # list `_order_finding` wants, so the verifier-precedes-binder rule
+        # applies to the action as a whole instead of going unchecked.
+        rel = path.relative_to(ROOT) if path.is_relative_to(ROOT) else path
+        where = str(rel)
 
-            if not declared:
-                continue
+        order = _order_finding(where, runs)
+        if order:
+            errors.append(order)
 
-            port = declared.group(1)
-            if port in bands:
-                errors.append(
-                    f"{where} and {bands[port]} both claim TEST_BASE_PORT "
-                    f"{port} -- bands must be disjoint across ALL workflows and actions"
-                )
-            else:
-                bands[port] = where
-
-            if starts_runtime and "--port" not in body:
-                errors.append(
-                    f"{where} declares TEST_BASE_PORT but never passes --port; "
-                    "the driver would bind its default anyway"
-                )
-            if starts_runtime and "TEST_BASE_PORT" not in body.split("--port")[-1][:40]:
-                errors.append(
-                    f"{where} passes --port with something other than "
-                    "$TEST_BASE_PORT -- the declaration and the bind must be "
-                    "the same value or they drift"
-                )
+        _check_port_node(where, _body(doc), bands, errors, "ALL workflows and actions")
 
     return report(
         "lint-ci-ports",

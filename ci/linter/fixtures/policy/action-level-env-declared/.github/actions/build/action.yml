@@ -1,0 +1,11 @@
+name: build
+description: fixture -- action-level env declares the band a step binds
+env:
+  TEST_BASE_PORT: '19810'
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: bash ci/tools/max-port.sh "$TEST_BASE_PORT"
+    - shell: bash
+      run: python3 ci/tools/test_runtime.py --port "$TEST_BASE_PORT"
