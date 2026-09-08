@@ -1054,11 +1054,20 @@ ngx_http_autocert_cert_cb(SSL *ssl_conn, void *arg)
          * A deferral also sets cert->deferred, which is passed back to the cap
          * on the next attempt. A denied name then draws on the cap's retry
          * reserve — a slice of each window that only previously-denied names
-         * may spend — so a sustained flood of fresh SNIs, which are all first
-         * attempts, cannot keep winning the whole budget ahead of it. Without
-         * that the window is first-come-first-served and a deferred name can be
-         * starved for as long as the flood lasts. Details and the bound:
-         * ngx_autocert_loadcap.h (FAIRNESS).
+         * may spend. In the window a flood starts, its names have never been
+         * denied, so they are all first attempts and cannot touch the reserve
+         * at all. Note this branch marks EVERY denial deferred, deliberately
+         * and without filtering (that is what keeps cache warm-up at full
+         * throughput after a reload), so from the next window the flood's own
+         * names are retries too and do compete for the reserve. What still
+         * bounds the damage is the `matched` gate above: a cache entry, and
+         * therefore a deferred bit, only ever exists for a configured,
+         * wildcard-covered or runtime-issued name, so the deferred set is
+         * capped by the OPERATOR's name set and cannot be inflated by
+         * attacker-chosen SNIs. The exact resulting property, including the
+         * threshold past which a last-arriving name can still be pushed back,
+         * is in ngx_autocert_loadcap.h (FAIRNESS) — it is NOT a ceil(D / R)
+         * bound.
          */
         if (now != cert->checked
             && ngx_autocert_loadcap_admit_retry_n(&ngx_autocert_cache_loadcap,

@@ -18,6 +18,15 @@
  *     assertion that goes red when the cap is neutered; the individual
  *     admit/deny checks above are satisfied by a no-op admit() only in part,
  *     so this one models the actual attack.
+ *   - FAIRNESS against the REAL adversary: serve.c marks EVERY denial
+ *     deferred, so a flood's own names come back as retries from the second
+ *     window and DO compete for the reserve. The strong "a flood can never
+ *     touch the reserve" claim holds for exactly one window. What bounds the
+ *     damage instead is serve.c's `matched` gate: only configured /
+ *     wildcard-covered / runtime-issued names ever get a cache entry, so the
+ *     deferred set is capped by the operator's name set. See FAIRNESS CASE 2
+ *     in main() for the measured bound and the threshold past which a
+ *     last-arriving name can still be starved.
  *
  * Exit 0 = all pass; non-zero on first failure.
  */
@@ -255,22 +264,23 @@ main(void)
           "not a permanent stall");
 
     /*
-     * --- FAIRNESS: a deferred name is retried within a BOUNDED number of
-     * windows under a sustained flood ---
+     * --- FAIRNESS, CASE 1: a flood whose names never re-present ---
      *
-     * This is the starvation the plain fixed window could not prevent. Model a
-     * client that opens enough distinct-SNI handshakes at the TOP of every
-     * window to drain whatever budget a first attempt can reach, and one
-     * legitimate name that arrives AFTER the flood in each window. On the
-     * unmodified fixed window the legitimate name is denied in window 1, and
-     * denied again in window 2, and in window 3, ... forever: the flood always
-     * gets there first and there is nothing it cannot spend. With the reserve,
-     * the legitimate name is a RETRY from window 2 onward and draws on a pool
-     * the flood -- made entirely of first attempts -- can never touch, so it
-     * loads in window 2.
+     * SCOPE, stated up front because the obvious reading of this case is
+     * WRONG: every flood request here passes retry = 0 in every window, so
+     * this models an attacker STRICTLY WEAKER than the real one. Real serve.c
+     * marks every denial cert->deferred = 1, so a real flood's names come back
+     * as retries from window 2. This case is kept only because it pins the one
+     * window where the strong property genuinely holds -- the window a flood
+     * STARTS, when its names have never been denied and so cannot reach the
+     * reserve at all. The honest bound against the real adversary is measured
+     * by CASE 2 below; do not read this assertion as the module's guarantee.
      *
-     * The assertion is the bound, not a specific window: served within a small
-     * constant number of windows, and NOT "eventually, if the flood stops".
+     * On the unmodified fixed window the legitimate name is denied in window 1
+     * and again in every later window: the flood always gets there first and
+     * there is nothing it cannot spend. With the reserve, the legitimate name
+     * is a RETRY from window 2 onward and draws on a pool that THIS
+     * (non-re-presenting) flood can never touch, so it loads in window 2.
      */
     {
         ngx_uint_t  limit, slots, w, deferred, served_in_window;
@@ -303,11 +313,163 @@ main(void)
         }
 
         CHECK(served_in_window != 0,
-              "fairness: a deferred name is retried under a sustained flood "
-              "instead of being starved indefinitely");
+              "fairness case 1 (non-re-presenting flood): a deferred name is "
+              "retried instead of being starved indefinitely");
         CHECK(served_in_window != 0 && served_in_window <= 2,
-              "fairness: the retry happens within 2 windows, a bound the "
-              "flood cannot push out");
+              "fairness case 1 (non-re-presenting flood): the retry happens "
+              "within 2 windows -- NOTE this models a weaker adversary than "
+              "serve.c produces; see case 2 for the real bound");
+    }
+
+    /*
+     * --- FAIRNESS, CASE 2: THE REAL ADVERSARY -- a flood that re-presents its
+     * own denied names as retries ---
+     *
+     * This is the case that measures the module's actual guarantee.
+     * ngx_autocert_serve.c sets cert->deferred = 1 on EVERY denial, in the
+     * unconditional `else if (now != cert->checked)` branch, with no
+     * filtering. So a flood name denied in window W arrives in window W+1 with
+     * retry = 1 and competes for the reserve alongside the victim. The claim
+     * "a flood can only ever touch the general pool" is true for exactly one
+     * window and false thereafter.
+     *
+     * What keeps this bounded is a different mechanism: serve.c only creates a
+     * cache entry -- and therefore only ever sets a deferred bit -- for a name
+     * that passed its `matched` gate (configured / wildcard-covered /
+     * runtime-issued). An unconfigured SNI returns the bootstrap certificate
+     * before any entry exists. So the deferred set D is bounded by the
+     * OPERATOR'S configured name set and CANNOT be inflated by attacker-chosen
+     * SNIs, however much entropy the client has.
+     *
+     * The measured property, derived from the code rather than picked to make
+     * a test pass (G = general share, R = reserve, n = units per name):
+     *
+     *   D <  (G + 2R) / n : the deferred set drains faster than it refills and
+     *                       the victim is served within a few windows.
+     *   D >= (G + 2R) / n : the gated deferred set alone can refill both pools
+     *                       every window, and since a fixed window has no
+     *                       ordering fairness, a victim that consistently
+     *                       arrives LAST can be pushed back indefinitely.
+     *
+     * BE PLAIN ABOUT THIS: the bound asserted below is much larger than case
+     * 1's "<= 2", and above the threshold there is no bound at all. That is
+     * still a real improvement over the plain fixed window, which is starved
+     * by ANY sustained flood at ANY D including D = 0 -- SNI entropy alone was
+     * enough. Here the attack requires the operator to have configured more
+     * names than a window can refresh, and it self-heals as soon as the
+     * deferred set drops back under the threshold.
+     */
+    {
+        ngx_uint_t  limit, slots, reserve, general, w, threshold;
+        ngx_uint_t  ndef, served_in_window;
+        static ngx_uint_t  attacker_deferred[512];
+        ngx_uint_t  victim_deferred, j;
+
+        limit = 64;
+        slots = 2;                       /* dual-key deployment: EC + RSA */
+        reserve = ngx_autocert_loadcap_reserve(limit);
+        general = limit - reserve;
+
+        /* The exact point past which the property gives out, in NAMES. */
+        threshold = (general + 2 * reserve) / slots;
+
+        CHECK(threshold == 40,
+              "fairness case 2: threshold (G + 2R)/n is 40 names for "
+              "limit 64, 2 key types -- the arithmetic the cases below use");
+
+        /*
+         * (a) BELOW the threshold: a gated deferred set that re-presents every
+         * window, plus a victim arriving last, still gets the victim served.
+         */
+        /*
+         * D is a LITERAL, not `threshold - 1`. Deriving it from the live
+         * reserve would let a mutation that removes the reserve also move the
+         * D under test, and the case would stay green against the very change
+         * it exists to catch. 39 sits in the gap that only the reserve opens:
+         * without a reserve the deferred set alone refills the window from
+         * D = G/n = 32 upward and 39 starves; with it the threshold moves out
+         * to (G + 2R)/n = 40 and 39 is still served. That gap IS the reserve's
+         * measurable benefit against the real adversary.
+         */
+        ndef = 39;
+        for (j = 0; j < ndef; j++) {
+            attacker_deferred[j] = 0;
+        }
+        victim_deferred = 0;
+        served_in_window = 0;
+
+        ngx_memzero(&cap, sizeof(cap));
+
+        for (w = 1; w <= 64 && served_in_window == 0; w++) {
+            time_t  now = 30000 + (time_t) w;
+
+            /* The REAL flood: each name re-presents carrying whatever
+             * deferred bit serve.c would have left on it last window. */
+            for (j = 0; j < ndef; j++) {
+                attacker_deferred[j] =
+                    ngx_autocert_loadcap_admit_retry_n(&cap, now, limit, slots,
+                                                       attacker_deferred[j])
+                    ? 0 : 1;
+            }
+
+            /* The victim, arriving last -- the worst ordering for it. */
+            if (ngx_autocert_loadcap_admit_retry_n(&cap, now, limit, slots,
+                                                   victim_deferred))
+            {
+                served_in_window = w;
+
+            } else {
+                victim_deferred = 1;     /* serve.c sets cert->deferred here */
+            }
+        }
+
+        CHECK(served_in_window != 0,
+              "fairness case 2a (real flood, D just under threshold): the "
+              "victim is eventually served, not starved");
+        CHECK(served_in_window != 0 && served_in_window <= 3,
+              "fairness case 2a: served within 3 windows at D = threshold - 1 "
+              "-- weaker than case 1's <= 2, and it degrades to no bound at "
+              "all one name later (case 2b)");
+
+        /*
+         * (b) AT the threshold: the same flood with one more gated name
+         * starves the victim outright. Asserting this is the point -- a test
+         * that only showed the good case would be modelling the weak
+         * adversary all over again.
+         */
+        ndef = 40;                       /* == threshold, likewise a literal */
+        for (j = 0; j < ndef; j++) {
+            attacker_deferred[j] = 0;
+        }
+        victim_deferred = 0;
+        served_in_window = 0;
+
+        ngx_memzero(&cap, sizeof(cap));
+
+        for (w = 1; w <= 512 && served_in_window == 0; w++) {
+            time_t  now = 40000 + (time_t) w;
+
+            for (j = 0; j < ndef; j++) {
+                attacker_deferred[j] =
+                    ngx_autocert_loadcap_admit_retry_n(&cap, now, limit, slots,
+                                                       attacker_deferred[j])
+                    ? 0 : 1;
+            }
+
+            if (ngx_autocert_loadcap_admit_retry_n(&cap, now, limit, slots,
+                                                   victim_deferred))
+            {
+                served_in_window = w;
+
+            } else {
+                victim_deferred = 1;
+            }
+        }
+
+        CHECK(served_in_window == 0,
+              "fairness case 2b (real flood, D at threshold): the victim IS "
+              "pushed back indefinitely -- the documented limit of the "
+              "reserve, asserted so nobody re-derives the false strong claim");
     }
 
     /*

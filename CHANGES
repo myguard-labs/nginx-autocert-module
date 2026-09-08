@@ -10,11 +10,20 @@ Changes unreleased
        cached certificate -- or the bootstrap certificate, if it had none --
        for as long as the flood lasted. A quarter of each second's budget (at
        least one unit whenever the limit is 2 or more) is now reserved for
-       names the cap itself deferred earlier. A flood is made of first
-       attempts and cannot reach that reserve, so a deferred name is retried
-       within a bounded number of seconds regardless of flood size. The total
-       admitted per second is unchanged, and a worker below its budget never
-       reaches the reserve, so the split is invisible outside an actual flood.
+       names the cap itself deferred earlier. In the second a flood starts its
+       names have never been deferred, so they are all first attempts and
+       cannot reach the reserve at all. From the following second the flood's
+       own names are retries too and do compete for it, but only names the
+       server is configured to serve (or has already issued) ever reach the
+       cache at all, so the deferred set is bounded by the operator's name set
+       and not by how many distinct SNIs the client invents. A deferred name is
+       therefore retried within a small number of seconds as long as that set
+       stays inside a second's capacity, instead of being starved for as long
+       as the flood lasts at any size. Operators with more configured names
+       than the limit can refresh in one second should raise the limit; see the
+       README. The total admitted per second is unchanged, and a worker below
+       its budget never reaches the reserve, so the split is invisible outside
+       an actual flood.
 
     *) Bugfix: an HTTP-01 challenge is no longer shadowed by the vhost's own
        configuration. Any :80 vhost with a catch-all -- `location / { return

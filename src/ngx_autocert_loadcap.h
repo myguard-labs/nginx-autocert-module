@@ -43,15 +43,49 @@
  *                                  from it — that is, a name the cap itself
  *                                  denied in an EARLIER window.
  *
- * A flood is made of names the cap has never seen, so every one of its
- * requests is a first attempt and can only ever touch `general`. It therefore
- * cannot consume the reserve no matter how many distinct SNIs it presents.
- * A name deferred in window W arrives in window W+1 as a retry, competing for
- * the reserve against other deferred names only — a set the attacker cannot
- * inflate, because entering it requires having already been denied. That turns
- * "retried eventually, maybe never" into a bounded wait: with R reserve units
- * and D genuinely deferred names, every deferred name is retried within
- * ceil(D / R) windows regardless of flood size.
+ * WHAT THE RESERVE ACTUALLY BUYS — stated precisely, because the obvious
+ * stronger claim is FALSE. In the window a flood starts, every one of its
+ * names is a name the cap has never denied, so every request is a first
+ * attempt and can only touch `general`: the reserve is untouchable that
+ * window no matter how many distinct SNIs are presented. But serve.c marks
+ * EVERY denial (ngx_autocert_serve.c, the `else if (now != cert->checked)`
+ * branch sets cert->deferred = 1) with no filtering, so from the NEXT window
+ * the flood's own names present as retries and do compete for the reserve
+ * alongside the victim. The reserve is not a pool the attacker can never
+ * reach; it is a pool the attacker cannot reach for one window and cannot
+ * inflate past a ceiling the OPERATOR sets.
+ *
+ * The ceiling is what makes this sound. serve.c only creates a cache entry —
+ * and therefore only ever sets a `deferred` bit — for a name that passed its
+ * `matched` gate (configured, wildcard-covered, or runtime-issued). An
+ * unconfigured SNI returns to the bootstrap certificate before any cache
+ * entry exists. So the deferred set D is bounded by the OPERATOR'S configured
+ * name set, not by how many distinct SNIs a client invents. An attacker with
+ * unlimited SNI entropy still cannot grow D by one name.
+ *
+ * The resulting property, with G = general, R = reserve and n units charged
+ * per name (one per config-enabled key type):
+ *
+ *   - Window 1 of a flood: the victim's competitors are first attempts only,
+ *     so the reserve is free and a deferred name loads immediately.
+ *   - D < (G + 2R) / n: the deferred set fits inside a window's capacity with
+ *     a reserve's worth of slack, the set drains faster than it refills, and
+ *     the victim is served within a small number of windows.
+ *   - D >= (G + 2R) / n: the gated deferred set alone can refill both pools
+ *     every window. A fixed window has no ordering fairness, so a victim that
+ *     consistently arrives LAST can still be pushed back indefinitely. This
+ *     is the honest worst case and it is NOT a ceil(D / R) bound.
+ *
+ * That is still a real improvement over the plain fixed window, which is
+ * starved by ANY sustained flood at any D, including D = 0 — an attacker with
+ * SNI entropy alone was enough. Here the attack requires the operator to have
+ * configured more names than a window can refresh, the damage is bounded by a
+ * set the attacker cannot grow, and it self-heals the moment the deferred set
+ * drops below the threshold. Operators wanting the bounded-wait property
+ * should size autocert_handshake_load_limit so that the configured name count
+ * stays under (G + 2R) / n — with the default quarter split that is
+ * limit * 5 / (4 * n) names, e.g. limit 64 with two key types covers up to 39
+ * names. The README carries this as operator guidance.
  *
  * Retries draw from `general` FIRST and only fall back to the reserve, so on
  * an idle or lightly loaded worker the split is invisible: the full `limit` is
@@ -61,7 +95,7 @@
  * reserve only ever redistributes budget under contention; it must never make
  * an idle worker refuse work it has the budget for. See WEDGE CASE below for
  * the one path that enforces this when n does not fit in `general`, and for
- * the configurations where it costs the ceil(D / R) bound.
+ * the configurations where it costs even the D < (G + 2R) / n property.
  * The reserve costs the flood nothing it was entitled to either — those units
  * were always going to be spent on somebody.
  */
@@ -133,14 +167,16 @@ ngx_autocert_loadcap_reserve(ngx_uint_t limit)
  * nothing has been spent yet, charging BOTH pools) so the batch still goes
  * through exactly once per second rather than never.
  *
- * DOCUMENTED LIMIT of the reserve's fairness bound: this fallback lets a FIRST
- * attempt reach the reserve, so the ceil(D / R) bound above holds only while
+ * DOCUMENTED LIMIT of the reserve's fairness property: this fallback lets a
+ * FIRST attempt reach the reserve, so even the weakened property described
+ * above (a bounded wait while D < (G + 2R) / n) holds only while
  * `general >= n`, i.e. `limit >= n + reserve`. With the module's slot count of
  * 1 or 2 that means limit >= 2 for one slot and limit >= 3 for two (RSA + EC).
  * Below that threshold the window admits at most ONE batch in total, so there
  * is no budget left to allocate fairly and the pre-reserve first-come
  * behaviour is the only non-wedging option. Ordinary configurations
- * (limit >= n + reserve) are unaffected and keep the strict bound.
+ * (limit >= n + reserve) are unaffected and keep whatever the FAIRNESS note
+ * above promises for their D.
  */
 static ngx_inline ngx_uint_t
 ngx_autocert_loadcap_admit_retry_n(ngx_autocert_loadcap_t *cap, time_t now,
