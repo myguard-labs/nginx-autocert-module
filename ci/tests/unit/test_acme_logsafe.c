@@ -138,15 +138,48 @@ main(void)
             static u_char  big[4096];
             size_t         i;
 
+            /* TWO fixtures, because ngx_escape_json has TWO expansion
+             * classes and only the expensive one can falsify the bound.
+             * LF/CR/TAB/BS/FF/backslash/quote escape 2x ("\\n"); EVERY OTHER
+             * byte <= 0x1f escapes 6x ("\\u00XX"). A 2x fixture against a 2x
+             * bound is a tautology: 256 LF bytes produce exactly 512, passing
+             * at the boundary with zero margin, so a cap regression that let
+             * 6x bytes through would still read green. NUL is the worst case
+             * and is a legal byte in a CA-supplied string. */
             for (i = 0; i < sizeof(big); i++) {
                 big[i] = 0x0a;  /* LF, escapes to 2-byte "\\n" */
             }
             src.data = big;
             src.len = sizeof(big);
             out = ngx_autocert_acme_log_safe(pool, &src);
-            CHECK(out.len <= NGX_AUTOCERT_LOG_MAX * 2,
-                  "log_safe: escaped output respects the buffer cap (at most "
-                  "NGX_AUTOCERT_LOG_MAX * expansion_factor)");
+            CHECK(out.len <= NGX_AUTOCERT_LOG_MAX * 6,
+                  "log_safe: escaped output respects the buffer cap "
+                  "(<= NGX_AUTOCERT_LOG_MAX * 6, ngx_escape_json's worst case)");
+            CHECK(out.len == NGX_AUTOCERT_LOG_MAX * 2,
+                  "log_safe: 2x-class bytes (LF) escape to exactly 2x the cap");
+
+            /* the 6x class: this is the fixture that can actually break the
+             * bound if the cap arithmetic ever regresses. */
+            for (i = 0; i < sizeof(big); i++) {
+                big[i] = 0x00;  /* NUL, escapes to 6-byte "\\u0000" */
+            }
+            src.data = big;
+            src.len = sizeof(big);
+            out = ngx_autocert_acme_log_safe(pool, &src);
+            CHECK(out.len <= NGX_AUTOCERT_LOG_MAX * 6,
+                  "log_safe: worst-case 6x escaping still respects the cap");
+            CHECK(out.len == NGX_AUTOCERT_LOG_MAX * 6,
+                  "log_safe: 6x-class bytes (NUL) escape to exactly 6x the cap");
+            CHECK(memchr(out.data, 0x00, out.len) == NULL,
+                  "log_safe: no raw NUL survives the worst-case path");
+
+            /* restore the LF fixture for the assertions below */
+            for (i = 0; i < sizeof(big); i++) {
+                big[i] = 0x0a;
+            }
+            src.data = big;
+            src.len = sizeof(big);
+            out = ngx_autocert_acme_log_safe(pool, &src);
             CHECK(out.len < sizeof(big),
                   "log_safe: an over-long input is truncated (bounded), "
                   "not passed through wholesale");
@@ -166,16 +199,26 @@ main(void)
              * lengths differ */
             CHECK(out.len > src.len,
                   "log_safe: quoting escaping strictly grows the output");
-            /* Verify that the raw quote bytes are NOT present as sequential
-             * raw bytes: if "test" escapes to \"test\", the output contains
-             * backslash + quote, not a standalone quote */
-            for (size_t i = 0; i < out.len; i++) {
-                if (out.data[i] == '"' && i > 0 && out.data[i - 1] != '\\') {
-                    CHECK(0, "log_safe: unescaped raw quote byte in output");
-                    break;
+            /* Every quote byte in the output must be backslash-prefixed.
+             * A quote at index 0 is unescaped BY DEFINITION (nothing can
+             * precede it), so it counts as a failure rather than being
+             * skipped -- the old `i > 0` guard silently exempted it. */
+            {
+                size_t  i;
+                int     unescaped = 0;
+
+                for (i = 0; i < out.len; i++) {
+                    if (out.data[i] != '"') {
+                        continue;
+                    }
+                    if (i == 0 || out.data[i - 1] != '\\') {
+                        unescaped = 1;
+                        break;
+                    }
                 }
+                CHECK(unescaped == 0,
+                      "log_safe: every quote in the output is backslash-escaped");
             }
-            CHECK(1, "log_safe: quotes are escaped (backslash-prefixed)");
         }
     }
 

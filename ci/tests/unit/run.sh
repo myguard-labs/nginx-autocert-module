@@ -344,11 +344,14 @@ bash ci/tests/unit/extract_jsonsafe.sh
 # Slice ngx_autocert_acme_log_safe from the shipped acme source. This helper
 # bounds and JSON-escapes CA-controlled bytes (URLs, response headers, problem
 # documents) before they reach the error log, preventing log injection attacks.
-# The function calls nginx core's ngx_escape_json (ngx_string.o) and uses
-# ngx_pnalloc (ngx_palloc.o) but never touches ngx_cycle itself — those are
-# only pulled in because ngx_string.o/ngx_palloc.o are linked as whole objects
-# and OTHER functions in them reference ngx_cycle/ngx_log_error_core. Same
-# stub-link idiom as test_ratecap.c.
+# ngx_string.o and ngx_palloc.o are DIRECT dependencies here: the helper calls
+# ngx_escape_json (ngx_string.o) and ngx_pnalloc (ngx_palloc.o). Only
+# ngx_cycle/ngx_log_error_core are incidental — they come along because those
+# objects link whole and OTHER functions in them reference those symbols, which
+# is what the stubs in the test cover. Same stub-link idiom as test_ratecap.c.
+# (The neighbouring test_account_jsonsafe block says its helper touches no
+# allocator; that is true THERE — account's log_safe writes into a
+# caller-supplied buffer — and false here. Do not copy that wording back.)
 bash ci/tests/unit/extract_acme_logsafe.sh
 # shellcheck disable=SC2086
 "$CC" $SANITIZE_CFLAGS $EXTRA_CFLAGS -Wall -Wextra -Werror -Ici/tests/unit $CORE_INC \

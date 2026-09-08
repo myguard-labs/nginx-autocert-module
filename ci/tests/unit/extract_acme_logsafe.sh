@@ -51,10 +51,26 @@ rtype=$((start - 1)) # the return-type line precedes the name
 	awk -v s="$rtype" -v name="$FN" '
         NR >= s {
             print
-            if (entered && $0 == "}") { exit }
             if ($0 ~ ("^" name "\\(")) { entered = 1 }
+            # Count braces once the body is open. The function ends when depth
+            # returns to zero -- NOT at "the next lone } in column 1", which is
+            # also the terminator of the NEXT function if this one was
+            # reformatted (e.g. `} /* log_safe */`). Measured: with that
+            # reformat, a lone-} rule silently emitted 52 lines instead of 18,
+            # swallowing the following function, and still exited 0.
+            if (entered) {
+                n = gsub(/{/, "{"); depth += n
+                n = gsub(/}/, "}"); depth -= n
+                if (opened && depth == 0) { closed = 1; exit }
+                if (depth > 0) { opened = 1 }
+            }
         }
-    ' "$SRC"
+        END { if (!closed) exit 1 }
+    ' "$SRC" || {
+		echo "✗ ${FN}() body never closed at brace depth 0 in $SRC (reformatted?)" >&2
+		rm -f "$OUT"
+		exit 1
+	}
 
 	echo ""
 } >>"$OUT"
