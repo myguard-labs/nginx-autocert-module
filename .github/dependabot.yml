@@ -5,10 +5,10 @@ updates:
   #
   # `directories` (not the singular `directory`) because dependabot-core does
   # not walk composite actions under .github/actions/*/action.yml on its own
-  # (dependabot-core#7495, #6704 remain open). Without the second entry, the
+  # (dependabot-core#6345, #6704 remain open). Without the second entry, the
   # composite actions' own `uses:` pins would silently go stale while their
   # copies in .github/workflows/ get bumped, leaving two versions of the same
-  # action running in one job graph. Drop the second entry once 7495 lands.
+  # action running in one job graph. Drop the second entry once 6345 lands.
   - package-ecosystem: github-actions
     directories:
       - "/"

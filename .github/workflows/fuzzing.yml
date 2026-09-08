@@ -1,10 +1,10 @@
-# sync-sha: 100d9c018b2e9a772c3102707190f22a2b50ecaa80b5e5ebffa71181085a59a4
+# sync-sha: 81f4f0d4ecc5edfb9d69dcd175fb4ededdd56a1e4c157833a03f329def0c2118
 name: Fuzzing
 
 # Fast fuzz regression — 30s/target on the JSON + HTTP + base64url ACME parsers
 # (+ fuzz.dict). Called by ci.yml on every PR, and dispatchable standalone.
 #
-# Deep coverage (14400s/target) lives in ci-deep.yml, on the release/schedule
+# Deep coverage (FUZZ_SECS, 3600s default) lives in ci-deep.yml, on the
 # path only. This member carries no `needs:`, so it runs in the first wave beside
 # the ~471-494s e2e critical path and adds nothing to the merge budget. Measured
 # 171s at 3 targets on run 31332902290 (the older 74s figure predates fuzz_b64).

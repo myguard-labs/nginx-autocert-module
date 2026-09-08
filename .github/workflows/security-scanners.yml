@@ -1,13 +1,12 @@
-# sync-sha: f1bb9238907ffc216d4bd51107043df2934bf8938af50a935dfdfc91ecafd101
+# sync-sha: 58dd0603e6edb2e80c4cb0ee4a5152a18290283fb48d5059561436cda39b432f
 name: Security scanners
 
 # Static / security scanners gate on every PR/push — flawfinder, clang-tidy
 # (cert-*, security.*) and semgrep over src/. Same job as the ci-deep.yml
 # scanners job, promoted to a PR gate.
 #
-# Action pins (keep in sync with build-test.yml header):
-# actions/checkout@v5        -> 93cb6efe18208431cddfb8368fd83d5badbf9bfd
-# actions/upload-artifact@v5 -> 330a01c490aca151604b8cf639adc76d48f6c5d4
+# Action pins are tracked by .github/dependabot.yml, not a hand-maintained
+# table here.
 #
 # gitleaks pin (own job below, hosted runner, no self-hosted deps):
 # gitleaks v8.30.1 linux_x64 tarball, sha256 verified against the upstream
