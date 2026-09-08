@@ -70,6 +70,8 @@ for fn in "${fns[@]}"; do
     if [ "$rc" -ne 0 ]; then
         if [ "$rc" -eq 2 ]; then
             echo "✗ ${fn}(): brace depth went negative in $SRC (unmatched '}' in a string/char literal or comment?)" >&2
+        elif [ "$rc" -eq 4 ]; then
+            echo "✗ ${fn}(): $SRC is missing or unreadable" >&2
         else
             echo "✗ ${fn}() body never closed at brace depth 0 in $SRC (reformatted?)" >&2
         fi

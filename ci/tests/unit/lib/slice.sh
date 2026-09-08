@@ -36,11 +36,15 @@
 #     - depth goes negative at any point (cumulative closers outnumber
 #       cumulative openers so far -- see the LIMITATION note above for the
 #       stray-`}` shape this does not catch) -- exits 2, or
-#     - EOF is reached with the body still open -- exits 1.
+#     - EOF is reached with the body still open -- exits 1, or
+#     - SRC is missing or unreadable -- exits 4 (checked before awk ever
+#       runs, so this is never confused with the depth<0 signal above).
 #   ENTER_NAME is a literal function name (no regex metacharacters); the
 #   match pattern is built inside awk to avoid shell/awk double-escaping.
 slice_function() {
 	local src="$1" start="$2" enter_name="$3"
+
+	[ -r "$src" ] || return 4
 
 	awk -v s="$start" -v name="$enter_name" '
         NR >= s {
@@ -69,9 +73,13 @@ slice_function() {
 #   function body starting at START_LINE (whose definition line matches
 #   "^ENTER_NAME(") and returns 0, or prints nothing and returns non-zero:
 #   exit 2 if depth ever goes negative (see slice_function), exit 1 if EOF is
-#   reached with the body still open.
+#   reached with the body still open, exit 4 if SRC is missing or unreadable
+#   (checked before awk ever runs, so this is never confused with the
+#   depth<0 signal above).
 slice_end_line() {
 	local src="$1" start="$2" enter_name="$3"
+
+	[ -r "$src" ] || return 4
 
 	awk -v s="$start" -v name="$enter_name" '
         NR >= s {

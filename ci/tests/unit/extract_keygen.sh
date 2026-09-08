@@ -88,6 +88,8 @@ end=$(slice_end_line "$SRC" "$endfn" "ngx_autocert_keygen_post") || rc=$?
 if [ "$rc" -ne 0 ]; then
 	if [ "$rc" -eq 2 ]; then
 		echo "✗ ngx_autocert_keygen_post(): brace depth went negative in $SRC (unmatched '}' in a string/char literal or comment?)" >&2
+	elif [ "$rc" -eq 4 ]; then
+		echo "✗ ngx_autocert_keygen_post(): $SRC is missing or unreadable" >&2
 	else
 		echo "✗ could not find the end of ngx_autocert_keygen_post" >&2
 	fi

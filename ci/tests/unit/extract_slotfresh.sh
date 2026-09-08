@@ -70,6 +70,8 @@ body=$(slice_function "$SRC" "$rtype" "$FN") || rc=$?
 if [ "$rc" -ne 0 ]; then
 	if [ "$rc" -eq 2 ]; then
 		echo "✗ ${FN}(): brace depth went negative in $SRC (unmatched '}' in a string/char literal or comment?)" >&2
+	elif [ "$rc" -eq 4 ]; then
+		echo "✗ ${FN}(): $SRC is missing or unreadable" >&2
 	else
 		echo "✗ ${FN}() body never closed at brace depth 0 in $SRC (reformatted?)" >&2
 	fi

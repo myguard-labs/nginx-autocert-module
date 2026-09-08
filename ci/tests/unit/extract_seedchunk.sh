@@ -80,6 +80,8 @@ end=$(slice_end_line "$SRC" "$loop" "ngx_autocert_seed_walk_chunk") || rc=$?
 if [ "$rc" -ne 0 ]; then
 	if [ "$rc" -eq 2 ]; then
 		echo "✗ ngx_autocert_seed_walk_chunk(): brace depth went negative in $SRC (unmatched '}' in a string/char literal or comment?)" >&2
+	elif [ "$rc" -eq 4 ]; then
+		echo "✗ ngx_autocert_seed_walk_chunk(): $SRC is missing or unreadable" >&2
 	else
 		echo "✗ could not find the end of ngx_autocert_seed_walk_chunk" >&2
 	fi

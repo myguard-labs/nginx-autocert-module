@@ -53,6 +53,8 @@ body=$(slice_function "$SRC" "$start" "ngx_autocert_orphan_reap") || rc=$?
 if [ "$rc" -ne 0 ]; then
 	if [ "$rc" -eq 2 ]; then
 		echo "✗ ngx_autocert_orphan_reap(): brace depth went negative in $SRC (unmatched '}' in a string/char literal or comment?)" >&2
+	elif [ "$rc" -eq 4 ]; then
+		echo "✗ ngx_autocert_orphan_reap(): $SRC is missing or unreadable" >&2
 	else
 		echo "✗ ngx_autocert_orphan_reap() body never closed at brace depth 0 in $SRC (reformatted?)" >&2
 	fi
