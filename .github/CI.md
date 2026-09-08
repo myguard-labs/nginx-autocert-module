@@ -25,7 +25,7 @@ bounded `push:`/`schedule:` triggers for direct master coverage; they
 deliberately do not carry a standalone `pull_request:` since `ci.yml` already
 calls them.
 
-## Scheduled or manual only (never gate a PR)
+## Outside the `ci.yml` PR gate
 
 | Workflow | Cadence | Coverage |
 |---|---|---|
@@ -33,7 +33,7 @@ calls them.
 | `valgrind.yml` | manual dispatch | 30s Memcheck-lite soak of the HTTP-01 serve path |
 | `asan.yml` | weekly (Sunday 03:45 UTC) + manual | 30s ASan/UBSan soak of the HTTP-01 serve path |
 | `bump.yml` | weekly | checks nginx.org/angie.software for newer pins, opens a PR against `.github/versions.env` |
-| `windows-build.yml` | every PR touching win32 paths + push | MSVC compile/link and a runtime HTTP-01 challenge-serve smoke test on Windows |
+| `windows-build.yml` | every PR touching win32 paths + push | MSVC compile/link and a runtime HTTP-01 challenge-serve smoke test on Windows -- the one workflow here that DOES gate a PR, via its own path filter rather than `ci.yml` |
 
 `fuzzing.yml`'s deep 14400s/target campaign lives in `ci-deep.yml`; the
 per-PR `fuzzing.yml` run above is the fast 30s/target regression only.

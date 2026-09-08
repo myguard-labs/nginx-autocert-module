@@ -1,4 +1,4 @@
-# sync-sha: eee9f6c4b3766b707ebba21cf0d71620ac2280f5dd360921ab7706b20abbe241
+# sync-sha: b396c8c5e68c8f82ea6ce5675ab833ec9cadc8cdadbca8aa10677b2b6ef448f6
 name: Build & Test
 
 # Third-party actions pinned to commit SHAs for supply-chain safety.
@@ -304,6 +304,11 @@ jobs:
           WANT: ${{ needs.resolve-stable.outputs.nginx_stable_version }}
         run: |
           set -euo pipefail
+          # An EMPTY WANT would degenerate the case pattern below to `**`,
+          # which matches any output and silently passes -- the exact drift
+          # this step exists to catch. set -u does not fire on set-but-empty.
+          : "${WANT:?resolve-stable produced an empty stable version}"
+          : "${SERVER_BIN:?build-module did not export SERVER_BIN}"
           got="$("$SERVER_BIN" -v 2>&1)"
           case "$got" in
             *"$WANT"*) echo "✓ $SERVER_BIN reports stable version $WANT" ;;
