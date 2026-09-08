@@ -2468,9 +2468,22 @@ typedef ngx_int_t (*ngx_autocert_seed_entry_pt)(void *ctx, ngx_str_t *host);
  * store-container fd it was opened over; neither is closed here — release is
  * ngx_autocert_runtime_seed_stop()'s job on every exit path.
  *
- * Returns NGX_DONE when readdir() exhausted the enumeration (the caller must
- * stop and release the walk) and NGX_AGAIN when the budget was spent with
- * entries still pending (the caller must yield and resume from this cursor).
+ * Returns NGX_DONE when readdir() exhausted the enumeration cleanly (the
+ * caller must stop and release the walk), NGX_ERROR when readdir() failed
+ * mid-walk (same release obligation, but the caller should LOG first — a
+ * failed enumeration otherwise truncates the seed with no operator-visible
+ * signal), and NGX_AGAIN when the budget was spent with entries still
+ * pending (the caller must yield and resume from this cursor).
+ *
+ * POSIX readdir() (and the win32 shim, see ngx_autocert_win32.h) return NULL
+ * for BOTH clean exhaustion and a genuine enumeration error; the only way to
+ * tell them apart is errno, which readdir() leaves untouched on clean
+ * exhaustion but sets on failure. errno is cleared immediately before each
+ * call because a marker read (openat/fstat/read/close, all inside
+ * ngx_autocert_seed_read_marker()) can set it on an unrelated, already
+ * handled skip — without the clear, that stale value would be misread as
+ * this readdir() call's own failure.
+ *
  * `buf` is caller-owned scratch of NGX_AUTOCERT_REQUEST_NAME_MAX bytes that
  * backs the ngx_str_t handed to `handler`; it is not retained past the call.
  */
@@ -2485,9 +2498,10 @@ ngx_autocert_seed_walk_chunk(ngx_autocert_dir_t *dh, int cfd,
 
     for (processed = 0; processed < budget; processed++) {
 
+        ngx_set_errno(0);
         de = ngx_autocert_readdir(dh);
         if (de == NULL) {
-            return NGX_DONE;             /* enumeration exhausted */
+            return (ngx_errno == 0) ? NGX_DONE : NGX_ERROR;
         }
 
         if (ngx_autocert_seed_read_marker(cfd, de->d_name, buf, &host)
@@ -2774,14 +2788,32 @@ ngx_autocert_runtime_seed_step(ngx_event_t *ev)
     ctx.cycle = cycle;
     ctx.acf = &acf;
 
-    if (ngx_autocert_seed_walk_chunk(ngx_autocert_seed_dh,
-                                     ngx_autocert_seed_cfd,
-                                     NGX_AUTOCERT_SEED_CHUNK, hostbuf,
-                                     ngx_autocert_seed_restore_entry, &ctx)
-        == NGX_DONE)
     {
-        ngx_autocert_runtime_seed_stop();   /* enumeration exhausted */
-        return;
+        ngx_int_t  wrc;
+
+        wrc = ngx_autocert_seed_walk_chunk(ngx_autocert_seed_dh,
+                                            ngx_autocert_seed_cfd,
+                                            NGX_AUTOCERT_SEED_CHUNK, hostbuf,
+                                            ngx_autocert_seed_restore_entry,
+                                            &ctx);
+        if (wrc == NGX_ERROR) {
+            /* Genuine enumeration failure, distinct from clean exhaustion
+             * (see ngx_autocert_seed_walk_chunk()'s comment). A6 is
+             * best-effort, so this stops the walk rather than aborting
+             * issuance -- but it must be operator-visible: a silent NGX_DONE
+             * here would truncate the seed with no signal that anything went
+             * wrong. */
+            ngx_log_error(NGX_LOG_ERR, cycle->log, ngx_errno,
+                          "autocert: A6 store enumeration failed mid-walk, "
+                          "seed stopped early");
+            ngx_autocert_runtime_seed_stop();
+            return;
+        }
+
+        if (wrc == NGX_DONE) {
+            ngx_autocert_runtime_seed_stop();   /* enumeration exhausted */
+            return;
+        }
     }
 
     /*
@@ -3338,13 +3370,24 @@ ngx_autocert_driver_exit_process(ngx_cycle_t *cycle)
 {
     (void) cycle;
 
-    /* Order matters: drop_order() -> ngx_autocert_order_free() re-arms the
-     * dns-01 orphan reap timer when a hook child was still outstanding, so
-     * cancelling first would leave that timer in the retiring cycle's rbtree.
+    /*
+     * Detach any pending ACME resolver/socket event before the pools below
+     * are freed, exactly as the reload path does: an event left live across
+     * drop_order()/drop_ca_states() would fire its handler against state this
+     * function is about to tear down. The process is exiting here, so the
+     * handler's dead-cycle risk that motivates this on reload does not apply
+     * yet -- but making the call unconditionally keeps the two teardown
+     * paths from drifting, and ngx_autocert_acme_cancel_inflight() is
+     * documented safe/no-op when nothing is in flight. Order matters:
+     * drop_order() -> ngx_autocert_order_free() re-arms the dns-01 orphan
+     * reap timer when a hook child was still outstanding, so cancelling
+     * timers first would leave that timer in the retiring cycle's rbtree.
      * Cancelling LAST leaves no driver timer behind. Neither drop_order() nor
      * drop_ca_states() yields to the event loop, so no handler can fire in
      * between. (The reload path deliberately keeps the opposite order: there
-     * the re-arm is against the new cycle and is wanted.) */
+     * the re-arm is against the new cycle and is wanted.)
+     */
+    ngx_autocert_acme_cancel_inflight();
     ngx_autocert_driver_drop_order();
     ngx_autocert_driver_drop_ca_states();
     ngx_autocert_driver_cancel_timers();
