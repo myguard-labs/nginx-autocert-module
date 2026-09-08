@@ -1,4 +1,4 @@
-# sync-sha: fc64db1cc21f2ecc70ab41b5a61a5187d452881f83b6513fb704e0aa1bbdda65
+# sync-sha: 5d66573972d41080b54cf031d323344037d2c419f1dda6d4b93bbaa5bdffa33b
 name: ASan
 
 # Manual ASan+UBSan soak — 30s mixed-load soak of the HTTP-01 serve path with an
@@ -18,10 +18,6 @@ name: ASan
 # nginx build + ASan/UBSan compile + 30s soak on a single shared self-hosted
 # runner — daily would burn builder02 time disproportionate to the bug class
 # it catches (long-lived lifetime/UAF bugs, not per-commit regressions).
-#
-# Action pins (keep in sync with build-test.yml header):
-# actions/checkout@v5        -> 93cb6efe18208431cddfb8368fd83d5badbf9bfd
-# actions/upload-artifact@v5 -> 330a01c490aca151604b8cf639adc76d48f6c5d4
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true

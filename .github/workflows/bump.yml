@@ -1,4 +1,4 @@
-# sync-sha: 2608a403d35c7d7d37f4c1128bc3dbbe10f0822771c4e626e7d6422b78d11997
+# sync-sha: b5442c17be95a7a3fa52ebfb58cac25f9abccd45ce9b0f63bbd8363b28ef7d12
 name: Bump versions
 
 # Weekly: check nginx.org/angie.software for newer releases than what is
@@ -24,9 +24,6 @@ name: Bump versions
 #     bump-tools.sh and no submodules at all, so those lanes are absent here
 #     rather than stubbed. See ci/tools/bump-versions.sh's header.
 #   - Base branch is master, not main.
-#
-# Action pins (keep in sync with build-test.yml):
-# actions/checkout@v5 -> 93cb6efe18208431cddfb8368fd83d5badbf9bfd
 
 on:
   schedule:

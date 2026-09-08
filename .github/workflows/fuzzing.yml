@@ -1,4 +1,4 @@
-# sync-sha: 03e4775ca4f84fe3d8a8bc573965b7eb7776cb41bcfd67c9bb698632cc7265e0
+# sync-sha: 100d9c018b2e9a772c3102707190f22a2b50ecaa80b5e5ebffa71181085a59a4
 name: Fuzzing
 
 # Fast fuzz regression — 30s/target on the JSON + HTTP + base64url ACME parsers
@@ -12,10 +12,6 @@ name: Fuzzing
 # Was dispatch-only and called by nobody until step 48 (2026-08-09): its last
 # run was 2026-07-11 under a `pull_request:` trigger it no longer had, leaving a
 # month-stale green badge. A member reached by no caller never goes red.
-#
-# Action pins (keep in sync with build-test.yml header):
-# actions/checkout@v5        -> 93cb6efe18208431cddfb8368fd83d5badbf9bfd
-# actions/upload-artifact@v5 -> 330a01c490aca151604b8cf639adc76d48f6c5d4
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true

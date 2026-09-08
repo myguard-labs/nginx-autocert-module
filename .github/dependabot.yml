@@ -1,0 +1,27 @@
+version: 2
+updates:
+  # GitHub Actions: all actions in .github/workflows/ are pinned by SHA.
+  # Dependabot tracks and auto-bumps these via pull requests.
+  #
+  # `directories` (not the singular `directory`) because dependabot-core does
+  # not walk composite actions under .github/actions/*/action.yml on its own
+  # (dependabot-core#7495, #6704 remain open). Without the second entry, the
+  # composite actions' own `uses:` pins would silently go stale while their
+  # copies in .github/workflows/ get bumped, leaving two versions of the same
+  # action running in one job graph. Drop the second entry once 7495 lands.
+  - package-ecosystem: github-actions
+    directories:
+      - "/"
+      - "/.github/actions/*"
+    schedule:
+      interval: weekly
+      day: monday
+    cooldown:
+      default-days: 7
+    assignees:
+      - eilandert
+
+# Not covered here: ruff, semgrep, actionlint (pinned in
+# ci/linter/install-linters.sh) and gitleaks (pinned in
+# .github/workflows/security-scanners.yml). Dependabot has no ecosystem for
+# pipx specs or SHA-verified binary downloads in shell scripts.

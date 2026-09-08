@@ -1,4 +1,4 @@
-# sync-sha: cda69647b1f14216dc5482fb4685e13766b6a4b50997a7bc3c05550d8b918dc9
+# sync-sha: 43aa26bb79dfb8442e3b2468cb4c900a435a38771ef9d4c1ff2e596c7867f666
 name: CI Deep
 
 # Exhaustive dynamic analysis — monthly cron, release, and on-demand only,
@@ -19,10 +19,6 @@ name: CI Deep
 #   * memcheck AND helgrind both run ci/tools/soak.sh, which passes
 #     --suppressions=ci/tools/valgrind.supp and (helgrind) --error-exitcode=99 —
 #     the drift-fix baseline for every module.
-#
-# Action pins (keep in sync with build-test.yml header):
-# actions/checkout@v5        -> 93cb6efe18208431cddfb8368fd83d5badbf9bfd
-# actions/upload-artifact@v5 -> 330a01c490aca151604b8cf639adc76d48f6c5d4
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
