@@ -791,6 +791,10 @@ ngx_autocert_order_publish_alpn(ngx_autocert_order_t *order)
     ngx_str_t    cert_pem, key_pem;
     ngx_int_t    rc = NGX_ERROR;
 
+    /* Null so the cleanse at `done:` is safe on the paths that jump there
+     * before key_to_pem has filled it in. */
+    ngx_str_null(&key_pem);
+
     if (order->alpn_zone == NULL) {
         ngx_log_error(NGX_LOG_ERR, order->log, 0,
                       "autocert: tls-alpn-01 selected but no ALPN store");
@@ -848,6 +852,11 @@ done_key:
     ngx_http_autocert_key_free(key);
 
 done:
+
+    /* The throwaway challenge key PEM: the slab store now owns its own copy
+     * (or publication failed), so this scratch copy is dead on every path.
+     * ngx_destroy_pool() would return it unwiped. cert_pem is public. */
+    ngx_http_autocert_cleanse(&key_pem);
 
     ngx_destroy_pool(tmp);
     return rc;
@@ -4273,6 +4282,18 @@ ngx_autocert_order_free(ngx_autocert_order_t *order)
         ngx_http_autocert_key_free(order->cert_key);
         order->cert_key = NULL;
     }
+
+    /*
+     * cert_key_pem is the issued certificate's private key in PKCS#8 PEM,
+     * allocated from order->pool. This teardown is the single funnel every
+     * order passes through — success, CA error, abort — so wiping here covers
+     * every exit path. It must be the LAST touch: the store path reads it, and
+     * ngx_destroy_pool() below only returns the pages to the allocator without
+     * clearing them, which would leave the key readable in reused pool memory
+     * and in a core dump.
+     */
+    ngx_http_autocert_cleanse(&order->cert_key_pem);
+
     if (order->pool) {
         ngx_destroy_pool(order->pool);
         order->pool = NULL;

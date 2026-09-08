@@ -18,6 +18,7 @@
 #include "../../../src/ngx_autocert_alpn.h"
 
 #include <stdio.h>
+#include <string.h>
 
 
 static int          failures;
@@ -231,6 +232,127 @@ test_three_and_collision(ngx_shm_zone_t *zone)
  * `nginx -s reload` during an in-flight order dropped the tls-alpn-01 challenge
  * cert, the CA's validation handshake then found nothing, and the order failed.
  */
+/* Portable substring search over a possibly non-terminated buffer; avoids
+ * needing _GNU_SOURCE for memmem() in this standalone harness. */
+static int
+buf_has(const u_char *buf, size_t len, const char *needle)
+{
+    size_t  n = strlen(needle);
+    size_t  i;
+
+    if (n > len) {
+        return 0;
+    }
+    for (i = 0; i + n <= len; i++) {
+        if (memcmp(buf + i, needle, n) == 0) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+
+/*
+ * Local mirror of the static ngx_autocert_alpn_lookup() in ngx_autocert_alpn.c
+ * (same hash-then-domain-compare walk) -- the only way to reach the node's
+ * slab-allocated an->key.data pointer from outside the TU, needed below to
+ * check what the freed key block contains after remove.
+ */
+static ngx_autocert_alpn_node_t *
+test_alpn_lookup(ngx_autocert_alpn_sh_t *sh, ngx_str_t *domain, uint32_t hash)
+{
+    ngx_rbtree_node_t         *node, *sentinel;
+    ngx_autocert_alpn_node_t  *an;
+    ngx_int_t                  rc;
+
+    node = sh->rbtree.root;
+    sentinel = sh->rbtree.sentinel;
+
+    while (node != sentinel) {
+        if (hash < node->key) {
+            node = node->left;
+            continue;
+        }
+        if (hash > node->key) {
+            node = node->right;
+            continue;
+        }
+
+        an = (ngx_autocert_alpn_node_t *) node;
+
+        if (domain->len != an->domain_len) {
+            node = (domain->len < an->domain_len) ? node->left : node->right;
+            continue;
+        }
+
+        rc = ngx_memcmp(domain->data, an->domain, domain->len);
+        if (rc == 0) {
+            return an;
+        }
+        node = (rc < 0) ? node->left : node->right;
+    }
+
+    return NULL;
+}
+
+
+/*
+ * Coverage for the wipe-at-call-sites fix (issues.md Security): set() and
+ * remove() must cleanse an->key.data before it goes back to the slab, or the
+ * next allocation of that size reads the challenge private key back. The
+ * primitive (ngx_http_autocert_cleanse) already has unit coverage in
+ * test_crypto.c; this asserts the CALL SITE actually invokes it, which a
+ * primitive-only test cannot -- reverting either wipe call left the primitive
+ * test green.
+ *
+ * Strategy: stash the key block's address and length under the lock (private
+ * API mirror above), remove the node (frees that block back to the slab
+ * WITHOUT reallocating it), then read the same address directly and assert
+ * the key PEM marker is gone. Nothing else touches the arena between remove
+ * and the check, so the block's content at that address is exactly what
+ * remove() left behind.
+ */
+static void
+test_remove_wipes_key(ngx_shm_zone_t *zone)
+{
+    ngx_slab_pool_t           *shpool;
+    ngx_autocert_alpn_sh_t    *sh;
+    ngx_autocert_alpn_node_t  *an;
+    ngx_str_t   dom = S("wipe.example.com");
+    ngx_str_t   c = S("-----BEGIN CERTIFICATE-----wipeme");
+    ngx_str_t   k = S("-----BEGIN PRIVATE KEY-----wipeme-secret");
+    u_char     *key_data;
+    size_t      key_len;
+    uint32_t    hash;
+
+    CHECK(ngx_autocert_alpn_set(zone, &dom, &c, &k) == NGX_OK,
+          "wipe: set");
+
+    shpool = (ngx_slab_pool_t *) zone->shm.addr;
+    sh = shpool->data;
+    hash = ngx_crc32_long(dom.data, dom.len);
+
+    an = test_alpn_lookup(sh, &dom, hash);
+    CHECK(an != NULL, "wipe: node present before remove");
+    if (an == NULL) {
+        return;
+    }
+
+    key_data = an->key.data;
+    key_len = an->key.len;
+    CHECK(buf_has(key_data, key_len, "BEGIN PRIVATE KEY"),
+          "wipe: key block holds the PEM before remove (sanity)");
+
+    CHECK(ngx_autocert_alpn_remove(zone, &dom) == NGX_OK, "wipe: remove");
+
+    /* The block was freed, not reallocated -- nothing ran in between that
+     * would touch this address, so reading it directly observes exactly what
+     * remove() left there. */
+    CHECK(!buf_has(key_data, key_len, "BEGIN PRIVATE KEY"),
+          "wipe: freed key block no longer contains the PEM after remove");
+}
+
+
 static void
 test_reload_preserves_certs(void)
 {
@@ -305,6 +427,7 @@ main(void)
     test_remove(zone);
     test_bounds(zone);
     test_three_and_collision(zone);
+    test_remove_wipes_key(zone);
 
     ngx_autocert_test_zone_destroy();
 

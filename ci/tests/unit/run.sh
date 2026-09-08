@@ -317,8 +317,15 @@ bash "$WORKSPACE/ci/tests/unit/assert_dns_hook_timeout_reset.sh"
 # shellcheck disable=SC2086
 "$CC" $SANITIZE_CFLAGS $EXTRA_CFLAGS -Wall -Wextra -Werror $CORE_INC -c \
 	"$WORKSPACE/ci/tests/unit/test_alpn.c" -o test_alpn_tu.o
+# alpn.c now calls ngx_http_autocert_cleanse() (OPENSSL_cleanse under the
+# hood) on the challenge key before it returns to the slab, so this link
+# needs crypto.c + libssl/libcrypto too, same as the other stores.
 # shellcheck disable=SC2086
-"$CC" $SANITIZE_CFLAGS $EXTRA_CFLAGS -o test_alpn test_alpn_tu.o alpn.o $STORE_OBJS $SANITIZE_LIBS
+"$CC" $SANITIZE_CFLAGS $EXTRA_CFLAGS -Wall -Werror $CORE_INC -c \
+	"$WORKSPACE/src/ngx_http_autocert_crypto.c" -o alpn_crypto.o
+# shellcheck disable=SC2086
+"$CC" $SANITIZE_CFLAGS $EXTRA_CFLAGS -o test_alpn test_alpn_tu.o alpn.o alpn_crypto.o \
+	$STORE_OBJS "$NGX/objs/src/core/ngx_inet.o" -lssl -lcrypto $SANITIZE_LIBS
 ./test_alpn
 
 # ngx_inet.o: crypto.c (include-shimmed here) now pulls

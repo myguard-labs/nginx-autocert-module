@@ -207,6 +207,18 @@ ngx_http_autocert_key_free(EVP_PKEY *pkey)
 }
 
 
+void
+ngx_http_autocert_cleanse(ngx_str_t *s)
+{
+    if (s == NULL || s->data == NULL || s->len == 0) {
+        return;
+    }
+
+    OPENSSL_cleanse(s->data, s->len);
+    s->len = 0;
+}
+
+
 ngx_int_t
 ngx_http_autocert_key_to_pem(ngx_pool_t *pool, EVP_PKEY *pkey, ngx_str_t *out)
 {
@@ -245,6 +257,11 @@ ngx_http_autocert_key_to_pem(ngx_pool_t *pool, EVP_PKEY *pkey, ngx_str_t *out)
 
     ngx_log_debug1(NGX_LOG_DEBUG_CORE, pool->log, 0,
                    "autocert: key PEM encoded, %O bytes", (off_t) len);
+
+    /* The memory BIO holds a second plaintext copy of the PKCS#8 key. BIO_free
+     * releases it to the malloc arena without wiping, so cleanse it here — the
+     * caller's copy in `out` is wiped by the caller at ITS last use. */
+    OPENSSL_cleanse(data, (size_t) len);
 
     BIO_free(bio);
     return NGX_OK;

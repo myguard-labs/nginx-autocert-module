@@ -17,6 +17,7 @@
 #include <ngx_config.h>
 
 #include "ngx_autocert_alpn.h"
+#include "ngx_http_autocert_crypto.h"
 
 
 static ngx_autocert_alpn_node_t *ngx_autocert_alpn_lookup(
@@ -214,6 +215,10 @@ ngx_autocert_alpn_set(ngx_shm_zone_t *shm_zone, ngx_str_t *domain,
         ngx_memcpy(cp, cert->data, cert->len);
         ngx_memcpy(kp, key->data, key->len);
         ngx_slab_free_locked(shpool, an->cert.data);
+        /* The superseded challenge key returns to the slab arena, where the
+         * next allocation of that size would read it back. Wipe before free;
+         * an->key is reassigned immediately below. */
+        ngx_http_autocert_cleanse(&an->key);
         ngx_slab_free_locked(shpool, an->key.data);
         an->cert.data = cp;
         an->cert.len = cert->len;
@@ -293,6 +298,9 @@ ngx_autocert_alpn_remove(ngx_shm_zone_t *shm_zone, ngx_str_t *domain)
                        "autocert: alpn remove \"%V\" found, deleting", domain);
         ngx_rbtree_delete(&sh->rbtree, &an->node);
         ngx_slab_free_locked(shpool, an->cert.data);
+        /* Same reasoning as the replace path: the challenge key must not go
+         * back to the slab readable. */
+        ngx_http_autocert_cleanse(&an->key);
         ngx_slab_free_locked(shpool, an->key.data);
         ngx_slab_free_locked(shpool, an);
 
