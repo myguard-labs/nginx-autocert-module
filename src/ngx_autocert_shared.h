@@ -463,7 +463,42 @@ ngx_autocert_fdopendir(int fd)
 static ngx_inline ngx_autocert_dirent_t *
 ngx_autocert_readdir(ngx_autocert_dir_t *dh)
 {
+    /*
+     * errno is cleared immediately before the call so that
+     * ngx_autocert_readdir_err() below reports THIS call's outcome and never a
+     * stale value left by unrelated work the caller did between entries (the
+     * A6 walk's per-entry marker read is openat/fstat/read/close, every one of
+     * which can set errno on an already-handled skip). readdir(3) leaves errno
+     * untouched at end-of-directory and sets it on failure, so post-call errno
+     * is exactly the "clean EOF vs genuine error" discriminator -- which is
+     * what the win32 arm has to synthesise in dh->err because GetLastError()
+     * is not trustworthy that way (see ngx_autocert_win32.h).
+     *
+     * The clear lives HERE, inside the shim, rather than at the call site: it
+     * is part of the error channel's contract, and a caller that forgot it
+     * would silently misreport. Behaviour of the returned entry itself is
+     * unchanged from a bare readdir().
+     */
+    errno = 0;
     return readdir(dh);
+}
+
+
+/*
+ * ngx_autocert_readdir_err() — the enumeration's EXPLICIT error channel; see
+ * the long contract comment on the win32 body in ngx_autocert_win32.h for why
+ * callers must use this instead of reading the ambient error state
+ * themselves. Valid only immediately after ngx_autocert_readdir(dh) returned
+ * NULL: 0 means clean end-of-directory, nonzero is a genuine failure.
+ *
+ * On this arm the channel IS errno, which ngx_autocert_readdir() cleared
+ * before its readdir(3) call, so the value can only have come from that call.
+ */
+static ngx_inline ngx_err_t
+ngx_autocert_readdir_err(ngx_autocert_dir_t *dh)
+{
+    (void) dh;
+    return (ngx_err_t) errno;
 }
 
 

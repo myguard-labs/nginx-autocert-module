@@ -423,14 +423,53 @@ bash "$WORKSPACE/ci/tests/unit/extract_orphan.sh"
 # ngx_autocert_runtime_seed_step's wrapper (shutdown guard, per-tick config
 # re-fetch, ngx_add_timer re-arm) and the cycle-bound per-entry decisions
 # behind the loop's handler hook, which need a live event loop.
+#
+# -Wl,--wrap=readdir64: audit MINOR/Lifecycle (A6 errno diagnosability) adds a
+# linker-level readdir() interposer test (test_readdir_error() in
+# test_seed_chunk.c) that forces the shipped ngx_autocert_readdir() -> readdir64()
+# call to fail with EIO, proving a genuine enumeration failure is reported as
+# NGX_ERROR and not conflated with the NGX_DONE clean-exhaustion verdict.
+# (glibc's <dirent.h> resolves the plain readdir() symbol
+# ngx_autocert_readdir() calls to readdir64() under this TU's
+# _FILE_OFFSET_BITS/_GNU_SOURCE combination -- confirmed with objdump against
+# the built binary -- so readdir64 is the symbol that must be wrapped.) The
+# wrap is disarmed by default (forwards to __real_readdir64), so every other
+# readdir() call in this binary, including count_open_fds()'s own loop, is
+# unaffected unless a test explicitly arms it.
+# win32 store-scan enumeration: the EOF-vs-error channel
+# (ngx_autocert_readdir_err, W12). The A6 walk above distinguishes a clean end
+# of directory from a genuine enumeration failure. On the POSIX arm that
+# channel is errno, which readdir(3) honours. On win32 it CANNOT be the
+# ambient global: ngx_autocert_readdir()'s own loop skips unrepresentable and
+# malformed names with `continue` AFTER WideCharToMultiByte() has set
+# LastError, then re-queries and returns NULL for a perfectly clean EOF -- with
+# GetLastError() still nonzero. One non-UTF8-representable directory name in
+# the store would otherwise make every seed walk log a failure and stop early.
+#
+# .github/workflows/windows-build.yml is build-only and never runs this suite,
+# so that defect has no coverage on the platform where it bites. This test
+# closes that gap on the HOST: extract_win32_readdir.sh slices the production
+# struct, fdopendir, readdir loop and accessor out of src/ngx_autocert_win32.h
+# and compiles them against stand-in Windows types with a scripted
+# NtQueryDirectoryFile -- so a regression that drops `dh->err = 0` from the
+# STATUS_NO_MORE_FILES path recompiles into this test and fails it. Freestanding
+# (no ngx_core.h, no nginx objects): the slice's only nginx-isms are typedefs
+# the test supplies itself.
+bash "$WORKSPACE/ci/tests/unit/extract_win32_readdir.sh"
+# shellcheck disable=SC2086
+"$CC" $SANITIZE_CFLAGS $EXTRA_CFLAGS -D_GNU_SOURCE -Wall -Wextra -Werror -Ici/tests/unit \
+	-o "$BUILD_DIR/test_win32_readdir_err" \
+	"$WORKSPACE/ci/tests/unit/test_win32_readdir_err.c" $SANITIZE_LIBS
+"$BUILD_DIR/test_win32_readdir_err"
+
 bash "$WORKSPACE/ci/tests/unit/extract_seedchunk.sh"
 # shellcheck disable=SC2086
 "$CC" $SANITIZE_CFLAGS $EXTRA_CFLAGS -D_GNU_SOURCE -Wall -Wextra -Werror -Ici/tests/unit -I"$WORKSPACE" \
 	$CORE_INC \
 	-o "$BUILD_DIR/test_seed_chunk" \
 	"$WORKSPACE/ci/tests/unit/test_seed_chunk.c" \
-	"$NGX/objs/src/core/ngx_string.o" $SANITIZE_LIBS
-"$BUILD_DIR/test_seed_chunk"
+	"$NGX/objs/src/core/ngx_string.o" $SANITIZE_LIBS -Wl,--wrap=readdir64
+WORKSPACE="$WORKSPACE" "$BUILD_DIR/test_seed_chunk"
 
 # Config-time name/contact validation (audit MINOR): server_name/
 # autocert_wildcard values land verbatim, unescaped, in the ACME newOrder

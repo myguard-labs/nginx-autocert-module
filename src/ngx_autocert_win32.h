@@ -2016,6 +2016,7 @@ typedef NGX_AUTOCERT_DIRENT  ngx_autocert_dirent_t;
 typedef struct {
     int             fd;
     ngx_uint_t      eof;
+    DWORD           err;
     unsigned char  *pos;
     unsigned char  *end;
     /*
@@ -2064,6 +2065,7 @@ ngx_autocert_fdopendir(int fd)
 
     dh->fd = fd;
     dh->eof = 0;
+    dh->err = 0;
     dh->pos = NULL;
     dh->end = NULL;
 
@@ -2118,7 +2120,7 @@ ngx_autocert_readdir(ngx_autocert_dir_t *dh)
     int                                       n;
 
     if (dh->eof) {
-        return NULL;
+        return NULL;      /* dh->err already carries this walk's verdict */
     }
 
     for ( ;; ) {
@@ -2126,6 +2128,7 @@ ngx_autocert_readdir(ngx_autocert_dir_t *dh)
             if (ngx_autocert_win32_resolve_ntdll() != NGX_OK) {
                 SetLastError(ERROR_PROC_NOT_FOUND);
                 errno = ngx_autocert_win32_errno(ERROR_PROC_NOT_FOUND);
+                dh->err = ERROR_PROC_NOT_FOUND;
                 dh->eof = 1;
                 return NULL;
             }
@@ -2138,14 +2141,16 @@ ngx_autocert_readdir(ngx_autocert_dir_t *dh)
                 NGX_AUTOCERT_FileDirectoryInformation, FALSE, NULL, FALSE);
 
             if (status == STATUS_NO_MORE_FILES) {
+                dh->err = 0;                /* clean end of enumeration */
                 dh->eof = 1;
-                return NULL;                /* clean end: errno untouched */
+                return NULL;
             }
 
             if (!NT_SUCCESS(status)) {
                 DWORD  mapped = ngx_autocert_win32_errno_from_ntstatus(status);
                 SetLastError(mapped);
                 errno = ngx_autocert_win32_errno(mapped);
+                dh->err = mapped;
                 dh->eof = 1;
                 return NULL;
             }
@@ -2162,6 +2167,7 @@ ngx_autocert_readdir(ngx_autocert_dir_t *dh)
             if (iosb.Information > sizeof(dh->buf.bytes)) {
                 SetLastError(ERROR_GEN_FAILURE);
                 errno = ngx_autocert_win32_errno(ERROR_GEN_FAILURE);
+                dh->err = ERROR_GEN_FAILURE;
                 dh->eof = 1;
                 return NULL;
             }
@@ -2173,6 +2179,7 @@ ngx_autocert_readdir(ngx_autocert_dir_t *dh)
                 /* Zero-byte success is not documented but not impossible;
                  * treat exactly like STATUS_NO_MORE_FILES rather than
                  * spinning. */
+                dh->err = 0;                /* clean end, not a failure */
                 dh->eof = 1;
                 return NULL;
             }
@@ -2239,6 +2246,39 @@ ngx_autocert_readdir(ngx_autocert_dir_t *dh)
 
         return &dh->dirent;
     }
+}
+
+
+/*
+ * ngx_autocert_readdir_err() (W12) — the enumeration's EXPLICIT error channel.
+ * Valid only immediately after ngx_autocert_readdir(dh) returned NULL; returns
+ * 0 when that NULL meant clean end-of-directory and a nonzero platform error
+ * code when it meant a genuine failure.
+ *
+ * This exists because the ambient process error state (errno / GetLastError())
+ * CANNOT answer that question on this arm. ngx_autocert_readdir()'s own loop
+ * skips malformed and unrepresentable entries with `continue`, and
+ * WideCharToMultiByte() sets LastError (ERROR_NO_UNICODE_TRANSLATION,
+ * ERROR_INSUFFICIENT_BUFFER) on the failure that triggers one of those skips.
+ * The loop then re-queries, reaches STATUS_NO_MORE_FILES and returns NULL for
+ * a perfectly clean end-of-directory — with GetLastError() still nonzero from
+ * the skip. More generally, Win32 APIs are permitted to set LastError even on
+ * success; only a FAILING call's value is meaningful. A caller inferring
+ * "error" from a sticky global therefore reports a spurious failure at the end
+ * of every walk that skipped one entry.
+ *
+ * dh->err is written on EVERY NULL-returning path above — set to 0 on clean
+ * exhaustion (STATUS_NO_MORE_FILES and the zero-byte-success equivalent) and to
+ * the mapped code on genuine failure — so it is never stale and never
+ * ambiguous. This mirrors how nginx's own ngx_read_dir() avoids the same trap
+ * with NGX_ENOMOREFILES. The POSIX arm in ngx_autocert_shared.h implements the
+ * identical signature over errno, where readdir(3) really does honour the
+ * "untouched on end-of-directory" contract.
+ */
+static ngx_inline ngx_err_t
+ngx_autocert_readdir_err(ngx_autocert_dir_t *dh)
+{
+    return (ngx_err_t) dh->err;
 }
 
 
