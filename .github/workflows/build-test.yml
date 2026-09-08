@@ -1,4 +1,4 @@
-# sync-sha: 263c35708b6b8e9fdba20a9b98c52edc995562e0fa13a074b842f8492ec84e9f
+# sync-sha: 049a227126b7aa2ac2591243bdcba345b7bc94843297010a1c0736d1c544d27c
 name: Build & Test
 
 # Third-party actions pinned to commit SHAs for supply-chain safety.
@@ -56,6 +56,12 @@ on:
   schedule:
     # 03:17 UTC daily — off-peak, staggered vs ci-deep's 03:30 monthly run.
     - cron: '17 3 * * *'
+    # 03:41 UTC weekly (Mondays) — stable-branch build only (resolve-stable /
+    # build-nginx-stable below). NGINX_STABLE only moves weekly (bump.yml), so
+    # gating those two jobs to this tick instead of the daily one above keeps
+    # the ~20min self-hosted stable build from running 7x more often than its
+    # pin can even change; the daily tick stays Validation-only.
+    - cron: '41 3 * * 1'
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
@@ -199,19 +205,16 @@ jobs:
             echo "angie_sha256=$ANGIE_SHA256"
           } >> "$GITHUB_OUTPUT"
 
-  # NGINX_STABLE is pinned, digest-verified in .github/versions.env and
-  # bumped weekly by bump.yml, but until this job existed nothing ever
-  # BUILT it: ci-deep's "stable" matrix cell was removed (3-flavor matrix cut
-  # to nginx+angie only, per user decision, to save CI minutes) and
-  # build-test.yml's own build-nginx job always builds NGINX_VERSION
-  # (== mainline). Adding stable back to the per-PR/push matrix would reverse
-  # that decision, so this runs ONLY on the schedule tick (and on-demand via
-  # workflow_dispatch) -- never on pull_request or push -- keeping per-PR CI
-  # minutes unchanged while the branch the Debian packages actually ship
-  # finally gets compiled somewhere.
+  # Builds the NGINX_STABLE pin (weekly schedule + workflow_dispatch only,
+  # never pull_request/push), which nothing built after ci-deep's "stable"
+  # matrix cell was cut (mem_d12cfa8625434f889ac88a76cf8d5438).
   resolve-stable:
     name: Resolve nginx stable version (scheduled)
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    # Weekly tick only (see the '41 3 * * 1' cron above), not the daily one --
+    # NGINX_STABLE only moves weekly, so a daily build here would be 7x more
+    # runs than the pin can ever change. workflow_dispatch stays unconditional
+    # for on-demand runs.
+    if: github.event.schedule == '41 3 * * 1' || github.event_name == 'workflow_dispatch'
     runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || fromJSON('["self-hosted","builder02","lxc"]') }}
     timeout-minutes: 5
     outputs:
@@ -228,6 +231,10 @@ jobs:
         id: v
         run: |
           set -euo pipefail
+          # Mirrors `resolve` above, not .github/scripts/load-versions.sh:
+          # that script only dumps every KEY=value from versions.env into
+          # $GITHUB_ENV -- it produces no step outputs, so it can't yield the
+          # derived nginx_stable_dir/url this job's downstream steps need.
           f=.github/versions.env
           [ -f "$f" ] || { echo "::error::$f not found"; exit 1; }
           # shellcheck disable=SC1090
@@ -247,7 +254,7 @@ jobs:
   build-nginx-stable:
     name: Build & load (nginx stable ${{ needs.resolve-stable.outputs.nginx_stable_version }})
     needs: [validation, resolve-stable]
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    if: github.event.schedule == '41 3 * * 1' || github.event_name == 'workflow_dispatch'
     runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || fromJSON('["self-hosted","builder02","lxc"]') }}
     timeout-minutes: 20
     steps:
@@ -263,6 +270,12 @@ jobs:
           url: ${{ needs.resolve-stable.outputs.nginx_stable_url }}
           dir: ${{ needs.resolve-stable.outputs.nginx_stable_dir }}
           sha256: ${{ needs.resolve-stable.outputs.nginx_stable_sha256 }}
+          # ci-build.sh otherwise always resolves NGINX_VERSION from
+          # .github/versions.env's mainline pin, ignoring the stable tarball
+          # this action already fetched+verified -- pin it explicitly so the
+          # job actually builds stable, not mainline.
+          nginx_version: ${{ needs.resolve-stable.outputs.nginx_stable_version }}
+          nginx_version_sha256: ${{ needs.resolve-stable.outputs.nginx_stable_sha256 }}
 
   build-nginx:
     name: Build & load (nginx ${{ needs.resolve.outputs.nginx_version }})
