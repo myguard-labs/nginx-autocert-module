@@ -9,6 +9,8 @@
 [![CI Deep](https://github.com/myguard-labs/nginx-autocert-module/actions/workflows/ci-deep.yml/badge.svg)](https://github.com/myguard-labs/nginx-autocert-module/actions/workflows/ci-deep.yml)
 [![Windows build](https://github.com/myguard-labs/nginx-autocert-module/actions/workflows/windows-build.yml/badge.svg)](https://github.com/myguard-labs/nginx-autocert-module/actions/workflows/windows-build.yml)
 
+See [.github/CI.md](.github/CI.md) for what each workflow gates and when it runs.
+
 **Automatic TLS certificates for NGINX — built into the server.**
 
 Features: wildcard, IP-address certs, TLS-ALPN01 (skip port 80), dual-cert.

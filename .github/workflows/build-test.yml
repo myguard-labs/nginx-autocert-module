@@ -1,12 +1,9 @@
-# sync-sha: 81088b65dfe91609e4183c9b4eecfe81a8f333c770fdda7035f20fab574a0aeb
+# sync-sha: eee9f6c4b3766b707ebba21cf0d71620ac2280f5dd360921ab7706b20abbe241
 name: Build & Test
 
 # Third-party actions pinned to commit SHAs for supply-chain safety.
-# Pin table (canonical for all workflow files — keep consistent):
-# actions/checkout@v5          -> 93cb6efe18208431cddfb8368fd83d5badbf9bfd
-# actions/cache@v4             -> 0057852bfaa89a56745cba8c7296529d2fc39830
-# actions/upload-artifact@v5   -> 330a01c490aca151604b8cf639adc76d48f6c5d4
-# actions/download-artifact@v5 -> 634f93cb2916e3fdff6788551b99b062d0335ce0
+# Action pins are tracked by .github/dependabot.yml, not a hand-maintained
+# table here.
 #
 # Local composite actions:
 #   ./.github/actions/setup         apt deps + optional ccache restore.
@@ -294,6 +291,24 @@ jobs:
           # builds stable, not mainline.
           nginx_version: ${{ needs.resolve-stable.outputs.nginx_stable_version }}
           nginx_version_sha256: ${{ needs.resolve-stable.outputs.nginx_stable_sha256 }}
+      - name: Assert built binary reports the stable version
+        # build-module's nginx_version override makes ci-build.sh compile
+        # NGINX_STABLE instead of the mainline pin, but nothing before this
+        # confirmed the resulting binary actually reports that version --
+        # catch a resolve-stable/ci-build.sh drift here instead of shipping a
+        # mainline binary silently mislabeled "stable".
+        # WANT comes in via env:, not interpolated into the script, so the
+        # resolved version string is never expanded as shell/template code.
+        shell: bash
+        env:
+          WANT: ${{ needs.resolve-stable.outputs.nginx_stable_version }}
+        run: |
+          set -euo pipefail
+          got="$("$SERVER_BIN" -v 2>&1)"
+          case "$got" in
+            *"$WANT"*) echo "✓ $SERVER_BIN reports stable version $WANT" ;;
+            *) echo "::error::expected nginx -v to report $WANT, got: $got"; exit 1 ;;
+          esac
 
   build-nginx:
     name: Build & load (nginx ${{ needs.resolve.outputs.nginx_version }})

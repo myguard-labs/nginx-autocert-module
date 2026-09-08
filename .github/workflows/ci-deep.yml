@@ -1,12 +1,12 @@
-# sync-sha: ed5f099fda478186aac40379721070b0854ce18edf1e3a8103bd8f00a58cc09d
+# sync-sha: de22c25c554789b695bbd1aa2ea2319edff8b1bb611dae6e4bc07ecd2f2a5fce
 name: CI Deep
 
 # Exhaustive dynamic analysis — monthly cron, release, and on-demand only,
 # NEVER on PR. Normal PR/push CI stays on Build & Test; this workflow is the
 # fuzz + Valgrind release/deep gate.
-# codeql.yml is dropped entirely: CodeQL / the GitHub Security tab is
-# GitHub-Advanced-Security only and does nothing on a private repo, so the
-# SARIF-upload path is removed too — the scanners still run and GATE on
+# codeql.yml is a separate PR-gating workflow (called from ci.yml, plus its
+# own monthly schedule) and still uploads SARIF — it is not part of this
+# workflow and not dropped. This file's own scanners still run and GATE on
 # findings, they just don't upload.
 #
 # Jobs: fuzz (FUZZ_SECS, 3600s default) · memcheck soak · helgrind soak · scanners ·

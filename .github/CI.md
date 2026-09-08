@@ -1,6 +1,11 @@
 # Continuous integration
 
-The CI pipeline is intentionally split by feedback speed and failure class:
+The CI pipeline is intentionally split by feedback speed and failure class.
+`ci.yml` is the sole PR entry point: it calls `build-test.yml`,
+`security-scanners.yml`, `fuzzing.yml`, `lint.yml` and `codeql.yml`, so each
+runs exactly once per PR. The rest are scheduled or manual only.
+
+## Runs on every PR (via ci.yml)
 
 | Workflow | Required check | Coverage |
 |---|---|---|
@@ -10,19 +15,39 @@ The CI pipeline is intentionally split by feedback speed and failure class:
 | `build-test.yml` | `Crypto unit tests` | JOSE, JWK, thumbprint, JWS signing |
 | `build-test.yml` | `JSON parser unit tests` | ACME JSON parser happy paths and malformed-input rejection |
 | `build-test.yml` | ACME e2e jobs | Pebble account/order/issuance/renewal/backoff/rate-limit flows |
-| `valgrind.yml` | `Memcheck` | unit tests and module-load checks under Valgrind |
-| `codeql.yml` | `Analyze C` | CodeQL security-extended C/C++ queries |
 | `security-scanners.yml` | `Secure` | flawfinder gate plus clang-tidy and Semgrep reports |
-| `fuzzing.yml` | scheduled | monthly libFuzzer run of the ACME JSON parser |
+| `fuzzing.yml` | `Fuzz regression` | 30s/target libFuzzer run of the JSON/HTTP/base64url ACME parsers |
+| `lint.yml` | `Lint` | ci/linter/ shell, nginx-convention and workflow-syntax checks (excludes the C lens; that's `security-scanners.yml`'s job) |
+| `codeql.yml` | `Analyze C` | CodeQL security-extended C/C++ queries, SARIF uploaded to code scanning |
 
-All third-party actions are pinned to immutable commit SHAs. Workflows use
-read-only repository permissions except CodeQL/SARIF upload jobs, which also
-receive `security-events: write`.
+`build-test.yml`, `codeql.yml` and `security-scanners.yml` also carry their own
+bounded `push:`/`schedule:` triggers for direct master coverage; they
+deliberately do not carry a standalone `pull_request:` since `ci.yml` already
+calls them.
 
-`.github/dependabot.yml` is the source of truth for GitHub Action pins across
+## Scheduled or manual only (never gate a PR)
+
+| Workflow | Cadence | Coverage |
+|---|---|---|
+| `ci-deep.yml` | monthly (day 2) + release/dispatch | exhaustive fuzz (`FUZZ_SECS`, 3600s default), memcheck/helgrind soak, scanners, non-blocking coverage, angie Pebble e2e |
+| `valgrind.yml` | manual dispatch | 30s Memcheck-lite soak of the HTTP-01 serve path |
+| `asan.yml` | weekly (Sunday 03:45 UTC) + manual | 30s ASan/UBSan soak of the HTTP-01 serve path |
+| `bump.yml` | weekly | checks nginx.org/angie.software for newer pins, opens a PR against `.github/versions.env` |
+| `windows-build.yml` | every PR touching win32 paths + push | MSVC compile/link and a runtime HTTP-01 challenge-serve smoke test on Windows |
+
+`fuzzing.yml`'s deep 14400s/target campaign lives in `ci-deep.yml`; the
+per-PR `fuzzing.yml` run above is the fast 30s/target regression only.
+
+## Action pins
+
+All third-party actions are pinned to immutable commit SHAs.
+`.github/dependabot.yml` is the source of truth for these pins across
 `.github/workflows/` and `.github/actions/*`; it opens a PR per bump. Workflow
 headers no longer carry hand-maintained "keep in sync" pin tables — check
 `.github/dependabot.yml` and the individual `uses:` lines instead.
+
+Workflows use read-only repository permissions except CodeQL/SARIF upload
+jobs, which also receive `security-events: write`.
 
 ## Local validation
 
@@ -38,3 +63,7 @@ cppcheck \
   src/*.c
 git diff --check
 ```
+
+Or run the same checks the pre-commit hook and `lint.yml` run:
+`ci/linter/run-all.sh` (enable it locally with
+`git config core.hooksPath .githooks`).
