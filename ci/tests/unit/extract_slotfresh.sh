@@ -18,11 +18,16 @@
 # source-layout change fails loudly instead of silently including drift:
 #   1. "typedef struct {" ... "} ngx_autocert_slot_t;"   (the slot fields)
 #   2. the NGX_AUTOCERT_UNIQ_NEVER_LOADED #define line
-#   3. the ngx_autocert_slot_fresh() function body
+#   3. the ngx_autocert_slot_fresh() function body, which runs from its
+#      signature line through the line where brace depth returns to zero --
+#      see lib/slice.sh for the extraction rule, its rationale and its
+#      documented literal/comment limitation.
 
 set -euo pipefail
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=ci/tests/unit/lib/slice.sh
+source "$DIR/lib/slice.sh"
 SRC="$DIR/../../../src/ngx_autocert_serve.c"
 OUT="$DIR/generated_slotfresh.inc"
 FN="ngx_autocert_slot_fresh"
@@ -40,8 +45,6 @@ struct_slice=$(awk '
 
 sentinel_line=$(grep -E '^#define NGX_AUTOCERT_UNIQ_NEVER_LOADED' "$SRC" || true)
 
-fn_start=$(grep -nE "^${FN}\\(" "$SRC" | head -1 | cut -d: -f1 || true)
-
 if [ -z "$struct_slice" ]; then
 	echo "✗ could not locate ngx_autocert_slot_t in $SRC" >&2
 	exit 1
@@ -50,36 +53,26 @@ if [ -z "$sentinel_line" ]; then
 	echo "✗ could not locate NGX_AUTOCERT_UNIQ_NEVER_LOADED in $SRC" >&2
 	exit 1
 fi
-if [ -z "${fn_start:-}" ]; then
+
+if ! rtype=$(slice_find_start "$SRC" "$FN"); then
 	echo "✗ could not locate ${FN}() in $SRC" >&2
 	exit 1
 fi
-rtype=$((fn_start - 1)) # the return-type line precedes the name in this style
 
 # Extract the function. Captured into a variable rather than redirected into
 # $OUT inside a block: shellcheck's SC2094 fires (info, and CI gates on info)
 # whenever a block that writes $OUT also mentions it, even in an error branch.
-if ! body=$(awk -v s="$rtype" -v name="$FN" '
-        NR >= s {
-            print
-            if ($0 ~ ("^" name "\\(")) { entered = 1 }
-            # Count braces once the body is open. The function ends when depth
-            # returns to zero -- NOT at "the next lone } in column 1", which is
-            # also the terminator of the NEXT function if this one was
-            # reformatted (e.g. `} /* slot_fresh */`). Measured: with that
-            # reformat, a lone-} rule silently emitted 52 lines instead of 18,
-            # swallowing the following function, and still exited 0.
-            if (entered) {
-                n = gsub(/{/, "{"); depth += n
-                n = gsub(/}/, "}"); depth -= n
-                if (opened && depth == 0) { closed = 1; exit }
-                if (depth > 0) { opened = 1 }
-            }
-        }
-        END { if (!closed) exit 1 }
-    ' "$SRC"); then
-	echo "✗ ${FN}() body never closed at brace depth 0 in $SRC (reformatted?)" >&2
-	rm -f "$OUT"
+# Note: nothing has been written to $OUT yet at this point, so this error
+# path has no partial write to clean up -- unlike the two checks below it,
+# which run after $OUT is written.
+rc=0
+body=$(slice_function "$SRC" "$rtype" "$FN") || rc=$?
+if [ "$rc" -ne 0 ]; then
+	if [ "$rc" -eq 2 ]; then
+		echo "✗ ${FN}(): brace depth went negative in $SRC (unmatched '}' in a string/char literal or comment?)" >&2
+	else
+		echo "✗ ${FN}() body never closed at brace depth 0 in $SRC (reformatted?)" >&2
+	fi
 	exit 1
 fi
 

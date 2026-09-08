@@ -15,12 +15,16 @@
 #   ngx_http_autocert_base64url_decode   strict RFC4648§5 alphabet check +
 #                                         size-arithmetic guard + decode
 #
-# A function body runs from its signature line to the first line that is a
-# lone "}" in column 1 (the module's style). Fails loudly if not found.
+# The function body runs from its signature line through the line where
+# brace depth returns to zero -- see ../tests/unit/lib/slice.sh for the
+# extraction rule, its rationale and its documented literal/comment
+# limitation. Fails loudly if not found.
 
 set -euo pipefail
 
 FUZZ_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=ci/tests/unit/lib/slice.sh
+source "$FUZZ_DIR/../tests/unit/lib/slice.sh"
 SRC="$FUZZ_DIR/../../src/ngx_http_autocert_crypto.c"
 OUT="$FUZZ_DIR/generated_b64.inc"
 
@@ -31,12 +35,10 @@ fi
 
 fn="ngx_http_autocert_base64url_decode"
 
-start=$(grep -nE "^${fn}\\(" "$SRC" | head -1 | cut -d: -f1 || true)
-if [ -z "${start:-}" ]; then
+if ! rtype=$(slice_find_start "$SRC" "$fn"); then
     echo "✗ could not locate definition of ${fn}() in $SRC" >&2
     exit 1
 fi
-rtype=$((start - 1))
 
 {
     echo "/* --- base64url decode body sliced from ngx_http_autocert_crypto.c --- */"
@@ -44,14 +46,19 @@ rtype=$((start - 1))
     echo ""
 } > "$OUT"
 
-awk -v s="$rtype" -v name="$fn" '
-    NR == s { rt = $0 }
-    NR >= s {
-        print
-        if (entered && $0 == "}") { exit }
-        if ($0 ~ ("^" name "\\(")) { entered = 1 }
-    }
-' "$SRC" >> "$OUT"
+rc=0
+body=$(slice_function "$SRC" "$rtype" "$fn") || rc=$?
+if [ "$rc" -ne 0 ]; then
+    if [ "$rc" -eq 2 ]; then
+        echo "✗ ${fn}(): brace depth went negative in $SRC (unmatched '}' in a string/char literal or comment?)" >&2
+    else
+        echo "✗ ${fn}() body never closed at brace depth 0 in $SRC (reformatted?)" >&2
+    fi
+    rm -f "$OUT"
+    exit 1
+fi
+
+printf '%s\n' "$body" >> "$OUT"
 
 if ! grep -qE "^${fn}\\(" "$OUT"; then
     echo "✗ ${fn} missing from generated output (source layout changed?)" >&2

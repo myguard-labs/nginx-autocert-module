@@ -515,3 +515,10 @@ bash "$WORKSPACE/ci/tests/unit/extract_keygen.sh"
 	"$WORKSPACE/ci/tests/unit/test_keygen_offload.c" \
 	$INET_OBJS -lssl -lcrypto $SANITIZE_LIBS
 "$BUILD_DIR/test_keygen_offload"
+
+# Negative-control coverage for ci/tests/unit/lib/slice.sh, the shared
+# brace-depth slicer every extract_*.sh above (and the two under ci/fuzz)
+# now calls. Pure bash against small synthetic fixtures, no compilation --
+# operates on nothing but its own generated .c snippets, never the real
+# shipped sources, so it stays independent of anything else in this file.
+bash "$WORKSPACE/ci/tests/unit/test_slicer_guards.sh"

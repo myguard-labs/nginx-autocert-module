@@ -12,12 +12,15 @@
 # ngx_str_t/ngx_escape_json, so we lift just them and stay locked to
 # production code with no copy drift.
 #
-# Each function runs from its signature line to the first lone "}" in column 1
-# (module style). Fail loudly if any target is missing.
+# Each function body runs from its signature line through the line where
+# brace depth returns to zero -- see lib/slice.sh for the extraction rule,
+# its rationale and its documented literal/comment limitation.
 
 set -euo pipefail
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=ci/tests/unit/lib/slice.sh
+source "$DIR/lib/slice.sh"
 SRC="$DIR/../../../src/ngx_autocert_account.c"
 OUT="$DIR/generated_jsonsafe.inc"
 FNS=(
@@ -36,13 +39,11 @@ fi
 } > "$OUT"
 
 for FN in "${FNS[@]}"; do
-    start=$(grep -nE "^${FN}\\(" "$SRC" | head -1 | cut -d: -f1 || true)
-    if [ -z "${start:-}" ]; then
+    if ! rtype=$(slice_find_start "$SRC" "$FN"); then
         echo "✗ could not locate definition of ${FN}() in $SRC" >&2
         rm -f "$OUT"
         exit 1
     fi
-    rtype=$((start - 1))   # the return-type line precedes the name
 
     # Wrap each slice in its own opt-out guard. A consumer may need only ONE
     # of these helpers -- test_name_valid.c uses json_safe alone. log_safe is
@@ -52,29 +53,14 @@ for FN in "${FNS[@]}"; do
     # running. Such a consumer defines NGX_AUTOCERT_SLICE_SKIP_<FN> before the
     # include. Guarding beats __attribute__((unused)): that silences the
     # warning but still emits the body, so the link dependency remains.
-    # Extract the function. Captured into a variable rather than redirected into
-    # $OUT inside a block: shellcheck's SC2094 fires (info, and CI gates on info)
-    # whenever a block that writes $OUT also mentions it, even in an error branch.
-    if ! body=$(awk -v s="$rtype" -v name="$FN" '
-        NR >= s {
-            print
-            if ($0 ~ ("^" name "\\(")) { entered = 1 }
-            # Count braces once the body is open. The function ends when depth
-            # returns to zero -- NOT at "the next lone } in column 1", which is
-            # also the terminator of the NEXT function if this one was
-            # reformatted (e.g. `} /* json_safe */`). Measured: with that
-            # reformat, a lone-} rule silently emitted more than needed,
-            # swallowing the following function, and still exited 0.
-            if (entered) {
-                n = gsub(/{/, "{"); depth += n
-                n = gsub(/}/, "}"); depth -= n
-                if (opened && depth == 0) { closed = 1; exit }
-                if (depth > 0) { opened = 1 }
-            }
-        }
-        END { if (!closed) exit 1 }
-    ' "$SRC"); then
-        echo "✗ ${FN}() body never closed at brace depth 0 in $SRC (reformatted?)" >&2
+    rc=0
+    body=$(slice_function "$SRC" "$rtype" "$FN") || rc=$?
+    if [ "$rc" -ne 0 ]; then
+        if [ "$rc" -eq 2 ]; then
+            echo "✗ ${FN}(): brace depth went negative in $SRC (unmatched '}' in a string/char literal or comment?)" >&2
+        else
+            echo "✗ ${FN}() body never closed at brace depth 0 in $SRC (reformatted?)" >&2
+        fi
         rm -f "$OUT"
         exit 1
     fi

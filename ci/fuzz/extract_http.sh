@@ -21,12 +21,16 @@
 #   ngx_autocert_acme_chunk_size      static guarded hex chunk-size parser
 #   ngx_autocert_acme_dechunk         static chunked-body decoder
 #
-# A function body runs from its signature line to the first line that is a lone
-# "}" in column 1 (the module's style). We fail loudly if any target is missing.
+# Each function body runs from its signature line through the line where
+# brace depth returns to zero -- see ../tests/unit/lib/slice.sh for the
+# extraction rule, its rationale and its documented literal/comment
+# limitation. We fail loudly if any target is missing.
 
 set -euo pipefail
 
 FUZZ_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=ci/tests/unit/lib/slice.sh
+source "$FUZZ_DIR/../tests/unit/lib/slice.sh"
 SRC="$FUZZ_DIR/../../src/ngx_autocert_acme.c"
 OUT="$FUZZ_DIR/generated_http.inc"
 
@@ -55,28 +59,25 @@ fns=(
 } > "$OUT"
 
 for fn in "${fns[@]}"; do
-    # Find the definition line: a line that is exactly "<fn>(" at column 0
-    # (the name sits on its own line after the return type in this style).
-    start=$(grep -nE "^${fn}\\(" "$SRC" | head -1 | cut -d: -f1 || true)
-    if [ -z "${start:-}" ]; then
+    if ! rtype=$(slice_find_start "$SRC" "$fn"); then
         echo "✗ could not locate definition of ${fn}() in $SRC" >&2
         rm -f "$OUT"
         exit 1
     fi
-    # Back up over the return-type line(s): include the single preceding line
-    # (the return type). Walk back while the previous line is non-blank and not
-    # itself a closing brace / blank separator.
-    rtype=$((start - 1))
-    awk -v s="$rtype" -v name="$fn" '
-        NR == s { rt = $0 }
-        NR >= s {
-            print
-            # Stop at the first lone "}" at column 1 AFTER we entered the body.
-            if (entered && $0 == "}") { exit }
-            if ($0 ~ ("^" name "\\(")) { entered = 1 }
-        }
-    ' "$SRC" >> "$OUT"
-    echo "" >> "$OUT"
+
+    rc=0
+    body=$(slice_function "$SRC" "$rtype" "$fn") || rc=$?
+    if [ "$rc" -ne 0 ]; then
+        if [ "$rc" -eq 2 ]; then
+            echo "✗ ${fn}(): brace depth went negative in $SRC (unmatched '}' in a string/char literal or comment?)" >&2
+        else
+            echo "✗ ${fn}() body never closed at brace depth 0 in $SRC (reformatted?)" >&2
+        fi
+        rm -f "$OUT"
+        exit 1
+    fi
+
+    printf '%s\n\n' "$body" >> "$OUT"
 done
 
 # Sanity: every target must be present in the output.

@@ -37,11 +37,15 @@
 # task-allocation-failure branch is not injectable and is not covered.
 #
 # The slice is anchored on exact production lines: from the is_rsa predicate
-# through the end of ngx_autocert_keygen_post().
+# through the end of ngx_autocert_keygen_post(), found by brace-depth
+# counting -- see lib/slice.sh for the extraction rule, its rationale and its
+# documented literal/comment limitation.
 
 set -euo pipefail
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=ci/tests/unit/lib/slice.sh
+source "$DIR/lib/slice.sh"
 SRC="$DIR/../../../src/ngx_autocert_order.c"
 OUT="$DIR/generated_keygen.inc"
 
@@ -50,13 +54,10 @@ if [ ! -f "$SRC" ]; then
 	exit 1
 fi
 
-start=$(grep -nE '^ngx_autocert_keygen_is_rsa\(' "$SRC" | head -1 | cut -d: -f1 || true)
-if [ -z "${start:-}" ]; then
+if ! start=$(slice_find_start "$SRC" "ngx_autocert_keygen_is_rsa"); then
 	echo "✗ could not locate ngx_autocert_keygen_is_rsa in $SRC" >&2
 	exit 1
 fi
-# back up over the `static ngx_int_t` return-type line
-start=$((start - 1))
 # ...and prove that is what we actually backed up onto. Without this, a
 # one-line definition or a dropped line starts the slice inside the block
 # comment; every later check still passes (all symbols present, braces intact)
@@ -77,27 +78,19 @@ if [ "$endfn" -lt "$start" ]; then
 	echo "  (source layout changed; the slice is no longer contiguous)" >&2
 	exit 1
 fi
-# first column-0 closing brace at or after _post(): its end
-# Use brace-depth counting to find the true function end, not just the first
-# lone } which could be followed by a trailing comment on a reformatted function.
-if ! end=$(awk -v s="$endfn" '
-	NR >= s {
-		if ($0 ~ /^ngx_autocert_keygen_post\(/) { entered = 1 }
-		# Count braces once the body is open. The function ends when depth
-		# returns to zero -- NOT at "the next lone } in column 1", which is
-		# also the terminator of the NEXT function if this one was
-		# reformatted. Measured: with that reformat, a lone-} rule would miss
-		# the real end and include trailing code.
-		if (entered) {
-			n = gsub(/{/, "{"); depth += n
-			n = gsub(/}/, "}"); depth -= n
-			if (opened && depth == 0) { print NR; exit }
-			if (depth > 0) { opened = 1 }
-		}
-	}
-	END { if (opened && depth != 0) exit 1 }
-' "$SRC"); then
-	echo "✗ could not find the end of ngx_autocert_keygen_post" >&2
+# first column-0 closing brace at or after _post(): its end. Use brace-depth
+# counting to find the true function end, not just the first lone } which
+# could be followed by a trailing comment on a reformatted function, and
+# reject a slice whose depth ever goes negative (an unmatched "}" inside a
+# string/char literal or comment truncating the slice silently otherwise).
+rc=0
+end=$(slice_end_line "$SRC" "$endfn" "ngx_autocert_keygen_post") || rc=$?
+if [ "$rc" -ne 0 ]; then
+	if [ "$rc" -eq 2 ]; then
+		echo "✗ ngx_autocert_keygen_post(): brace depth went negative in $SRC (unmatched '}' in a string/char literal or comment?)" >&2
+	else
+		echo "✗ could not find the end of ngx_autocert_keygen_post" >&2
+	fi
 	exit 1
 fi
 

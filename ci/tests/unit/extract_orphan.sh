@@ -18,10 +18,16 @@
 # injectable-waitpid typedef, _reset(), _add() and _reap(). The arm/timer
 # handler below it are NOT sliced -- they need a live nginx event loop and are
 # out of this TU's reach (stated in the test header too).
+#
+# The function body runs from its signature line through the line where
+# brace depth returns to zero -- see lib/slice.sh for the extraction rule,
+# its rationale and its documented literal/comment limitation.
 
 set -euo pipefail
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=ci/tests/unit/lib/slice.sh
+source "$DIR/lib/slice.sh"
 SRC="$DIR/../../../src/ngx_autocert_order.c"
 OUT="$DIR/generated_orphan.inc"
 
@@ -39,27 +45,17 @@ fi
 # Extract the function. Captured into a variable rather than redirected into
 # $OUT inside a block: shellcheck's SC2094 fires (info, and CI gates on info)
 # whenever a block that writes $OUT also mentions it, even in an error branch.
-if ! body=$(awk -v s="$start" '
-        NR >= s {
-            print
-            if ($0 ~ /^ngx_autocert_orphan_reap\(/) { entered = 1 }
-            # Count braces once the body is open. The function ends when depth
-            # returns to zero -- NOT at "the next lone } in column 1", which is
-            # also the terminator of the NEXT function if this one was
-            # reformatted. Measured: with that reformat, a lone-} rule silently
-            # emitted more than needed, swallowing the following function, and
-            # still exited 0.
-            if (entered) {
-                n = gsub(/{/, "{"); depth += n
-                n = gsub(/}/, "}"); depth -= n
-                if (opened && depth == 0) { closed = 1; exit }
-                if (depth > 0) { opened = 1 }
-            }
-        }
-        END { if (!closed) exit 1 }
-    ' "$SRC"); then
-	echo "✗ ngx_autocert_orphan_reap() body never closed at brace depth 0 in $SRC (reformatted?)" >&2
-	rm -f "$OUT"
+# Note: nothing has been written to $OUT yet at this point, so this error
+# path has no partial write to clean up -- unlike the check below it, which
+# runs after $OUT is written.
+rc=0
+body=$(slice_function "$SRC" "$start" "ngx_autocert_orphan_reap") || rc=$?
+if [ "$rc" -ne 0 ]; then
+	if [ "$rc" -eq 2 ]; then
+		echo "✗ ngx_autocert_orphan_reap(): brace depth went negative in $SRC (unmatched '}' in a string/char literal or comment?)" >&2
+	else
+		echo "✗ ngx_autocert_orphan_reap() body never closed at brace depth 0 in $SRC (reformatted?)" >&2
+	fi
 	exit 1
 fi
 

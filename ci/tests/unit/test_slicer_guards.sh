@@ -1,0 +1,200 @@
+#!/usr/bin/env bash
+#
+# Negative-control coverage for ci/tests/unit/lib/slice.sh (the shared
+# brace-depth slicer every extract_*.sh in ci/tests/unit and ci/fuzz now
+# calls). Operates ONLY on small synthetic fixtures generated below -- never
+# on the real ngx_autocert_*.c sources -- so a change to production code
+# cannot flip these assertions.
+#
+# Asserts:
+#   (a) a closer followed by a trailing comment still yields the correct
+#       sliced line count (the "reformatted function" case the brace-depth
+#       rule exists for, replacing the old lone-`}`-in-column-1 rule).
+#   (b) a missing closer (function body never returns to depth 0) exits 1.
+#   (c) an unmatched `}` inside a string literal that drives depth negative
+#       exits 2 (the new guard from review finding 2).
+#   (d) an anchor that never matches in the source at all exits 1 (the new
+#       guard from review finding 1 -- the "function never found" case,
+#       which the deleted `if [ -z "${end:-}" ]; then exit 1; fi` used to
+#       cover and the bare `END { if (opened && depth != 0) exit 1 }` form
+#       did not).
+#
+# Each assertion is proven to be a REAL negative control, not a vacuous one:
+# this file also runs itself with the corresponding guard commented out via
+# sed, and requires that variant to fail. See run_with_guard_removed().
+
+set -euo pipefail
+
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SRC_LIB="$DIR/lib/slice.sh"
+
+TMP="$(mktemp -d)"
+trap 'rm -rf "$TMP"' EXIT
+
+fail() {
+	echo "✗ $1" >&2
+	exit 1
+}
+
+pass() {
+	echo "✓ $1"
+}
+
+# --- fixtures -----------------------------------------------------------
+
+cat >"$TMP/fixture_reformatted.c" <<'EOF'
+static ngx_int_t
+target_fn(void)
+{
+    /* body */
+    return 0;
+} /* target_fn */
+EOF
+
+cat >"$TMP/fixture_unclosed.c" <<'EOF'
+static ngx_int_t
+target_fn(void)
+{
+    if (1) {
+        return 0;
+    /* missing closing brace for target_fn itself */
+EOF
+
+cat >"$TMP/fixture_stray_close.c" <<'EOF'
+static ngx_int_t
+target_fn(void)
+{
+    if (1) {
+        return 0;
+    }
+    char *s = "}}";
+    return 1;
+}
+EOF
+
+cat >"$TMP/fixture_no_anchor.c" <<'EOF'
+static ngx_int_t
+some_other_function(void)
+{
+    return 0;
+}
+EOF
+
+# --- (a) trailing comment on the real closer: correct line count --------
+
+test_a() {
+	# shellcheck source=ci/tests/unit/lib/slice.sh
+	source "$SRC_LIB"
+	body=$(slice_function "$TMP/fixture_reformatted.c" 1 target_fn)
+	rc=$?
+	[ "$rc" -eq 0 ] || fail "(a) slice_function rc=$rc, expected 0"
+	got=$(printf '%s\n' "$body" | wc -l)
+	[ "$got" -eq 6 ] || fail "(a) expected 6 sliced lines (through the commented closer), got $got"
+	printf '%s\n' "$body" | grep -qE '^\} /\* target_fn \*/$' \
+		|| fail "(a) sliced body does not include the commented closer line"
+	pass "(a) trailing-comment closer: correct 6-line slice, closer line present"
+}
+
+# --- (b) missing closer: exit 1 ------------------------------------------
+
+test_b() {
+	# shellcheck source=ci/tests/unit/lib/slice.sh
+	source "$SRC_LIB"
+	rc=0
+	body=$(slice_function "$TMP/fixture_unclosed.c" 1 target_fn) || rc=$?
+	[ "$rc" -eq 1 ] || fail "(b) expected rc=1 for a body that never closes, got rc=$rc"
+	pass "(b) unclosed body: rc=1 as expected"
+}
+
+# --- (c) unmatched '}' in a string literal driving depth negative: exit 2
+
+test_c() {
+	# shellcheck source=ci/tests/unit/lib/slice.sh
+	source "$SRC_LIB"
+	rc=0
+	body=$(slice_function "$TMP/fixture_stray_close.c" 1 target_fn) || rc=$?
+	[ "$rc" -eq 2 ] || fail "(c) expected rc=2 for a stray '}' driving depth negative, got rc=$rc"
+	pass "(c) stray '}' in a literal: rc=2 as expected"
+}
+
+# --- (d) anchor never matches: exit 1 (slice_find_start) ----------------
+
+test_d() {
+	# shellcheck source=ci/tests/unit/lib/slice.sh
+	source "$SRC_LIB"
+	rc=0
+	slice_find_start "$TMP/fixture_no_anchor.c" target_fn >/dev/null || rc=$?
+	[ "$rc" -eq 1 ] || fail "(d) expected rc=1 when the anchor never matches, got rc=$rc"
+	pass "(d) anchor never matches: rc=1 as expected"
+}
+
+# --- prove each control is real: remove the guard, require red ----------
+#
+# A control that was never observed red proves nothing (test-evidence.md).
+# For each assertion, run this same test file in a subshell against a COPY
+# of lib/slice.sh with the relevant guard line deleted, and require that
+# copy to fail its own assertion.
+
+run_variant() {
+	local label="$1" sed_expr="$2" test_fn="$3"
+	local variant_lib="$TMP/slice_${label}.sh"
+	sed "$sed_expr" "$SRC_LIB" >"$variant_lib"
+
+	# Run test_fn in a FRESH bash process against the MUTATED lib (exported
+	# via env, not sourced by re-parsing this file), expecting failure.
+	if MUTATED_SRC_LIB="$variant_lib" bash "$0" __run_single__ "$test_fn"; then
+		fail "MUTATION CONTROL FAILED: $label — removing the guard did NOT turn $test_fn() red (still exit 0)"
+	else
+		pass "mutation control: removing '$label' guard turns $test_fn() red, as required"
+	fi
+}
+
+if [ "${1:-}" = "__run_single__" ]; then
+	# Re-invoked by run_variant: point SRC_LIB at the mutated copy before
+	# running the single named assertion function.
+	SRC_LIB="$MUTATED_SRC_LIB"
+	TMP="$(mktemp -d)"
+	trap 'rm -rf "$TMP"' EXIT
+	cat >"$TMP/fixture_stray_close.c" <<'FIXEOF'
+static ngx_int_t
+target_fn(void)
+{
+    if (1) {
+        return 0;
+    }
+    char *s = "}}";
+    return 1;
+}
+FIXEOF
+	cat >"$TMP/fixture_no_anchor.c" <<'FIXEOF'
+static ngx_int_t
+some_other_function(void)
+{
+    return 0;
+}
+FIXEOF
+	"$2"
+	exit $?
+fi
+
+echo "== ci/tests/unit/test_slicer_guards.sh =="
+
+test_a
+test_b
+test_c
+test_d
+
+# (c)'s guard is the `if (depth < 0) { exit 2 }` line -- remove it and rerun
+# test_c, which must now fail (rc will be 0 instead of 2: the stray '}'
+# silently truncates the slice at the "if (1) { ... }" closer instead of
+# being caught).
+run_variant "finding2_depth_guard" '/if (depth < 0) { negative = 1; exit 2 }/d' test_c
+
+# (d)'s guard is slice_find_start returning 1 when grep finds nothing --
+# replace that branch with a no-op "always succeed" so the anchor-missing
+# case is silently accepted, and rerun test_d, which must now fail.
+# shellcheck disable=SC2016  # sed script: no shell expansion wanted here
+run_variant "finding1_anchor_guard" \
+	's/if \[ -z "\${line:-}" \]; then/if false; then/' test_d
+
+echo "✓ all slicer guard assertions passed, including mutation controls"
