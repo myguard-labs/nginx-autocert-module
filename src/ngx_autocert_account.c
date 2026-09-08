@@ -248,18 +248,16 @@ ngx_autocert_account_load_key(ngx_autocert_account_t *acct)
             return NGX_ERROR;
         }
 
-        /* absent -> generate + persist into the SAME pinned dir fd. This
-         * runs once per install (never on renewal) and is synchronous on
-         * the event loop; an RSA key_type can make it take noticeably
-         * long, so make the one-time stall attributable instead of
-         * silent. */
-        ngx_log_debug2(NGX_LOG_DEBUG_CORE, acct->log, 0,
-                       "autocert: account key \"%V\" absent, generating "
-                       "(key_type %ui)", &acct->key_path, acct->key_type);
+        /* absent -> generate + persist into the SAME pinned dir fd. Runs
+         * only when the key file is missing (once per CA key dir, not per
+         * renewal), synchronously on the event loop; RSA can block the
+         * worker noticeably, so make that stall attributable. The
+         * terminal "generated + saved" NOTICE is logged by
+         * ngx_autocert_account_save_key(). */
         ngx_log_error(NGX_LOG_NOTICE, acct->log, 0,
                       "autocert: generating account key \"%V\" "
-                      "(key_type %ui, one-time, may briefly block this "
-                      "worker)", &acct->key_path, acct->key_type);
+                      "(key_type %ui), this may block the worker briefly",
+                      &acct->key_path, acct->key_type);
         acct->key = ngx_http_autocert_key_generate(acct->key_type);
         if (acct->key == NULL) {
             (void) ngx_autocert_close(dfd);
@@ -267,9 +265,6 @@ ngx_autocert_account_load_key(ngx_autocert_account_t *acct)
                           "autocert: account key generation failed");
             return NGX_ERROR;
         }
-        ngx_log_error(NGX_LOG_NOTICE, acct->log, 0,
-                      "autocert: account key \"%V\" generated",
-                      &acct->key_path);
         if (ngx_autocert_account_save_key(acct, dfd, leaf) != NGX_OK) {
             (void) ngx_autocert_close(dfd);
             ngx_http_autocert_key_free(acct->key);
