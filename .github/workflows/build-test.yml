@@ -1,4 +1,4 @@
-# sync-sha: 186f857bbc567a4fce6a213186cf1c7eb4c7c0e31c119e923bb43613f053b458
+# sync-sha: 81088b65dfe91609e4183c9b4eecfe81a8f333c770fdda7035f20fab574a0aeb
 name: Build & Test
 
 # Third-party actions pinned to commit SHAs for supply-chain safety.
@@ -222,7 +222,7 @@ jobs:
   # after ci-deep's "stable" matrix cell was cut
   # (mem_d12cfa8625434f889ac88a76cf8d5438).
   resolve-stable:
-    name: Resolve nginx stable version (scheduled)
+    name: Resolve nginx stable version (scheduled / opt-in)
     # Weekly tick only (see the '41 3 * * 1' cron above), not the daily one --
     # NGINX_STABLE only moves weekly, so a daily build here would be 7x more
     # runs than the pin can ever change. `inputs.build_stable` is an explicit
