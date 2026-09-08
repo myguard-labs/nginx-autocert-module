@@ -343,10 +343,10 @@ ngx_http_autocert_serve_init(ngx_conf_t *cf,
      * per-worker loadcap below must charge (see ngx_autocert_loadcap.h).
      */
     {
-        ngx_uint_t  s, mask = sctx->slot_mask, count = 0;
+        ngx_uint_t  sl, mask = sctx->slot_mask, count = 0;
 
-        for (s = 0; s < NGX_AUTOCERT_NSLOTS; s++) {
-            if (mask & ((ngx_uint_t) 1 << s)) {
+        for (sl = 0; sl < NGX_AUTOCERT_NSLOTS; sl++) {
+            if (mask & ((ngx_uint_t) 1 << sl)) {
                 count++;
             }
         }
