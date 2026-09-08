@@ -1,4 +1,4 @@
-# sync-sha: e2fc660bb82b848198da79f460233748c5d19d4d78b4a01c77633c4c52ddfbfe
+# sync-sha: 62dc81940969990e6129144c512e5f26fe004a4fac777edaeae0b05382f5cb4c
 name: Build & Test
 
 # Third-party actions pinned to commit SHAs for supply-chain safety.
@@ -725,42 +725,97 @@ jobs:
 
   notify-scheduled-failure:
     name: Notify scheduled job failure
-    # Runs only on scheduled events (cron) that have any failed jobs in this
-    # workflow. Opens or updates a tracking issue to surface silent failures that
-    # don't show up anywhere except in the Actions tab.
-    if: failure() && github.event_name == 'schedule'
+    # `needs:` must list exactly the jobs that actually run on a schedule
+    # tick: `validation` has no needs/if of its own and runs on both the daily
+    # and Monday ticks; `resolve` skips on every schedule tick, cascade-
+    # skipping the whole PR-matrix, so none of those belong here; `resolve` ->
+    # `resolve-stable` -> `build-nginx-stable` only run on the Monday tick
+    # ('41 3 * * 1'). Without an explicit needs: list a job runs immediately,
+    # concurrently with everything else, so failure() would evaluate before
+    # any dependency could fail and this notifier could never fire (the bug
+    # in the original version of this job).
+    #
+    # `always()` is required, not optional: on the daily tick
+    # resolve-stable/build-nginx-stable are normally SKIPPED (not failed), and
+    # a bare failure()/success() treats an upstream skip as "do not run",
+    # cascade-skipping this job too. always() forces evaluation regardless of
+    # dependency outcome, and the actual failure test moves into the
+    # condition itself: contains(needs.*.result, 'failure').
+    #
+    # contains(...) deliberately checks for 'failure' only, not 'cancelled':
+    # a cancelled run (e.g. a newer push superseding this one via the
+    # concurrency group above) is not a rot signal and must not open a
+    # tracking issue -- see memory lessons on 'cancelled' misreading as
+    # failure in statusCheckRollup.
+    #
+    # github.event_name == 'schedule' keeps this silent on push/pull_request/
+    # workflow_dispatch even when a job genuinely fails there -- those events
+    # already surface failures through normal PR/commit status checks.
+    #
+    #   case (a) daily tick, validation FAILS, both stable jobs SKIPPED:
+    #     needs.validation.result == 'failure' -> contains(...) true,
+    #     event_name == 'schedule' true -> notifier fires. Correct.
+    #   case (b) any tick, everything succeeds or is skipped:
+    #     no needs.*.result is 'failure' -> contains(...) false -> notifier
+    #     does not fire. Correct.
+    needs: [validation, resolve-stable, build-nginx-stable]
+    if: always() && github.event_name == 'schedule' && contains(needs.*.result, 'failure')
     runs-on: ubuntu-latest
     permissions:
       issues: write  # open/comment on tracking issue for scheduled failure notification
     steps:
-      - name: Checkout module
-        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
-        with:
-          persist-credentials: false
-
       - name: Create or update tracking issue
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           GH_SERVER: ${{ github.server_url }}
           GH_RUN_ID: ${{ github.run_id }}
+          GH_WORKFLOW: ${{ github.workflow }}
+          GH_EVENT_SCHEDULE: ${{ github.event.schedule }}
+          GH_SHA: ${{ github.sha }}
+          NEEDS_VALIDATION: ${{ needs.validation.result }}
+          NEEDS_RESOLVE_STABLE: ${{ needs.resolve-stable.result }}
+          NEEDS_BUILD_NGINX_STABLE: ${{ needs.build-nginx-stable.result }}
+          ISSUE_LABEL: ci-scheduled-failure
         run: |
           set -euo pipefail
 
           ISSUE_TITLE="Scheduled CI job failure"
           WORKFLOW_RUN_URL="${GH_SERVER}/${GH_REPO}/actions/runs/${GH_RUN_ID}"
 
-          # Search for existing open issue with this title (idempotent)
-          existing=$(gh issue list --search "title:\"$ISSUE_TITLE\" state:open" \
-            --json number --jq '.[0].number // empty')
+          # Ensure the tracking label exists (idempotent; ignore "already
+          # exists" failure) so lookup below is exact-match on a label rather
+          # than GitHub's eventually-consistent, substring-matching search
+          # index -- fuzzy title search can miss a just-created issue
+          # (opening duplicates) or match an unrelated issue that happens to
+          # share words with the title.
+          gh label create "$ISSUE_LABEL" \
+            --description "Auto-filed by the scheduled CI failure notifier" \
+            --color ededed 2>/dev/null || true
+
+          BODY=$(cat <<EOF
+          Scheduled workflow **${GH_WORKFLOW}** failed.
+
+          - Trigger: schedule (\`${GH_EVENT_SCHEDULE}\`)
+          - Commit: ${GH_SHA}
+          - Job results: validation=${NEEDS_VALIDATION}, resolve-stable=${NEEDS_RESOLVE_STABLE}, build-nginx-stable=${NEEDS_BUILD_NGINX_STABLE}
+          - Run: ${WORKFLOW_RUN_URL}
+          EOF
+          )
+
+          # Exact-match the title among open issues carrying the tracking
+          # label, rather than trusting `gh issue list --search`.
+          existing=$(gh issue list --label "$ISSUE_LABEL" --state open \
+            --json number,title --jq \
+            ".[] | select(.title == \"$ISSUE_TITLE\") | .number" | head -1)
 
           if [ -n "$existing" ]; then
             # Comment on the existing issue instead of creating a new one
-            gh issue comment "$existing" \
-              --body "Run ${GH_RUN_ID} failed. [View run](${WORKFLOW_RUN_URL})"
+            gh issue comment "$existing" --body "$BODY"
           else
             # Create a new issue
             gh issue create \
               --title "$ISSUE_TITLE" \
-              --body "Scheduled workflow failed. [View run](${WORKFLOW_RUN_URL})"
+              --label "$ISSUE_LABEL" \
+              --body "$BODY"
           fi
