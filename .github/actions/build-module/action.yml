@@ -1,4 +1,4 @@
-# sync-sha: 6dbf7af815c7f7dcc5d420892de824fb2ebf015e6dd4433ea25c5a1b7dea4df2
+# sync-sha: 5613185331c41ce82ab7d4d087c34944354a466483fca943c7e46d0efe2583c8
 name: Build module + load/serve tests
 description: >
   Fetch one flavor (nginx | angie), configure + build the autocert dynamic
@@ -259,6 +259,7 @@ runs:
         SERVER_BIN="$SERVER_BIN" \
           NGX_BUILD_DIR="$GITHUB_WORKSPACE/${{ inputs.dir }}" \
           AC_TEST_PORT=18396 \
+          PREFIX=/tmp/ac-http01-authority-${{ inputs.flavor }} \
           bash "$GITHUB_WORKSPACE/ci/tests/e2e/http01-authority.sh"
 
     - name: HTTP-01 authority parity negative control

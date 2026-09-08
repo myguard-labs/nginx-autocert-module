@@ -30,13 +30,19 @@
 #   (c) Unknown/absent Host falling to the default server
 #       (also autocert-disabled)                                -> same 404;
 #       no keyauth leak.
-#   (d) U-label vs canonical A-label of the SAME name. The module rejects a
-#       raw U-label `server_name` at config time ("not a valid DNS name or IP
-#       address"), so an IDN vhost can only be declared as its A-label; here
-#       `xn--fsq.example.com` with `autocert on`. The canonical A-label Host
-#       MUST get the keyauth (200); the raw U-label Host must NOT -- nginx
-#       performs no IDNA folding and rejects the non-ASCII header outright
-#       (400), before vhost selection runs at all. Measured, not assumed.
+#   (d) A-label (IDN) authority matching. The module rejects a raw U-label
+#       `server_name` at config time ("not a valid DNS name or IP address"),
+#       so an IDN vhost can only be declared as its A-label; here
+#       `xn--fsq.example.com` with `autocert on`. Three probes, all of which
+#       reach nginx's name matching:
+#         canonical A-label            -> 200 + keyauth
+#         same A-label, upper-cased    -> 200 + keyauth (nginx case-folds)
+#         same A-label, different TLD  -> 404, no keyauth
+#       A raw U-label Host is deliberately NOT used as the negative: nginx
+#       rejects any non-ASCII byte in Host with 400 inside
+#       ngx_http_validate_host(), BEFORE vhost selection runs, so such a probe
+#       would pass identically with no IDN vhost configured at all and would
+#       prove nothing about name matching.
 #   (e) HTTP/2 h2c :authority reproduces (a) and (b) exactly -- the gate is on
 #       server selection, not on the h1-specific Host header parsing.
 #
@@ -64,16 +70,19 @@ HTTP_SO="$NGX_BUILD_DIR/objs/ngx_http_autocert_module.so"
 HAS_HTTP2=0
 "$SERVER_BIN" -V 2>&1 | grep -q -- '--with-http_v2_module' && HAS_HTTP2=1
 
-# Qualify by flavor: the nginx and angie jobs run this concurrently on a shared
-# self-hosted runner, and each one starts by rm -rf'ing its prefix. An
-# unqualified default lets the second job delete the first job's pidfile out
-# from under its running master process.
-PREFIX="${PREFIX:-${AC_E2E_PREFIX:-/tmp/ac-http01-authority-${FLAVOR:-nginx}}}"
-PORT="${AC_TEST_PORT:-${AC_PORT_18396:-18396}}"
+# The nginx and angie jobs share one self-hosted runner pool with no
+# concurrency group, and this script starts by rm -rf'ing its prefix -- so two
+# jobs sharing a prefix means the second deletes the first's pidfile and store
+# out from under its running master. action.yml therefore passes a
+# flavor-qualified PREFIX on both steps; the default below is for manual runs.
+PREFIX="${PREFIX:-${AC_E2E_PREFIX:-/tmp/ac-http01-authority}}"
+# action.yml passes AC_TEST_PORT explicitly. This script is not in run-all.sh's
+# SCRIPTS list, so run-all.sh never dispatches it and never exports a per-slot
+# AC_PORT_* for it; its ports are registered in PORT_BASES only so max-port.sh's
+# budget ceiling stays honest.
+PORT="${AC_TEST_PORT:-18396}"
 TOKEN="autHtok0123456789ABCDEFGHIJKLMNOPQ"
 KEYAUTH="$TOKEN.authorityParityThumbprintXYZ"
-# U-label (raw UTF-8) form of xn--fsq.example.com.
-U_LABEL=$(printf '\344\276\213.example.com')
 
 B_AUTOCERT_LINE="# autocert intentionally OFF on this server"
 CONTROL=0
@@ -170,18 +179,29 @@ fetch_h1_both() {
     code=${resp##*$'\n'}
     got=${resp%$'\n'*}
 }
+# Same single-exchange discipline as fetch_h1_both, over h2c. The URL must
+# carry the real hostname so it becomes the :authority pseudo-header, hence
+# --resolve; --noproxy is what keeps --resolve effective (see above).
+fetch_h2_both() {
+    local host="$1" resp
+    resp=$(curl -s --noproxy '*' --http2-prior-knowledge \
+        --resolve "$host:$PORT:127.0.0.1" -w '\n%{http_code}' \
+        "http://$host:$PORT/.well-known/acme-challenge/$TOKEN")
+    code=${resp##*$'\n'}
+    got=${resp%$'\n'*}
+}
 # A no-leak assertion on the body alone passes vacuously whenever the request
-# never reached nginx at all (connection refused, a proxy error page, an empty
-# body). The status check below is a LIVENESS guard against exactly that: only
-# nginx answers 404 here, whereas a proxy page or a refused connection gives
-# 000. It is deliberately NOT a discriminator for the enable gate -- autocert
-# itself also returns 404 for an unknown token, byte-identically, so the code
-# alone cannot say which path declined.
-# $4 = the status the case expects (default 404, the disabled-vhost
-# fall-through). Case (d) passes 400 instead: nginx rejects a raw U-label Host
-# as a malformed header before vhost selection ever runs.
+# was answered by something other than nginx. The status check below guards
+# that: the reachable case is an intercepting proxy, which returns its own
+# error page with a 200/502 and a body that trivially lacks the keyauth. (A
+# refused connection does not reach here at all -- `set -e` aborts on curl's
+# exit 7 inside fetch_h1_both.) It is deliberately NOT a discriminator for the
+# enable gate: autocert itself also returns 404 for an unknown token,
+# byte-identically, so the code alone cannot say which path declined.
+# $4 = the expected status; every current call site wants the 404
+# fall-through, so state it explicitly rather than defaulting.
 assert_no_leak() {
-    local label="$1" body="$2" code="$3" want="${4:-404}"
+    local label="$1" body="$2" code="$3" want="$4"
     case "$body" in
         *"$KEYAUTH"*)
             echo "::error::($label) TOKEN LEAK: wrong authority returned the keyauth (body='$body')"
@@ -211,7 +231,7 @@ if [ "$CONTROL" = 1 ]; then
     fi
     echo "✓ (b) [CONTROL] with autocert enabled on b, it now serves the keyauth like a"
 else
-    assert_no_leak "b" "$got" "$code"
+    assert_no_leak "b" "$got" "$code" 404
     echo "✓ (b) disabled authority falls through (404); keyauth never present"
 fi
 
@@ -226,34 +246,44 @@ if [ "$CONTROL" = 1 ]; then
     fi
     echo "✓ (c) [CONTROL] unknown Host on now-enabled default server serves keyauth"
 else
-    assert_no_leak "c" "$got" "$code"
+    assert_no_leak "c" "$got" "$code" 404
     echo "✓ (c) unknown authority falls to disabled default server; keyauth never present"
 fi
 
-echo "== (d) U-label vs canonical A-label authority (no IDNA folding) =="
-# Both forms of the SAME name, against a server declaring only the A-label
-# xn--fsq.example.com with autocert on. nginx performs no IDNA/Unicode
-# normalization on Host. Measured against nginx 1.31.4: the raw U-label is
-# rejected as a malformed header with 400, before vhost selection runs, while
-# the canonical A-label gets 200 + the keyauth. (The module rejects a raw
-# U-label server_name at config time, so the A-label is the only reachable
-# spelling of an IDN vhost; that is what makes this a real pair rather than
-# two spellings of "unknown host".)
-fetch_h1_both "$U_LABEL"
-# The 400 is independent of CONTROL: a malformed Host is rejected before vhost
-# selection, so flipping `autocert on` onto the default server cannot reach it.
-assert_no_leak "d" "$got" "$code" 400
-echo "✓ (d) raw U-label authority is rejected (400), never folded onto the A-label vhost"
-
-# The canonical A-label form of the same name MUST work, in both modes --
-# otherwise (d) would pass merely because the vhost is unreachable, which is
-# the exact way a U-label test can be vacuous.
+echo "== (d) A-label (IDN) authority matching =="
+# All three probes are pure ASCII, so all three reach nginx's virtual-host
+# name matching -- which is the thing under test. A raw U-label probe would
+# not: nginx rejects any non-ASCII Host byte with 400 in
+# ngx_http_validate_host() before selection runs, so it returns 400 whether or
+# not the IDN vhost exists and discriminates nothing. Verified by probing a
+# config with the vhost deleted.
 got=$(fetch_h1 xn--fsq.example.com)
 if [ "$got" != "$KEYAUTH" ]; then
     echo "::error::(d) canonical A-label authority did not receive the keyauth: got '$got'"
     exit 1
 fi
 echo "✓ (d) canonical A-label authority served exact key authorization"
+
+got=$(fetch_h1 XN--FSQ.EXAMPLE.COM)
+if [ "$got" != "$KEYAUTH" ]; then
+    echo "::error::(d) upper-cased A-label authority did not receive the keyauth: got '$got'"
+    exit 1
+fi
+echo "✓ (d) A-label authority matches case-insensitively"
+
+# Same A-label, different registrable domain: parsed fine, reaches matching,
+# matches nothing, falls to the disabled default server.
+fetch_h1_both xn--fsq.example.net
+if [ "$CONTROL" = 1 ]; then
+    if [ "$got" != "$KEYAUTH" ]; then
+        echo "::error::(d) [CONTROL] non-matching A-label did not fall to the now-enabled default: got '$got'"
+        exit 1
+    fi
+    echo "✓ (d) [CONTROL] non-matching A-label falls to now-enabled default; serves keyauth"
+else
+    assert_no_leak "d" "$got" "$code" 404
+    echo "✓ (d) non-matching A-label never receives another vhost's keyauth"
+fi
 
 if [ "$HAS_HTTP2" = 1 ]; then
     echo "== (e) HTTP/2 h2c :authority parity =="
@@ -265,11 +295,7 @@ if [ "$HAS_HTTP2" = 1 ]; then
     fi
     echo "✓ (e) h2 :authority enabled authority served exact key authorization"
 
-    got=$(curl -s --noproxy '*' --http2-prior-knowledge --resolve b.example.com:"$PORT":127.0.0.1 \
-        "http://b.example.com:$PORT/.well-known/acme-challenge/$TOKEN")
-    code=$(curl -s --noproxy '*' --http2-prior-knowledge --resolve b.example.com:"$PORT":127.0.0.1 \
-        -o /dev/null -w '%{http_code}' \
-        "http://b.example.com:$PORT/.well-known/acme-challenge/$TOKEN")
+    fetch_h2_both b.example.com
     if [ "$CONTROL" = 1 ]; then
         if [ "$got" != "$KEYAUTH" ]; then
             echo "::error::(e) [CONTROL] h2 :authority b did not flip to keyauth: got '$got'"
@@ -277,7 +303,7 @@ if [ "$HAS_HTTP2" = 1 ]; then
         fi
         echo "✓ (e) [CONTROL] h2 :authority b now serves keyauth with autocert enabled"
     else
-        assert_no_leak "e" "$got" "$code"
+        assert_no_leak "e" "$got" "$code" 404
         echo "✓ (e) h2c :authority parity: disabled authority never leaks the keyauth"
     fi
 else
