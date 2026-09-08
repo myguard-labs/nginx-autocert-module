@@ -207,13 +207,30 @@ ngx_http_autocert_key_free(EVP_PKEY *pkey)
 }
 
 
+void
+ngx_http_autocert_cleanse(ngx_str_t *s)
+{
+    if (s == NULL || s->data == NULL || s->len == 0) {
+        return;
+    }
+
+    OPENSSL_cleanse(s->data, s->len);
+    s->len = 0;
+}
+
+
 ngx_int_t
 ngx_http_autocert_key_to_pem(ngx_pool_t *pool, EVP_PKEY *pkey, ngx_str_t *out)
 {
-    BIO      *bio;
-    char     *data;
-    long      len;
-    u_char   *buf;
+    BIO       *bio;
+    char      *data;
+    long       len;
+    u_char    *buf;
+    ngx_int_t  rc;
+
+    data = NULL;
+    len = 0;
+    rc = NGX_ERROR;
 
     bio = BIO_new(BIO_s_mem());
     if (bio == NULL) {
@@ -223,31 +240,44 @@ ngx_http_autocert_key_to_pem(ngx_pool_t *pool, EVP_PKEY *pkey, ngx_str_t *out)
     if (PEM_write_bio_PKCS8PrivateKey(bio, pkey, NULL, NULL, 0, NULL, NULL)
         != 1)
     {
-        BIO_free(bio);
-        return NGX_ERROR;
+        /* A failed write can still have emitted a partial key; fall through to
+         * the cleanse rather than freeing the BIO with plaintext in it. */
+        len = BIO_get_mem_data(bio, &data);
+        goto done;
     }
 
     len = BIO_get_mem_data(bio, &data);
     if (len <= 0) {
-        BIO_free(bio);
-        return NGX_ERROR;
+        goto done;
     }
 
     buf = ngx_pnalloc(pool, len);
     if (buf == NULL) {
-        BIO_free(bio);
-        return NGX_ERROR;
+        /* Pool OOM: the BIO provably holds a COMPLETE key PEM here, so this is
+         * the exit that most needs the wipe below. */
+        goto done;
     }
 
     ngx_memcpy(buf, data, len);
     out->data = buf;
     out->len = len;
+    rc = NGX_OK;
 
     ngx_log_debug1(NGX_LOG_DEBUG_CORE, pool->log, 0,
                    "autocert: key PEM encoded, %O bytes", (off_t) len);
 
+done:
+
+    /* The memory BIO holds a second plaintext copy of the PKCS#8 key. BIO_free
+     * releases it to the malloc arena without wiping, so cleanse it on EVERY
+     * exit — the caller's copy in `out` is wiped by the caller at ITS last
+     * use. */
+    if (data != NULL && len > 0) {
+        OPENSSL_cleanse(data, (size_t) len);
+    }
+
     BIO_free(bio);
-    return NGX_OK;
+    return rc;
 }
 
 

@@ -76,6 +76,21 @@ ngx_int_t ngx_http_autocert_key_from_pem(ngx_str_t *pem, EVP_PKEY **out);
 
 
 /*
+ * Wipe a buffer that held private key material (a key PEM, a decoded HMAC
+ * secret) at its last use, before the owning pool/slab is released. This is
+ * NOT a free: nginx pool and slab memory is reclaimed by its arena, so the
+ * bytes would otherwise stay readable in reused allocations and in a core
+ * dump. OPENSSL_cleanse is used rather than ngx_memzero because it is not
+ * elided as a dead store.
+ *
+ * Tolerates a NULL/zero-length ngx_str_t so it can be called unconditionally
+ * on error paths where the buffer was never allocated. The ngx_str_t's len is
+ * cleared afterwards, so a second call is a no-op and a stale read is empty.
+ */
+void ngx_http_autocert_cleanse(ngx_str_t *s);
+
+
+/*
  * base64url (RFC 4648 §5, no padding). _encode never fails for a valid input;
  * _decode returns NGX_ERROR on a malformed alphabet/length. Both allocate
  * *out from the pool.

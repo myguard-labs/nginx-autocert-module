@@ -1209,6 +1209,10 @@ ngx_http_autocert_cache_reload(ngx_autocert_cert_t *c, ngx_uint_t slot,
     ngx_int_t           rc = NGX_ERROR;
     ngx_pool_t         *tmp;
 
+    /* Null so the cleanse at `done:` is safe on the read_file-failure path,
+     * where chain_pem was filled in but key_pem was not. */
+    ngx_str_null(&key_pem);
+
     /* Reject a host that could escape the store as a path segment. */
     if (host->len == 0
         || host->data[0] == '.'
@@ -1467,6 +1471,16 @@ done:
     if (key != NULL) {
         EVP_PKEY_free(key);
     }
+
+    /*
+     * The serving private key PEM read off disk into `tmp`. Its last read is
+     * PEM_read_bio_PrivateKey above; the EVP_PKEY (installed or freed) owns
+     * its own copy. ngx_destroy_pool() hands the pages back unwiped, so a
+     * later allocation from the same arena would expose the key — wipe first.
+     * chain_pem is public and left alone.
+     */
+    ngx_http_autocert_cleanse(&key_pem);
+
     ngx_destroy_pool(tmp);
 
     return rc;
@@ -1699,6 +1713,8 @@ ngx_http_autocert_serve_alpn_cert(ngx_connection_t *c, SSL *ssl_conn,
     EVP_PKEY   *key = NULL;
     int         ret = 0;
 
+    ngx_str_null(&key_pem);
+
     rc = ngx_autocert_alpn_get(sctx->alpn_zone, host, c->pool,
                                &cert_pem, &key_pem);
     if (rc != NGX_OK) {
@@ -1775,6 +1791,15 @@ done:
     if (key != NULL) {
         EVP_PKEY_free(key);
     }
+
+    /*
+     * key_pem is the challenge key copied out of the slab into c->pool by
+     * ngx_autocert_alpn_get(). Its last read is the PEM_read_bio_PrivateKey
+     * above (the EVP_PKEY owns its own copy), and c->pool is not destroyed
+     * until the connection closes — so wipe it here, on every exit path from
+     * this handshake callback. cert_pem is public and left alone.
+     */
+    ngx_http_autocert_cleanse(&key_pem);
 
     return ret;
 }

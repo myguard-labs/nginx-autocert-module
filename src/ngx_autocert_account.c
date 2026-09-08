@@ -343,10 +343,22 @@ ngx_autocert_account_load_key(ngx_autocert_account_t *acct)
         ngx_log_error(NGX_LOG_ERR, acct->log, 0,
                       "autocert: short read on account key \"%V\"",
                       &acct->key_path);
+        /* pem.len still holds the allocation extent, not the partial fill
+         * length, but the whole buffer was freshly allocated for this read
+         * and never held anything else, so wiping the full extent covers
+         * whatever bytes did land before the short read. */
+        ngx_http_autocert_cleanse(&pem);
         return NGX_ERROR;
     }
 
     rc = ngx_http_autocert_key_from_pem(&pem, &acct->key);
+
+    /* Last read of the on-disk private key PEM: key_from_pem has parsed it
+     * into an EVP_PKEY that owns its own copy, so the buffer is dead here on
+     * BOTH the success and the parse-failure path. It lives in the account
+     * pool, which is not freed until worker exit. */
+    ngx_http_autocert_cleanse(&pem);
+
     if (rc != NGX_OK || acct->key == NULL) {
         ngx_log_error(NGX_LOG_ERR, acct->log, 0,
                       "autocert: parse account key \"%V\" failed",
@@ -415,6 +427,7 @@ ngx_autocert_account_save_key(ngx_autocert_account_t *acct, int dfd,
         ngx_log_error(NGX_LOG_ERR, acct->log, ngx_errno,
                       "autocert: create account key \"%V\" failed",
                       &acct->key_path);
+        ngx_http_autocert_cleanse(&pem);
         return NGX_ERROR;
     }
 
@@ -435,6 +448,7 @@ ngx_autocert_account_save_key(ngx_autocert_account_t *acct, int dfd,
                       &acct->key_path);
         ngx_autocert_close(fd);
         (void) ngx_autocert_unlinkat(dfd, leaf, 0);       /* no exposed key */
+        ngx_http_autocert_cleanse(&pem);
         return NGX_ERROR;
     }
 
@@ -450,10 +464,18 @@ ngx_autocert_account_save_key(ngx_autocert_account_t *acct, int dfd,
                           &acct->key_path);
             ngx_autocert_close(fd);
             (void) ngx_autocert_unlinkat( dfd, leaf, 0 ); /* no partial key */
+            ngx_http_autocert_cleanse(&pem);
             return NGX_ERROR;
         }
         off += (size_t) n;
     }
+
+    /* Last use of the key PEM: it is now on disk. Wipe the pool copy before
+     * any of the exits below — the account pool is long-lived, so leaving it
+     * there would keep the private key readable for the worker's lifetime.
+     * Placed after the write loop rather than at each return so every exit
+     * path from here on is covered by construction. */
+    ngx_http_autocert_cleanse(&pem);
 
     /* Durably persist before close: the O_EXCL load path only regenerates on
      * ENOENT, so a crash that left a zero/partial key would be refused forever.
@@ -646,6 +668,9 @@ ngx_autocert_account_build_eab(ngx_autocert_account_t *acct, ngx_str_t *jwk,
     ngx_str_t   mac, b64_sig;
     u_char     *p;
     size_t      size;
+    ngx_int_t   rc = NGX_ERROR;
+
+    ngx_str_null(&hmac_key);
 
     /* eab_kid is operator-supplied but lands inside the signed protected JSON;
      * new_account_url is server-supplied and already json_safe-checked by the
@@ -671,12 +696,17 @@ ngx_autocert_account_build_eab(ngx_autocert_account_t *acct, ngx_str_t *jwk,
         return NGX_ERROR;
     }
 
+    /* From here on hmac_key holds the CA's raw EAB secret in pool memory that
+     * is not freed until the account pool dies. Every exit below goes through
+     * `done:` so the secret is cleansed on the error paths too, not only on
+     * success. */
+
     /* protected = {"alg":"HS256","kid":"<kid>","url":"<newAccount url>"} */
     size = sizeof("{\"alg\":\"HS256\",\"kid\":\"\",\"url\":\"\"}") - 1
            + acct->eab_kid.len + acct->new_account_url.len;
     protected.data = ngx_pnalloc(acct->pool, size);
     if (protected.data == NULL) {
-        return NGX_ERROR;
+        goto done;
     }
     p = ngx_cpymem(protected.data, "{\"alg\":\"HS256\",\"kid\":\"",
                    sizeof("{\"alg\":\"HS256\",\"kid\":\"") - 1);
@@ -692,14 +722,14 @@ ngx_autocert_account_build_eab(ngx_autocert_account_t *acct, ngx_str_t *jwk,
         || ngx_http_autocert_base64url_encode(acct->pool, jwk, &b64_payload)
            != NGX_OK)
     {
-        return NGX_ERROR;
+        goto done;
     }
 
     /* signing input = b64(protected) "." b64(payload) */
     signing_input.len = b64_protected.len + 1 + b64_payload.len;
     signing_input.data = ngx_pnalloc(acct->pool, signing_input.len);
     if (signing_input.data == NULL) {
-        return NGX_ERROR;
+        goto done;
     }
     p = ngx_cpymem(signing_input.data, b64_protected.data, b64_protected.len);
     *p++ = '.';
@@ -711,13 +741,13 @@ ngx_autocert_account_build_eab(ngx_autocert_account_t *acct, ngx_str_t *jwk,
     {
         ngx_log_error(NGX_LOG_ERR, acct->log, 0,
                       "autocert: EAB HMAC-SHA256 failed");
-        return NGX_ERROR;
+        goto done;
     }
 
     if (ngx_http_autocert_base64url_encode(acct->pool, &mac, &b64_sig)
         != NGX_OK)
     {
-        return NGX_ERROR;
+        goto done;
     }
 
     /* {"protected":"<>","payload":"<>","signature":"<>"} */
@@ -726,7 +756,7 @@ ngx_autocert_account_build_eab(ngx_autocert_account_t *acct, ngx_str_t *jwk,
         1 + b64_protected.len + b64_payload.len + b64_sig.len;
     out->data = ngx_pnalloc(acct->pool, size);
     if (out->data == NULL) {
-        return NGX_ERROR;
+        goto done;
     }
     p = ngx_cpymem(out->data, "{\"protected\":\"",
                    sizeof("{\"protected\":\"") - 1);
@@ -738,7 +768,15 @@ ngx_autocert_account_build_eab(ngx_autocert_account_t *acct, ngx_str_t *jwk,
     p = ngx_cpymem(p, "\"}", sizeof("\"}") - 1);
     out->len = p - out->data;
 
-    return NGX_OK;
+    rc = NGX_OK;
+
+done:
+
+    /* Last use of the decoded secret is the HMAC-SHA256 above. Wipe it before
+     * the account pool outlives this call; `out` carries only the MAC. */
+    ngx_http_autocert_cleanse(&hmac_key);
+
+    return rc;
 }
 
 

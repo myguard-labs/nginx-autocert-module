@@ -121,6 +121,94 @@ test_base64url(void)
 }
 
 
+/* Portable substring search over a possibly non-terminated buffer; avoids
+ * needing _GNU_SOURCE for memmem() in this standalone harness. */
+static int
+buf_has(const u_char *buf, size_t len, const char *needle)
+{
+    size_t  n = strlen(needle);
+    size_t  i;
+
+    if (n > len) {
+        return 0;
+    }
+    for (i = 0; i + n <= len; i++) {
+        if (memcmp(buf + i, needle, n) == 0) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+
+/*
+ * Key-material wiping (issues.md NIT/Security): private key PEMs and the
+ * decoded EAB HMAC secret live in nginx pool/slab memory that is reclaimed by
+ * its arena, not zeroed. ngx_http_autocert_cleanse() is what every last-use
+ * site calls before that reclamation, so this asserts the ACTUAL bytes are
+ * zero afterwards -- not merely that the helper returned.
+ *
+ * cert_key_pem (the issued certificate's private key, the highest-value
+ * buffer) is wiped by exactly this helper in ngx_autocert_order_free(); the
+ * order machinery needs a live ACME driver, so the helper is exercised here
+ * on a real PKCS#8 key PEM produced by the same key_to_pem() that fills it.
+ */
+static void
+test_cleanse(void)
+{
+    EVP_PKEY   *pkey;
+    ngx_str_t   pem, copy;
+    size_t      i, nonzero;
+    size_t      saved_len;
+    u_char     *saved_data;
+
+    pkey = ngx_http_autocert_key_generate(NGX_HTTP_AUTOCERT_CRYPTO_P384);
+    CHECK(pkey != NULL, "cleanse: keygen");
+    if (pkey == NULL) {
+        return;
+    }
+
+    CHECK(ngx_http_autocert_key_to_pem(pool, pkey, &pem) == NGX_OK,
+          "cleanse: key_to_pem");
+    ngx_http_autocert_key_free(pkey);
+
+    /* Sanity: the buffer really does hold a private key before the wipe,
+     * otherwise an all-zero assertion afterwards would be vacuous. */
+    CHECK(pem.len > 100, "cleanse: PEM is non-trivial");
+    CHECK(buf_has(pem.data, pem.len, "BEGIN PRIVATE KEY"),
+          "cleanse: PEM holds key material before wipe");
+
+    /* The helper clears ->len, so keep the extent to scan afterwards. The
+     * pool still owns the allocation, so reading it back is defined. */
+    saved_data = pem.data;
+    saved_len = pem.len;
+
+    ngx_http_autocert_cleanse(&pem);
+
+    CHECK(pem.len == 0, "cleanse: length cleared");
+
+    nonzero = 0;
+    for (i = 0; i < saved_len; i++) {
+        if (saved_data[i] != 0) {
+            nonzero++;
+        }
+    }
+    CHECK(nonzero == 0, "cleanse: every PEM byte is zero after wipe");
+    CHECK(!buf_has(saved_data, saved_len, "BEGIN PRIVATE KEY"),
+          "cleanse: PEM header gone after wipe");
+
+    /* Crash-tolerance smoke for the guard clauses (asserts only that these
+     * calls do not fault; a NULL/empty ngx_str_t and a second call on an
+     * already-wiped buffer are the error paths exercised here, and none of
+     * them has an observable effect to assert on). */
+    ngx_str_null(&copy);
+    ngx_http_autocert_cleanse(&copy);
+    ngx_http_autocert_cleanse(NULL);
+    ngx_http_autocert_cleanse(&pem);
+    CHECK(pem.len == 0, "cleanse: still zero-length after redundant calls");
+}
+
+
 static void
 test_base64url_alloc_failure(void)
 {
@@ -644,6 +732,7 @@ main(void)
     test_base64url();
     test_base64url_alloc_failure();
     test_hmac_sha256();
+    test_cleanse();
     test_dns01_txt();
     test_jwk_and_thumbprint();
     test_key_curve_name();
