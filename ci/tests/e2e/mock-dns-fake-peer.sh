@@ -642,7 +642,44 @@ count_dns_mode() {
 		echo 0
 		return
 	}
-	grep -c "mode=$1" "$DNS_LOG" || true
+	grep -c "query mode=$1\$" "$DNS_LOG" || true
+}
+
+# Two-phase wait pairing a resolve failure to the mode-tagged query that
+# actually caused it. A single combined "both counters advanced somewhere in
+# this window" check (the round-1 shape) cannot tell a receipt-then-failure
+# causal chain apart from two independent facts landing in the same poll
+# window -- e.g. the counted failure could be the tail of the PREVIOUS
+# stage's still-in-flight lookup (within RESOLVER_TIMEOUT) while the receipt
+# comes from a later, still-unresolved query. Splitting into phases makes the
+# failure provably downstream of the mode-tagged query:
+#   phase A: wait for a NEW mode-tagged receipt (peer actually served this
+#            stage's reply);
+#   phase B: re-snapshot count_resolve_fail() at the moment that receipt
+#            appears, then require the resolve-fail count to exceed THAT
+#            re-snapshot -- so the counted failure cannot predate the receipt.
+wait_for_mode_then_fail() {
+	local mode="$1" tries="$2" mode_before="$3" desc="$4"
+	local i mode_before_b
+	for i in $(seq 1 "$tries"); do
+		[ "$(count_dns_mode "$mode")" -gt "$mode_before" ] && break
+		sleep 0.5
+		[ "$i" = "$tries" ] && {
+			echo "::error::phase A timed out waiting for a new 'mode=$mode' receipt -- $desc"
+			tail -60 "$LOG"
+			return 1
+		}
+	done
+	mode_before_b=$(count_resolve_fail)
+	for i in $(seq 1 "$tries"); do
+		[ "$(count_resolve_fail)" -gt "$mode_before_b" ] && return 0
+		sleep 0.5
+		[ "$i" = "$tries" ] && {
+			echo "::error::phase B timed out waiting for a resolve failure AFTER the 'mode=$mode' receipt was observed -- $desc"
+			tail -60 "$LOG"
+			return 1
+		}
+	done
 }
 
 # fd/timer/connection resource snapshot for the neutrality check below.
@@ -699,78 +736,42 @@ echo "✓ driver retried the resolve after a dropped-reply timeout"
 # ---- Stage 2: SERVFAIL --------------------------------------------------
 echo "== stage 2: SERVFAIL =="
 echo "servfail" >"$MODE_FILE"
-FAILS_BEFORE_2=$(count_resolve_fail)
 SERVFAIL_BEFORE_2=$(count_dns_mode servfail)
-for i in $(seq 1 "$WAIT_TRIES"); do
-	[ "$(count_resolve_fail)" -gt "$FAILS_BEFORE_2" ] && break
-	sleep 0.5
-	[ "$i" = "$WAIT_TRIES" ] && {
-		echo "::error::no resolve failure observed under SERVFAIL"
-		exit 1
-	}
-done
-[ "$(count_dns_mode servfail)" -gt "$SERVFAIL_BEFORE_2" ] || {
-	echo "::error::no 'mode=servfail' receipt observed in $DNS_LOG -- the resolve failure was not proven to come from an actual SERVFAIL reply"
-	exit 1
-}
-echo "✓ SERVFAIL surfaced as a resolve failure (confirmed by a new servfail-mode receipt) and the order was not stuck"
+wait_for_mode_then_fail servfail "$WAIT_TRIES" "$SERVFAIL_BEFORE_2" \
+	"resolve failure must follow a genuine SERVFAIL reply" || exit 1
+echo "✓ SERVFAIL surfaced as a resolve failure caused by a new, subsequently-confirmed servfail-mode receipt, and the order was not stuck"
 
 # ---- Stage 3: NXDOMAIN ---------------------------------------------------
 echo "== stage 3: NXDOMAIN =="
 echo "nxdomain" >"$MODE_FILE"
-FAILS_BEFORE_3=$(count_resolve_fail)
 NXDOMAIN_BEFORE_3=$(count_dns_mode nxdomain)
-for i in $(seq 1 "$WAIT_TRIES"); do
-	[ "$(count_resolve_fail)" -gt "$FAILS_BEFORE_3" ] && break
-	sleep 0.5
-	[ "$i" = "$WAIT_TRIES" ] && {
-		echo "::error::no resolve failure observed under NXDOMAIN"
-		exit 1
-	}
-done
-[ "$(count_dns_mode nxdomain)" -gt "$NXDOMAIN_BEFORE_3" ] || {
-	echo "::error::no 'mode=nxdomain' receipt observed in $DNS_LOG -- the resolve failure was not proven to come from an actual NXDOMAIN reply"
-	exit 1
-}
-echo "✓ NXDOMAIN surfaced as a resolve failure (confirmed by a new nxdomain-mode receipt) and the order was not stuck"
+wait_for_mode_then_fail nxdomain "$WAIT_TRIES" "$NXDOMAIN_BEFORE_3" \
+	"resolve failure must follow a genuine NXDOMAIN reply" || exit 1
+echo "✓ NXDOMAIN surfaced as a resolve failure caused by a new, subsequently-confirmed nxdomain-mode receipt, and the order was not stuck"
 
 # ---- Stage 4: malformed reply --------------------------------------------
 echo "== stage 4: malformed (truncated header) reply =="
 echo "malformed" >"$MODE_FILE"
-FAILS_BEFORE_4=$(count_resolve_fail)
 MALFORMED_BEFORE_4=$(count_dns_mode malformed)
-for i in $(seq 1 "$WAIT_TRIES"); do
-	# count_issued deliberately excluded: a successful issuance means the
-	# reply was NOT malformed, which is a stage FAILURE, not a pass.
-	{ [ "$(count_resolve_fail)" -gt "$FAILS_BEFORE_4" ] && [ "$(count_dns_mode malformed)" -gt "$MALFORMED_BEFORE_4" ]; } && break
-	sleep 0.5
-	[ "$i" = "$WAIT_TRIES" ] && {
-		echo "::error::no resolve failure paired with a new malformed-mode receipt -- either nothing failed, or the fake peer never actually served a malformed reply"
-		exit 1
-	}
-done
-echo "✓ malformed reply (confirmed served by the fake peer) did not wedge the resolve, and produced a genuine resolve failure rather than an accidental issuance"
+# count_issued deliberately excluded: a successful issuance means the reply
+# was NOT malformed, which is a stage FAILURE, not a pass.
+wait_for_mode_then_fail malformed "$WAIT_TRIES" "$MALFORMED_BEFORE_4" \
+	"resolve failure must follow a genuine malformed reply" || exit 1
+echo "✓ malformed reply (confirmed served by the fake peer, and shown to cause the following resolve failure) did not wedge the resolve, and produced a genuine resolve failure rather than an accidental issuance"
 
 # ---- Stage 5: bogus compression-pointer reply ----------------------------
 echo "== stage 5: reply with an out-of-range compression pointer =="
 echo "badcompress" >"$MODE_FILE"
-BEFORE_5_FAIL=$(count_resolve_fail)
 BEFORE_5_REJECTED=0
 [ -f "$LOG" ] && BEFORE_5_REJECTED=$(grep -c "unexpected compression pointer in DNS response" "$LOG" || true)
 BEFORE_5_REJECTED=${BEFORE_5_REJECTED:-0}
 BADCOMPRESS_BEFORE_5=$(count_dns_mode badcompress)
-for i in $(seq 1 "$WAIT_TRIES"); do
-	# count_issued deliberately excluded here too (see stage 4): a clean
-	# issuance would mean the compression-pointer reply was never actually
-	# malformed from nginx core's point of view -- that is a stage failure.
-	{ [ "$(count_resolve_fail)" -gt "$BEFORE_5_FAIL" ] && [ "$(count_dns_mode badcompress)" -gt "$BADCOMPRESS_BEFORE_5" ]; } && break
-	sleep 0.5
-	[ "$i" = "$WAIT_TRIES" ] && {
-		echo "::error::no resolve failure paired with a new badcompress-mode receipt under a malformed compression-pointer reply"
-		exit 1
-	}
-done
-echo "✓ bogus compression pointer (confirmed served by the fake peer) did not wedge the resolve"
+# count_issued deliberately excluded here too (see stage 4): a clean
+# issuance would mean the compression-pointer reply was never actually
+# malformed from nginx core's point of view -- that is a stage failure.
+wait_for_mode_then_fail badcompress "$WAIT_TRIES" "$BADCOMPRESS_BEFORE_5" \
+	"resolve failure must follow a genuine bad-compression-pointer reply" || exit 1
+echo "✓ bogus compression pointer (confirmed served by the fake peer, and shown to cause the following resolve failure) did not wedge the resolve"
 # Targeted oracle, not just the hang-guard above: the hang-guard alone is
 # VACUOUS against a fixture bug that accidentally builds a syntactically
 # VALID reply (a real regression this fixture hit -- see the comment on the
@@ -825,7 +826,7 @@ ISSUED_AFTER_TC=$(count_issued)
 	exit 1
 }
 
-# ---- Stage 7: HUP while a resolution is in flight ------------------------
+# ---- Stage 7: reload (HUP) with the peer dropping; driver re-resolves after reload ------------------------
 # KNOWN LIMITATION (reported, not silently worked around): after stage 6's
 # successful issuance there is no natural mechanism left in this fixture to
 # make the driver re-resolve DNS on its own before the reload --
@@ -847,7 +848,7 @@ ISSUED_AFTER_TC=$(count_issued)
 # the one caught in flight, then confirm the reload actually produced a new
 # resolve failure afterward (the property under test: an HUP mid-resolve does
 # not wedge the driver, verified by wait_for_new below rather than assumed).
-echo "== stage 7: reload (HUP) while a resolution is in flight =="
+echo "== stage 7: reload (HUP) with the peer dropping; driver re-resolves after reload =="
 FAILS_BEFORE_7=$(count_resolve_fail)
 echo "drop" >"$MODE_FILE"
 sleep 0.2
@@ -866,7 +867,7 @@ done
 	echo "::error::pid changed across an in-place (master_process off) reload"
 	exit 1
 }
-echo "✓ process survived SIGHUP with an in-flight resolve (pid unchanged, in-place reload)"
+echo "✓ process survived SIGHUP (pid unchanged, in-place reload)"
 
 # Confirm the reload actually drove a fresh resolve attempt against the
 # still-dropping peer (the property this stage is named for), rather than
@@ -875,7 +876,7 @@ echo "✓ process survived SIGHUP with an in-flight resolve (pid unchanged, in-p
 # with the peer still in "drop" mode that resolve must fail again.
 wait_for_new 'autocert: resolve "'"${CA_HOST}"'" failed' "$WAIT_TRIES" "$FAILS_BEFORE_7" \
 	"a fresh post-reload resolve failure while the peer is still dropping"
-echo "✓ the reload drove a genuinely fresh resolve attempt (not a stale pre-reload line), and it was cancelled/retried cleanly rather than wedging the driver"
+echo "✓ the reload drove a genuinely fresh resolve attempt (not a stale pre-reload line), and the driver was not wedged by it"
 
 echo "== stage 8: recovery after reload -- peer starts answering again =="
 BOOTSTRAP_ATTEMPTS_BEFORE_8=0
@@ -905,7 +906,7 @@ if [ "$ISSUED_TOTAL" -eq 2 ]; then
 	echo "✓ exactly one NEW post-reload finalize was observed, and no duplicate/extra issuance beyond it -- exactly-once finalize holds across the reload"
 elif [ "$ISSUED_TOTAL" -eq 1 ]; then
 	echo "info: still 1 issuance total -- post-reload completion is blocked by the documented master_process-off connection-table limitation (see single-process-reload.sh), not asserted here"
-	echo "✓ no post-reload finalize was observed at all in this run, so exactly-once finalize trivially holds (nothing to duplicate) -- the property was not exercised across the reload"
+	echo "info: no post-reload finalize was observed at all in this run, so exactly-once finalize trivially holds (nothing to duplicate) -- the property was not exercised across the reload"
 else
 	echo "::error::expected 1 or 2 issuances total after the reload, got $ISSUED_TOTAL"
 	grep autocert "$LOG" | grep -i "certificate provisioned\|order failed"
