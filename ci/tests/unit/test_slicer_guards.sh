@@ -102,6 +102,17 @@ static ngx_int_t
 target_fn(void)
 { return 0; }
 EOF
+
+	# Braces inside a comment on the SIGNATURE line must not be mistaken
+	# for a one-line body -- doing so truncates the slice before the real
+	# opener and still exits 0 (a silent wrong answer, the worst shape).
+	cat >"$dir/fixture_comment_braces.c" <<'EOF'
+static ngx_int_t
+target_fn(void) /* {} */
+{
+    return 0;
+}
+EOF
 }
 
 make_fixtures "$TMP"
@@ -192,7 +203,19 @@ test_g() {
 	[ "$got" -eq 3 ] || fail "(g) expected 3 sliced lines (through the one-line body), got $got"
 	printf '%s\n' "$body" | grep -qE '^\{ return 0; \}$' \
 		|| fail "(g) sliced body does not include the one-line open+close brace line"
-	pass "(g) one-line function body: correct 3-line slice"
+	end=0
+	got_end=$(slice_end_line "$TMP/fixture_one_line_body.c" 1 target_fn) || end=$?
+	[ "$end" -eq 0 ] || fail "(g) slice_end_line rc=$end, expected 0 for a one-line body"
+	[ "$got_end" -eq 3 ] || fail "(g) slice_end_line returned $got_end, expected 3"
+
+	# Regression: braces in a signature-line comment are not a body.
+	rc=0
+	body=$(slice_function "$TMP/fixture_comment_braces.c" 1 target_fn) || rc=$?
+	[ "$rc" -eq 0 ] || fail "(g) comment-brace fixture: slice_function rc=$rc, expected 0"
+	got=$(printf '%s\n' "$body" | wc -l)
+	[ "$got" -eq 5 ] \
+		|| fail "(g) comment-brace fixture: expected 5 sliced lines through the real body, got $got (slice truncated at the signature comment)"
+	pass "(g) one-line body + signature-comment braces: correct slices"
 }
 
 # --- prove each control is real: remove the guard, require red ----------

@@ -51,9 +51,16 @@ slice_function() {
             print
             if ($0 ~ ("^" name "\\(")) { entered = 1 }
             if (entered) {
+                # Braces inside a single-line /* comment */ are not code:
+                # "target_fn(void) /* {} */" would otherwise open and close
+                # on the signature line and be mistaken for a one-line body,
+                # truncating the slice before the real opener. Count braces
+                # on a comment-stripped copy, never on $0 itself.
+                code = $0
+                gsub(/\/\*[^*]*\*+([^\/*][^*]*\*+)*\//, " ", code)
                 pre_depth = depth
-                n_open = gsub(/{/, "{"); depth += n_open
-                n = gsub(/}/, "}"); depth -= n
+                n_open = gsub(/{/, "{", code); depth += n_open
+                n = gsub(/}/, "}", code); depth -= n
                 if (depth < 0) { negative = 1; exit 2 }
                 # A one-line body ("{ return 0; }") opens and closes on the
                 # same line: depth is already back down to 0 by the time we
@@ -95,9 +102,16 @@ slice_end_line() {
         NR >= s {
             if ($0 ~ ("^" name "\\(")) { entered = 1 }
             if (entered) {
+                # Braces inside a single-line /* comment */ are not code:
+                # "target_fn(void) /* {} */" would otherwise open and close
+                # on the signature line and be mistaken for a one-line body,
+                # truncating the slice before the real opener. Count braces
+                # on a comment-stripped copy, never on $0 itself.
+                code = $0
+                gsub(/\/\*[^*]*\*+([^\/*][^*]*\*+)*\//, " ", code)
                 pre_depth = depth
-                n_open = gsub(/{/, "{"); depth += n_open
-                n = gsub(/}/, "}"); depth -= n
+                n_open = gsub(/{/, "{", code); depth += n_open
+                n = gsub(/}/, "}", code); depth -= n
                 if (depth < 0) { negative = 1; exit 2 }
                 # See slice_function matching comment above: a one-line body
                 # opens and closes on the same line, so opened (only ever
