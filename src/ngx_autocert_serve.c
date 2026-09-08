@@ -989,14 +989,11 @@ ngx_http_autocert_cert_cb(SSL *ssl_conn, void *arg)
         time_t      now = ngx_time();
 
         /*
-         * Throttle the disk stat/reload of ALL slots to at most once per second
-         * per name (including the never-loaded case so a connection storm
-         * against a not-yet-issued name doesn't stat() every handshake). When
-         * throttled we install whatever the slots already hold. checked starts
+         * Two independent bounds, both required. The first throttles the disk
+         * stat/reload of ALL slots to at most once per second per name
+         * (including the never-loaded case, so a connection storm against a
+         * not-yet-issued name doesn't stat() every handshake); checked starts
          * at 0, so the first handshake always loads.
-         */
-        /*
-         * Two independent bounds, both required:
          *
          *   now != cert->checked        per-NAME: at most one disk refresh per
          *                               second for this cache entry.
