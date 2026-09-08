@@ -1,4 +1,4 @@
-# sync-sha: 23fe0a3abcce5376fe9a3454a15ba4542397dd1fde7ce6a2bcdb67f9241be1e1
+# sync-sha: e2fc660bb82b848198da79f460233748c5d19d4d78b4a01c77633c4c52ddfbfe
 name: Build & Test
 
 # Third-party actions pinned to commit SHAs for supply-chain safety.
@@ -722,3 +722,45 @@ jobs:
           path: e2e-timings-${{ matrix.flavor }}.tsv
           if-no-files-found: warn
           retention-days: 30
+
+  notify-scheduled-failure:
+    name: Notify scheduled job failure
+    # Runs only on scheduled events (cron) that have any failed jobs in this
+    # workflow. Opens or updates a tracking issue to surface silent failures that
+    # don't show up anywhere except in the Actions tab.
+    if: failure() && github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write  # open/comment on tracking issue for scheduled failure notification
+    steps:
+      - name: Checkout module
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          persist-credentials: false
+
+      - name: Create or update tracking issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          GH_SERVER: ${{ github.server_url }}
+          GH_RUN_ID: ${{ github.run_id }}
+        run: |
+          set -euo pipefail
+
+          ISSUE_TITLE="Scheduled CI job failure"
+          WORKFLOW_RUN_URL="${GH_SERVER}/${GH_REPO}/actions/runs/${GH_RUN_ID}"
+
+          # Search for existing open issue with this title (idempotent)
+          existing=$(gh issue list --search "title:\"$ISSUE_TITLE\" state:open" \
+            --json number --jq '.[0].number // empty')
+
+          if [ -n "$existing" ]; then
+            # Comment on the existing issue instead of creating a new one
+            gh issue comment "$existing" \
+              --body "Run ${GH_RUN_ID} failed. [View run](${WORKFLOW_RUN_URL})"
+          else
+            # Create a new issue
+            gh issue create \
+              --title "$ISSUE_TITLE" \
+              --body "Scheduled workflow failed. [View run](${WORKFLOW_RUN_URL})"
+          fi
