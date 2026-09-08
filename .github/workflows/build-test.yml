@@ -1,4 +1,4 @@
-# sync-sha: bbffed3f723e578b3a3fc0f6325bc9d3832060b328c2051ce93a19c8dd5904ef
+# sync-sha: 263c35708b6b8e9fdba20a9b98c52edc995562e0fa13a074b842f8492ec84e9f
 name: Build & Test
 
 # Third-party actions pinned to commit SHAs for supply-chain safety.
@@ -198,6 +198,71 @@ jobs:
             echo "angie_url=https://download.angie.software/files/angie-$ANGIE_VERSION.tar.gz"
             echo "angie_sha256=$ANGIE_SHA256"
           } >> "$GITHUB_OUTPUT"
+
+  # NGINX_STABLE is pinned, digest-verified in .github/versions.env and
+  # bumped weekly by bump.yml, but until this job existed nothing ever
+  # BUILT it: ci-deep's "stable" matrix cell was removed (3-flavor matrix cut
+  # to nginx+angie only, per user decision, to save CI minutes) and
+  # build-test.yml's own build-nginx job always builds NGINX_VERSION
+  # (== mainline). Adding stable back to the per-PR/push matrix would reverse
+  # that decision, so this runs ONLY on the schedule tick (and on-demand via
+  # workflow_dispatch) -- never on pull_request or push -- keeping per-PR CI
+  # minutes unchanged while the branch the Debian packages actually ship
+  # finally gets compiled somewhere.
+  resolve-stable:
+    name: Resolve nginx stable version (scheduled)
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || fromJSON('["self-hosted","builder02","lxc"]') }}
+    timeout-minutes: 5
+    outputs:
+      nginx_stable_version: ${{ steps.v.outputs.nginx_stable_version }}
+      nginx_stable_dir: ${{ steps.v.outputs.nginx_stable_dir }}
+      nginx_stable_url: ${{ steps.v.outputs.nginx_stable_url }}
+      nginx_stable_sha256: ${{ steps.v.outputs.nginx_stable_sha256 }}
+    steps:
+      - name: Checkout module
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          persist-credentials: false
+      - name: Read pinned nginx stable version
+        id: v
+        run: |
+          set -euo pipefail
+          f=.github/versions.env
+          [ -f "$f" ] || { echo "::error::$f not found"; exit 1; }
+          # shellcheck disable=SC1090
+          . "$f"
+          for k in NGINX_STABLE NGINX_STABLE_SHA256; do
+            eval "v=\${$k:-}"
+            [ -n "$v" ] || { echo "::error::$k missing from $f"; exit 1; }
+          done
+          echo "Pinned nginx stable: $NGINX_STABLE"
+          {
+            echo "nginx_stable_version=$NGINX_STABLE"
+            echo "nginx_stable_dir=nginx-$NGINX_STABLE"
+            echo "nginx_stable_url=https://nginx.org/download/nginx-$NGINX_STABLE.tar.gz"
+            echo "nginx_stable_sha256=$NGINX_STABLE_SHA256"
+          } >> "$GITHUB_OUTPUT"
+
+  build-nginx-stable:
+    name: Build & load (nginx stable ${{ needs.resolve-stable.outputs.nginx_stable_version }})
+    needs: [validation, resolve-stable]
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || fromJSON('["self-hosted","builder02","lxc"]') }}
+    timeout-minutes: 20
+    steps:
+      - name: Checkout module
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          persist-credentials: false
+      - name: Build module + load/serve tests
+        uses: ./.github/actions/build-module  # zizmor: ignore[self-repository] actionlint rejects $/ (actionlint#711)
+        with:
+          flavor: nginx
+          version: ${{ needs.resolve-stable.outputs.nginx_stable_version }}
+          url: ${{ needs.resolve-stable.outputs.nginx_stable_url }}
+          dir: ${{ needs.resolve-stable.outputs.nginx_stable_dir }}
+          sha256: ${{ needs.resolve-stable.outputs.nginx_stable_sha256 }}
 
   build-nginx:
     name: Build & load (nginx ${{ needs.resolve.outputs.nginx_version }})
