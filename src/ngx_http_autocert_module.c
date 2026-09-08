@@ -87,6 +87,8 @@ static char *ngx_http_autocert_key_type(ngx_conf_t *cf, ngx_command_t *cmd,
     void *conf);
 static char *ngx_http_autocert_store(ngx_conf_t *cf, ngx_command_t *cmd,
     void *conf);
+static char *ngx_http_autocert_uint_slot(ngx_conf_t *cf, ngx_command_t *cmd,
+    void *conf);
 static char *ngx_http_autocert_challenge(ngx_conf_t *cf, ngx_command_t *cmd,
     void *conf);
 static char *ngx_http_autocert_resolver(ngx_conf_t *cf, ngx_command_t *cmd,
@@ -169,6 +171,14 @@ static ngx_command_t ngx_http_autocert_commands[] = {
     { ngx_string( "autocert_runtime_ttl" ), NGX_HTTP_MAIN_CONF | NGX_CONF_TAKE1,
       ngx_conf_set_sec_slot, NGX_HTTP_MAIN_CONF_OFFSET,
       offsetof( ngx_http_autocert_main_conf_t, runtime_ttl ), NULL },
+
+    /* Per-worker, per-second ceiling on synchronous cert loads done on the TLS
+     * handshake path. Bounds the SNI-flood amplification the per-name throttle
+     * cannot (ngx_autocert_loadcap.h). 0 = unlimited (pre-1.x behaviour). */
+    { ngx_string( "autocert_handshake_load_limit" ),
+      NGX_HTTP_MAIN_CONF | NGX_CONF_TAKE1, ngx_http_autocert_uint_slot,
+      NGX_HTTP_MAIN_CONF_OFFSET,
+      offsetof( ngx_http_autocert_main_conf_t, handshake_load_limit ), NULL },
 
     { ngx_string( "autocert_key_type" ), NGX_HTTP_MAIN_CONF | NGX_CONF_1MORE,
       ngx_http_autocert_key_type, NGX_HTTP_MAIN_CONF_OFFSET, 0, NULL },
@@ -409,6 +419,7 @@ ngx_http_autocert_create_main_conf(ngx_conf_t *cf)
     amcf->dns_hook_timeout = NGX_CONF_UNSET;
 
     amcf->runtime_ttl = NGX_CONF_UNSET;
+    amcf->handshake_load_limit = NGX_CONF_UNSET_UINT;
 
     return amcf;
 }
@@ -457,6 +468,23 @@ ngx_http_autocert_init_main_conf(ngx_conf_t *cf, void *conf)
      * e2e suite needs them to exercise eviction without waiting days.
      */
     ngx_conf_init_value(amcf->runtime_ttl, 7 * 24 * 60 * 60);
+
+    /*
+     * Default 64 loads/worker/second. A load is one cache entry's slots: open +
+     * fstat + up to 1 MB read + PEM parse per slot, order-of-100us each. 64
+     * bounds the handshake-path disk work a worker can be made to do to a small
+     * fraction of a second while sitting far above any legitimate burst — the
+     * budget is only ever charged by a name whose entry has NOT been refreshed
+     * this second, so steady-state serving of cached certs charges nothing at
+     * all, and even a cold start with 64 configured names clears in one second.
+     * A worker with MORE than `limit` configured names takes ceil(names/limit)
+     * seconds to warm its whole cache after start or reload (a fresh worker's
+     * cache is empty, same as cold start), serving the bootstrap certificate
+     * for not-yet-warmed names meanwhile — correct and self-healing, but a real
+     * behavior difference from the old unbounded default for large name counts.
+     * Operators with large name sets may want to raise the limit.
+     */
+    ngx_conf_init_uint_value(amcf->handshake_load_limit, 64);
 
     if (amcf->runtime_ttl < 0) {
         ngx_log_error(NGX_LOG_EMERG, cf->log, 0,
@@ -2081,6 +2109,42 @@ ngx_http_autocert_key_type(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
 
     /* keep the scalar in sync for the not-yet-array-aware consumers */
     amcf->key_type = *(ngx_uint_t *) amcf->key_types->elts;
+
+    return NGX_CONF_OK;
+}
+
+
+/*
+ * Like ngx_conf_set_num_slot, but writes through an ngx_uint_t * instead of
+ * an ngx_int_t *. ngx_conf_set_num_slot would write a signed value into this
+ * unsigned field via NGX_CONF_UNSET's bit pattern happening to match
+ * NGX_CONF_UNSET_UINT at this width; this setter keeps the field's type and
+ * its duplicate/negative checks explicit instead of relying on that.
+ */
+static char *
+ngx_http_autocert_uint_slot(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
+{
+    char        *p = conf;
+    ngx_str_t   *value;
+    ngx_int_t    n;
+    ngx_uint_t  *field;
+
+    field = (ngx_uint_t *) (p + cmd->offset);
+
+    if (*field != NGX_CONF_UNSET_UINT) {
+        return "is duplicate";
+    }
+
+    value = cf->args->elts;
+
+    n = ngx_atoi(value[1].data, value[1].len);
+    if (n == NGX_ERROR) {
+        ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                           "invalid number \"%V\"", &value[1]);
+        return NGX_CONF_ERROR;
+    }
+
+    *field = (ngx_uint_t) n;
 
     return NGX_CONF_OK;
 }

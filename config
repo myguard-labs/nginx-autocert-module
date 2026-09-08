@@ -64,6 +64,7 @@ AUTOCERT_DEPS="$ngx_addon_dir/src/ngx_autocert_driver.h \
                $ngx_addon_dir/src/ngx_autocert_alpn.h \
                $ngx_addon_dir/src/ngx_autocert_serve.h \
                $ngx_addon_dir/src/ngx_autocert_requests.h \
+               $ngx_addon_dir/src/ngx_autocert_loadcap.h \
                $ngx_addon_dir/src/ngx_http_autocert_crypto.h \
                $ngx_addon_dir/src/ngx_autocert_shared.h \
                $ngx_addon_dir/src/ngx_autocert_win32.h \

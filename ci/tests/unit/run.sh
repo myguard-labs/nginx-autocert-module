@@ -157,6 +157,15 @@ bash "$WORKSPACE/ci/fuzz/extract_http.sh"
 	"$NGX/objs/src/core/ngx_string.o" -o test_ratecap $SANITIZE_LIBS
 ./test_ratecap
 
+# Per-worker per-second cap on synchronous cert loads on the TLS handshake path
+# (ngx_autocert_loadcap.h). Header-only static-inline touching no nginx runtime
+# state; links against ONLY ngx_string.o, same idiom as test_ratecap.c above.
+# shellcheck disable=SC2086
+"$CC" $SANITIZE_CFLAGS $EXTRA_CFLAGS -Wall -Wextra -Werror $CORE_INC \
+	"$WORKSPACE/ci/tests/unit/test_loadcap.c" \
+	"$NGX/objs/src/core/ngx_string.o" -o test_loadcap $SANITIZE_LIBS
+./test_loadcap
+
 # F4: pure seconds->ms clamp used for resolver_timeout (and matching the
 # dns-01 hook/propagation-delay clamp style) (ngx_autocert_timeconv.h).
 # Header-only static-inline touching no nginx runtime state; links against

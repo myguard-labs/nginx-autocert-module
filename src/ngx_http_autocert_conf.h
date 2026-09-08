@@ -223,6 +223,16 @@ typedef struct {
      * tick evicts nodes idle past this TTL (+ removes their A6 marker).
      * 0 = GC off (pre-TTL behavior: learned hosts persist forever). */
     time_t           runtime_ttl;
+
+    /* Max synchronous certificate loads (open + read + PEM parse) a worker will
+     * perform on the TLS handshake path in any one second, across all names.
+     * The per-name once-per-second throttle in serve.c cannot bound this: a
+     * flood of DISTINCT SNIs makes a fresh cache entry per name and so a fresh
+     * load per name, with the attacker picking how many. Exceeding the budget
+     * defers the load to the next second and serves the cached certificate
+     * (autocert_handshake_load_limit; 0 = unlimited). See
+     * ngx_autocert_loadcap.h. */
+    ngx_uint_t       handshake_load_limit;
 } ngx_http_autocert_main_conf_t;
 
 
