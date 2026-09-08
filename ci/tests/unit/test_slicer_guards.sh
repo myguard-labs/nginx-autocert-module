@@ -32,7 +32,7 @@
 #
 # Each assertion is proven to be a REAL negative control, not a vacuous one:
 # this file also runs itself with the corresponding guard commented out via
-# sed, and requires that variant to fail. See run_with_guard_removed().
+# sed, and requires that variant to fail. See run_variant().
 
 set -euo pipefail
 
@@ -109,6 +109,30 @@ EOF
 	cat >"$dir/fixture_comment_braces.c" <<'EOF'
 static ngx_int_t
 target_fn(void) /* {} */
+{
+    return 0;
+}
+EOF
+
+	# A wrapped parameter list carrying a balanced initialiser closes the
+	# signature and the braces on the SAME line. Those braces are not a
+	# body either -- reading them as one truncates the slice at exit 0.
+	# Braces in a comment on its OWN line, after the signature has closed:
+	# only the comment strip defends this one (the parameter-list gate has
+	# already opened by then).
+	cat >"$dir/fixture_comment_own_line.c" <<'EOF'
+static ngx_int_t
+target_fn(void)
+    /* comment with { } braces */
+{
+    return 0;
+}
+EOF
+
+	cat >"$dir/fixture_param_braces.c" <<'EOF'
+static ngx_int_t
+target_fn(ngx_int_t a,
+    struct s v = { 0 })
 {
     return 0;
 }
@@ -215,7 +239,19 @@ test_g() {
 	got=$(printf '%s\n' "$body" | wc -l)
 	[ "$got" -eq 5 ] \
 		|| fail "(g) comment-brace fixture: expected 5 sliced lines through the real body, got $got (slice truncated at the signature comment)"
-	pass "(g) one-line body + signature-comment braces: correct slices"
+	rc=0
+	body=$(slice_function "$TMP/fixture_param_braces.c" 1 target_fn) || rc=$?
+	[ "$rc" -eq 0 ] || fail "(g) param-brace fixture: slice_function rc=$rc, expected 0"
+	got=$(printf '%s\n' "$body" | wc -l)
+	[ "$got" -eq 6 ] \
+		|| fail "(g) param-brace fixture: expected 6 sliced lines through the real body, got $got (slice truncated at the parameter list)"
+	rc=0
+	body=$(slice_function "$TMP/fixture_comment_own_line.c" 1 target_fn) || rc=$?
+	[ "$rc" -eq 0 ] || fail "(g) own-line-comment fixture: slice_function rc=$rc, expected 0"
+	got=$(printf '%s\n' "$body" | wc -l)
+	[ "$got" -eq 6 ] \
+		|| fail "(g) own-line-comment fixture: expected 6 sliced lines through the real body, got $got (slice truncated at the comment)"
+	pass "(g) one-line body + comment and parameter braces: correct slices"
 }
 
 # --- prove each control is real: remove the guard, require red ----------
@@ -226,7 +262,7 @@ test_g() {
 # copy to fail its own assertion.
 
 run_variant() {
-	local label="$1" sed_expr="$2" test_fn="$3"
+	local label="$1" sed_expr="$2" test_fn="$3" rc=0
 	local variant_lib="$TMP/slice_${label}.sh"
 	sed "$sed_expr" "$SRC_LIB" >"$variant_lib"
 
@@ -235,8 +271,9 @@ run_variant() {
 	# and the "expecting failure" check below would then pass for the
 	# wrong reason -- the assertion never actually ran against a mutant.
 	# Require the variant to differ from the real lib before trusting it.
-	cmp -s "$SRC_LIB" "$variant_lib" \
-		&& fail "MUTATION CONTROL FAILED: $label — sed expression matched nothing; variant is byte-identical to $SRC_LIB"
+	if cmp -s "$SRC_LIB" "$variant_lib"; then
+		fail "MUTATION CONTROL FAILED: $label — sed expression matched nothing; variant is byte-identical to $SRC_LIB"
+	fi
 
 	# Run test_fn in a FRESH bash process against the MUTATED lib (exported
 	# via env, not sourced by re-parsing this file), expecting failure.
@@ -257,7 +294,13 @@ run_variant() {
 if [ "${1:-}" = "__run_single__" ]; then
 	# Re-invoked by run_variant: point SRC_LIB at the mutated copy before
 	# running the single named assertion function.
-	SRC_LIB="${MUTATED_SRC_LIB:?__run_single__ requires MUTATED_SRC_LIB to be set by run_variant}"
+	# Exit 2, NOT the 1 that `:?` would produce -- run_variant credits a
+	# child exit of 1 as "the assertion went red", so harness breakage must
+	# use a distinct status or it re-opens the false-pass hole this file
+	# exists to close.
+	[ -n "${MUTATED_SRC_LIB:-}" ] \
+		|| { echo "__run_single__ requires MUTATED_SRC_LIB set by run_variant" >&2; exit 2; }
+	SRC_LIB="$MUTATED_SRC_LIB"
 	declare -F "$2" >/dev/null \
 		|| { echo "__run_single__: no such test function: $2" >&2; exit 2; }
 	TMP="$(mktemp -d)"
@@ -304,6 +347,12 @@ run_variant "major1_end_anchor_guard" \
 # which both opens and closes the body terminate the slice. Remove it and the
 # one-line body is never recognised as closed, so test_g must go red.
 run_variant "one_line_body_disjunct" \
-	's/(opened || (pre_depth == 0 \&\& n_open > 0))/(opened)/g' test_g
+	's/same_line = (sig_was_closed \&\& pre_depth == 0 \&\& n_open > 0)/same_line = 0/g' test_g
+# The comment strip and the parameter-list gate each defend one truncation
+# shape in test_g's fixtures; remove either and test_g must go red.
+run_variant "comment_strip" \
+	'/, " ", code)$/d' test_g
+run_variant "param_list_gate" \
+	's/sig_was_closed = sig_closed/sig_was_closed = 1/g' test_g
 
 echo "✓ all slicer guard assertions passed, including mutation controls"

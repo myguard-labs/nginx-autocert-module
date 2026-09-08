@@ -58,6 +58,23 @@ slice_function() {
                 # on a comment-stripped copy, never on $0 itself.
                 code = $0
                 gsub(/\/\*[^*]*\*+([^\/*][^*]*\*+)*\//, " ", code)
+                # Track the parameter list. A brace can only open the BODY
+                # once the closing ")" of the signature; before that, any
+                # balanced "{...}" is a default argument or an initialiser,
+                # not a one-line body. Without this, a wrapped parameter
+                # list such as "struct s v = { 0 })" ends the slice at the
+                # signature and returns a truncated stub at exit 0.
+                n_lp = gsub(/\(/, "(", code)
+                n_rp = gsub(/\)/, ")", code)
+                # sig_was_closed is the state BEFORE this line. A line that
+                # both closes the parameter list and carries balanced braces
+                # ("struct s v = { 0 })") must not have those braces read as
+                # a body, so the same-line-body test below uses the prior
+                # state, not the state this line just produced.
+                sig_was_closed = sig_closed
+                if (n_lp > 0) { saw_lp = 1 }
+                paren += n_lp - n_rp
+                if (saw_lp && paren <= 0) { sig_closed = 1 }
                 pre_depth = depth
                 n_open = gsub(/{/, "{", code); depth += n_open
                 n = gsub(/}/, "}", code); depth -= n
@@ -69,7 +86,8 @@ slice_function() {
                 # it. (pre_depth == 0 && n_open > 0) catches "this line
                 # itself went positive", so the same-line close is not
                 # missed.
-                if ((opened || (pre_depth == 0 && n_open > 0)) && depth == 0) {
+                same_line = (sig_was_closed && pre_depth == 0 && n_open > 0)
+                if ((opened || same_line) && depth == 0) {
                     closed = 1; exit
                 }
                 if (depth > 0) { opened = 1 }
@@ -109,6 +127,23 @@ slice_end_line() {
                 # on a comment-stripped copy, never on $0 itself.
                 code = $0
                 gsub(/\/\*[^*]*\*+([^\/*][^*]*\*+)*\//, " ", code)
+                # Track the parameter list. A brace can only open the BODY
+                # once the closing ")" of the signature; before that, any
+                # balanced "{...}" is a default argument or an initialiser,
+                # not a one-line body. Without this, a wrapped parameter
+                # list such as "struct s v = { 0 })" ends the slice at the
+                # signature and returns a truncated stub at exit 0.
+                n_lp = gsub(/\(/, "(", code)
+                n_rp = gsub(/\)/, ")", code)
+                # sig_was_closed is the state BEFORE this line. A line that
+                # both closes the parameter list and carries balanced braces
+                # ("struct s v = { 0 })") must not have those braces read as
+                # a body, so the same-line-body test below uses the prior
+                # state, not the state this line just produced.
+                sig_was_closed = sig_closed
+                if (n_lp > 0) { saw_lp = 1 }
+                paren += n_lp - n_rp
+                if (saw_lp && paren <= 0) { sig_closed = 1 }
                 pre_depth = depth
                 n_open = gsub(/{/, "{", code); depth += n_open
                 n = gsub(/}/, "}", code); depth -= n
@@ -117,7 +152,8 @@ slice_end_line() {
                 # opens and closes on the same line, so opened (only ever
                 # set on a PRIOR line) misses it -- pre_depth==0 && n_open>0
                 # detects "this line itself went positive".
-                if ((opened || (pre_depth == 0 && n_open > 0)) && depth == 0) {
+                same_line = (sig_was_closed && pre_depth == 0 && n_open > 0)
+                if ((opened || same_line) && depth == 0) {
                     print NR; closed = 1; exit
                 }
                 if (depth > 0) { opened = 1 }
