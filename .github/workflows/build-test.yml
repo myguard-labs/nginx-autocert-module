@@ -1,4 +1,4 @@
-# sync-sha: b396c8c5e68c8f82ea6ce5675ab833ec9cadc8cdadbca8aa10677b2b6ef448f6
+# sync-sha: 23fe0a3abcce5376fe9a3454a15ba4542397dd1fde7ce6a2bcdb67f9241be1e1
 name: Build & Test
 
 # Third-party actions pinned to commit SHAs for supply-chain safety.
@@ -311,7 +311,8 @@ jobs:
           : "${SERVER_BIN:?build-module did not export SERVER_BIN}"
           got="$("$SERVER_BIN" -v 2>&1)"
           case "$got" in
-            *"$WANT"*) echo "✓ $SERVER_BIN reports stable version $WANT" ;;
+            "nginx version: nginx/$WANT"|"nginx version: nginx/$WANT "*) \
+              echo "✓ $SERVER_BIN reports stable version $WANT" ;;
             *) echo "::error::expected nginx -v to report $WANT, got: $got"; exit 1 ;;
           esac
 

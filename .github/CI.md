@@ -7,7 +7,7 @@ runs exactly once per PR. The rest are scheduled or manual only.
 
 ## Runs on every PR (via ci.yml)
 
-| Workflow | Required check | Coverage |
+| Workflow | Required check (exact name GitHub surfaces) | Coverage |
 |---|---|---|
 | `build-test.yml` | `Validation` | shell syntax, ShellCheck, cppcheck, whitespace, workflow lint |
 | `build-test.yml` | `Build & load` | latest mainline nginx build, module load, config rejection, no-network serve/lifecycle tests |
@@ -15,9 +15,9 @@ runs exactly once per PR. The rest are scheduled or manual only.
 | `build-test.yml` | `Crypto unit tests` | JOSE, JWK, thumbprint, JWS signing |
 | `build-test.yml` | `JSON parser unit tests` | ACME JSON parser happy paths and malformed-input rejection |
 | `build-test.yml` | ACME e2e jobs | Pebble account/order/issuance/renewal/backoff/rate-limit flows |
-| `security-scanners.yml` | `Secure` | flawfinder gate plus clang-tidy and Semgrep reports |
-| `fuzzing.yml` | `Fuzz regression` | 30s/target libFuzzer run of the JSON/HTTP/base64url ACME parsers |
-| `lint.yml` | `Lint` | ci/linter/ shell, nginx-convention and workflow-syntax checks (excludes the C lens; that's `security-scanners.yml`'s job) |
+| `security-scanners.yml` | `Security scanners / Security scanners`, `Security scanners / gitleaks (full history)` | flawfinder gate plus clang-tidy and Semgrep reports |
+| `fuzzing.yml` | `Fuzzing / Fuzz regression (30s/target)` | 30s/target libFuzzer run of the JSON/HTTP/base64url ACME parsers |
+| `lint.yml` | `Lint / Linters` | ci/linter/ shell, nginx-convention and workflow-syntax checks (excludes the C lens; that's `security-scanners.yml`'s job) |
 | `codeql.yml` | `Analyze C` | CodeQL security-extended C/C++ queries, SARIF uploaded to code scanning |
 
 `build-test.yml`, `codeql.yml` and `security-scanners.yml` also carry their own
@@ -35,7 +35,8 @@ calls them.
 | `bump.yml` | weekly | checks nginx.org/angie.software for newer pins, opens a PR against `.github/versions.env` |
 | `windows-build.yml` | every PR touching win32 paths + push | MSVC compile/link and a runtime HTTP-01 challenge-serve smoke test on Windows -- the one workflow here that DOES gate a PR, via its own path filter rather than `ci.yml` |
 
-`fuzzing.yml`'s deep 14400s/target campaign lives in `ci-deep.yml`; the
+`fuzzing.yml`'s deep campaign lives in `ci-deep.yml` (`FUZZ_SECS`, 3600s
+default); the
 per-PR `fuzzing.yml` run above is the fast 30s/target regression only.
 
 ## Action pins
