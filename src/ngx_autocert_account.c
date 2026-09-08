@@ -248,10 +248,16 @@ ngx_autocert_account_load_key(ngx_autocert_account_t *acct)
             return NGX_ERROR;
         }
 
-        /* absent -> generate + persist into the SAME pinned dir fd. */
-        ngx_log_debug2(NGX_LOG_DEBUG_CORE, acct->log, 0,
-                       "autocert: account key \"%V\" absent, generating "
-                       "(key_type %ui)", &acct->key_path, acct->key_type);
+        /* absent -> generate + persist into the SAME pinned dir fd. Runs
+         * only when the key file is missing (once per CA key dir, not per
+         * renewal), synchronously on the event loop; RSA can block the
+         * worker noticeably, so make that stall attributable. The
+         * terminal "generated + saved" NOTICE is logged by
+         * ngx_autocert_account_save_key(). */
+        ngx_log_error(NGX_LOG_NOTICE, acct->log, 0,
+                      "autocert: generating account key \"%V\" "
+                      "(key_type %ui), this may block the worker briefly",
+                      &acct->key_path, acct->key_type);
         acct->key = ngx_http_autocert_key_generate(acct->key_type);
         if (acct->key == NULL) {
             (void) ngx_autocert_close(dfd);
@@ -407,6 +413,11 @@ ngx_autocert_account_save_key(ngx_autocert_account_t *acct, int dfd,
     size_t       off;
 
     if (ngx_http_autocert_key_to_pem(acct->pool, acct->key, &pem) != NGX_OK) {
+        /* The only exit between the "generating account key" NOTICE and the
+         * terminal "generated + saved" one that logged nothing at all. */
+        ngx_log_error(NGX_LOG_ERR, acct->log, 0,
+                      "autocert: serialize account key \"%V\" to PEM failed",
+                      &acct->key_path);
         return NGX_ERROR;
     }
 
