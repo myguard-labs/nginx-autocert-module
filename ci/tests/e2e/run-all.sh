@@ -59,6 +59,9 @@ PORT_BASES=(
     15000 15001 15353 15354 15355 15356 15357 15358
     15453 15455 15463 15465 15466 15473 15475 15483 15487 15489
     15493 15571 15581 18089 18090 18185 18190
+    # http01-authority.sh runs from action.yml, not from SCRIPTS below; its
+    # ports are listed here only so max-port.sh's budget ceiling covers them.
+    18396 18397
     14090 15590
 )
 
