@@ -1,0 +1,8 @@
+name: b
+description: Claims the same band, and a second one on the same line.
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: |
+        AC_TEST_PORT=18500 AC_TEST_PORT2=18501 bash ci/tests/e2e/run.sh

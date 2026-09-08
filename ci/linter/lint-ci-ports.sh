@@ -25,8 +25,11 @@
 # shellcheck source=ci/linter/lib.sh
 . "$(git rev-parse --show-toplevel)/ci/linter/lib.sh"
 
-mapfile -t FILES < <(lint_files '^\.github/workflows/.*\.ya?ml$' "$@")
-[ "${#FILES[@]}" -gt 0 ] || { echo "lint-ci-ports: no workflow files to check"; exit 0; }
+tmpfile="$(mktemp)" || exit 2
+trap 'rm -f "$tmpfile"' EXIT
+lint_files '^\.github/(workflows|actions)/.*\.ya?ml$' "$@" > "$tmpfile" || exit 2
+mapfile -t FILES < "$tmpfile"
+[ "${#FILES[@]}" -gt 0 ] || { echo "lint-ci-ports: no workflow or composite action files to check"; exit 0; }
 
 need python3 "apt-get install python3"
 # Whole-tree by nature: band UNIQUENESS is a property of the set of workflows,

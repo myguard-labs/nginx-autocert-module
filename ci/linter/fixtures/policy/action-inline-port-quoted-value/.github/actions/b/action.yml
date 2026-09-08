@@ -1,0 +1,12 @@
+name: b
+description: >-
+  Claims the same band unquoted, plus 18500 under AC_TEST_PORTABLE -- a
+  DIFFERENT variable from action a's AC_TEST_PORTABLE=18500 that must not be
+  folded into the same keyspace as AC_TEST_PORT.
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: |
+        AC_TEST_PORT=18501 bash ci/tests/e2e/run.sh
+        AC_TEST_PORTABLE=18500 bash ci/tests/e2e/setup.sh

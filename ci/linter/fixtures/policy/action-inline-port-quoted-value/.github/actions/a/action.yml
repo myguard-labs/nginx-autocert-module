@@ -1,0 +1,9 @@
+name: a
+description: Claims a band with a quoted value, alongside a similar name.
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: |
+        AC_TEST_PORTABLE=18500 bash ci/tests/e2e/setup.sh
+        AC_TEST_PORT="18501" bash ci/tests/e2e/run.sh

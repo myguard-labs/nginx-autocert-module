@@ -1,0 +1,8 @@
+name: a
+description: Claims a band via a then/do keyword.
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: |
+        if true; then AC_TEST_PORT=18500 bash ci/tests/e2e/run.sh; fi

@@ -111,6 +111,26 @@ policy_msg_() {
     fi
 }
 
+# policy_absent_ <fixture> <subcommand> <grep-ere> -- the pattern must NOT
+# appear in the checker's output, whatever the exit code. Exit status alone
+# cannot tell "no claimant" from "a claimant nobody collided with": if the
+# name test ever degrades to a prefix match, a phantom band gets registered
+# with a single, uncontested claimant, so exit and the primary message stay
+# exactly as expected while a value that was supposed to be untouched shows
+# up anyway. Assert its absence directly.
+policy_absent_() {
+    local fixture="$1" cmd="$2" absent_re="$3" out
+    out="$(env "WORKFLOW_POLICY_ROOT=ci/linter/fixtures/policy/$fixture" \
+        python3 ci/linter/workflow_policy.py "$cmd" 2>&1)"
+    if printf '%s\n' "$out" | grep -qE "$absent_re"; then
+        echo "FAIL policy $cmd: $fixture: pattern /$absent_re/ unexpectedly present" >&2
+        printf '%s\n' "$out" | sed 's/^/       | /' >&2
+        rc=1
+    else
+        echo "ok   policy $cmd: $fixture (pattern absent: /$absent_re/)"
+    fi
+}
+
 # THE control that makes the rest mean anything: a fixture tree that is simply
 # a valid workflow must be GREEN on all three. Without it, a red on any bypass
 # fixture could be the fixture shape rather than the bypass.
@@ -147,6 +167,66 @@ policy_ 1 verify-after-bind ports
 # Found downstream as a failed negative control: deleting a prove-only job's
 # band left this check green.
 policy_ 1 prove-only-binder-exempt ports
+
+# Composite-action port checking must be at ACTION granularity, mirroring the
+# job-level treatment above -- not per-step, which cannot see an action-level
+# `env:` or a declaration made in a sibling step, and cannot enforce the
+# verifier-precedes-binder order rule inside `runs.steps` at all.
+policy_ 0 action-level-env-declared ports
+policy_ 0 action-cross-step-declare-bind ports
+
+# The same action-level-env false positive one level up: a WORKFLOW-level
+# `env:` sits on `doc`, above every job node, so a job's own body dump alone
+# cannot see it either.
+policy_ 0 workflow-level-env-declared ports
+
+# The trap in fixing the above: registering the shared workflow-level band
+# once per JOB instead of once per FILE turns N jobs sharing one declaration
+# into a self-collision generator. Two jobs, one workflow-level
+# TEST_BASE_PORT, must stay clean.
+policy_ 0 workflow-level-env-shared-two-jobs ports
+
+# Two composite actions are both named action.yml, so a `where` built from
+# `path.name` alone names the same string for both sides of a collision and
+# identifies neither. Assert the message actually distinguishes them by path.
+policy_msg_ action-band-collision ports \
+    'actions/second/action\.yml claims TEST_BASE_PORT 19830 and .*actions/first/action\.yml claims TEST_BASE_PORT 19830'
+
+# A plain multi-line `run:` block, which an earlier version of this check
+# could not reach: it scraped the node re-serialized by yaml.safe_dump, whose
+# scalar style varies with the text's content. Also exercises the same-node
+# "claims ... twice" wording for a collision between two steps of ONE action.
+policy_msg_ action-inline-port-collision-plain ports \
+    'claims AC_TEST_PORT 18500 twice across its steps'
+
+# Only an assignment at the head of a line claims a band. A prefixed variable
+# (SAVED_AC_TEST_PORT=), a diagnostic echo, a commented-out old band and a
+# message string all mention the token without claiming the port; counting
+# them folds phantom claimants into the uniqueness set and reddens a correct
+# tree.
+policy_ 0 action-inline-port-prefixed-identifier ports
+
+# `env VAR=val cmd` is idiomatic for setting a port for one invocation and
+# must be counted. An assignment introduced by a shell keyword is the
+# documented limitation of walking only each line's assignment prefix; the
+# green control pins it so the gap stays reviewed rather than silent.
+policy_ 1 action-inline-port-env-prefix ports
+
+# A single-line `run:` scalar, and two assignments sharing one line. Both were
+# invisible while this check scraped the re-serialized node body.
+policy_ 1 action-inline-port-single-line-run ports
+
+# A quoted value claims the same band; a longer name that merely starts with
+# the token (AC_TEST_PORTABLE) is a different variable and claims nothing.
+policy_msg_ action-inline-port-quoted-value ports \
+    'claims AC_TEST_PORT 18501 and .*claims AC_TEST_PORT 18501'
+# The fixture's README also promises 18500 (AC_TEST_PORTABLE's value) never
+# registers as a band -- unasserted, that half degrades silently: if the name
+# test ever slid to a prefix match, AC_TEST_PORTABLE would register a phantom
+# 18500 band with one uncontested claimant, raise no collision, and leave
+# exit and the 18501 message untouched.
+policy_absent_ action-inline-port-quoted-value ports '\b18500\b'
+policy_ 0 action-inline-port-keyword-lead ports
 
 # Direct master `push:` and `schedule:` are deliberate member entry points;
 # neither duplicates the PR invocation. These green controls ensure cadence

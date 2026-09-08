@@ -1,0 +1,13 @@
+name: build
+description: Binds one port and saves it to a prefixed variable.
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: |
+        AC_TEST_PORT=18500
+        SAVED_AC_TEST_PORT=18500
+        # AC_TEST_PORT=18500
+        echo "using AC_TEST_PORT=18500"
+        msg="AC_TEST_PORT=18500 already in use"
+        bash ci/tests/e2e/run.sh

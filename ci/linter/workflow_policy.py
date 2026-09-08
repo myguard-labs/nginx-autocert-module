@@ -55,6 +55,7 @@ ROOT = pathlib.Path(
     or pathlib.Path(__file__).resolve().parents[2]
 )
 WORKFLOWS = ROOT / ".github" / "workflows"
+ACTIONS = ROOT / ".github" / "actions"
 
 
 class PolicyError(Exception):
@@ -132,6 +133,25 @@ def workflows() -> list[pathlib.Path]:
     return sorted(
         [*WORKFLOWS.glob("*.yml"), *WORKFLOWS.glob("*.yaml")],
         key=lambda p: p.name,
+    )
+
+
+def actions() -> list[pathlib.Path]:
+    """Every composite action file, BOTH extensions.
+
+    Composite actions (.github/actions/**/action.yml) can declare and use
+    port bindings just as workflows do. Consistent port band uniqueness
+    requires checking both.
+
+    Sorted by full path, not `p.name`: every composite action file is named
+    `action.yml`, so a `name`-keyed sort leaves every key equal and Python's
+    stable sort just preserves raw glob (filesystem) order -- undefined
+    across machines, so error messages that name two actions by ordinal
+    position ("first ... and second ...") would flip depending on which box
+    ran the check.
+    """
+    return sorted(
+        [*ACTIONS.glob("**/action.yml"), *ACTIONS.glob("**/action.yaml")],
     )
 
 
@@ -355,75 +375,291 @@ def _order_finding(where: str, node: dict) -> str | None:
     )
 
 
+# Inline shell-assigned bands: `AC_TEST_PORT=18185 \` / `AC_TEST_PORT2=18191 \`
+# ahead of a script invocation. These never go through a YAML `env:` mapping,
+# so TEST_BASE_PORT's regex cannot see them -- but they claim a port exactly
+# like a declared band does, and the one action that actually binds ports this
+# way (build-module's e2e steps) must enter the uniqueness set or the whole
+# check is vacuous for it.
+#
+# Matched against each step's RAW `run:` text from `_steps()`, never against
+# `_body()`. `_body()` re-serializes the node with `yaml.safe_dump`, which
+# picks among four scalar styles depending on the text's content: a bare
+# single-line scalar, a single-quoted block, an escaped double-quoted block
+# with newlines flattened to literal backslash-n, and a literal block. The
+# shell text therefore lands at column 0, after `run: `, after `run: '`, or
+# mid-string with no real newline anywhere -- so no line anchor can hold, and
+# an unanchored match silently absorbs comments, diagnostics and longer
+# identifiers as phantom claimants. The raw text has none of that ambiguity:
+# `(?m)^` genuinely means start of line.
+#
+# What this deliberately does NOT do is tokenize the shell. A port mentioned
+# inside a string that begins its own line (`msg="AC_TEST_PORT=1 in use"` is
+# rejected by the leading-word rule, but a contrived line could still slip
+# through) is an accepted limitation, not a defect to chase with a wider
+# pattern -- correctness here needs a real parser, and the check is a
+# uniqueness guard, not a shell linter.
+# One line may set several bands: `VAR=1 VAR2=2 cmd` claims both. A single
+# `findall` cannot report them, because matches may not overlap and the first
+# one consumes the prefix the second needs -- so the prefix is walked
+# iteratively instead, which is also what makes the leading-word rule exact
+# rather than approximate.
+_PREFIX_WORD_RE = re.compile(r"(?:export|env|sudo|time|command|nice)[ \t]+")
+_ASSIGN_RE = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)=(\S*)[ \t]*")
+_PORT_NAME_RE = re.compile(r"AC_TEST_PORT[0-9]*")
+
+
+def _inline_ports(run: str) -> list[tuple[str, str]]:
+    """(name, value) pairs claimed by a shell assignment at the head of a
+    line in `run`.
+
+    Only the assignment prefix of each line is walked: leading whitespace,
+    any command prefix words, then a run of `NAME=VALUE` pairs. The walk stops
+    at the first token that is neither, so a port named anywhere else on the
+    line -- inside a diagnostic string, a comment, or an argument -- is not a
+    claim and is not counted. That is the whole rule; it needs no anchoring
+    heuristics because `run` is the RAW step text, not a re-serialized dump.
+
+    The name travels with the value so a collision message can report the
+    ACTUAL variable each side used, rather than assuming every inline
+    claimant is spelled AC_TEST_PORT.
+    """
+    out: list[tuple[str, str]] = []
+    for line in run.splitlines():
+        pos = len(line) - len(line.lstrip(" \t"))
+        while True:
+            word = _PREFIX_WORD_RE.match(line, pos)
+            if word:
+                pos = word.end()
+                continue
+            assign = _ASSIGN_RE.match(line, pos)
+            if not assign:
+                break
+            name, value = assign.group(1), assign.group(2)
+            # Quotes around the value are idiomatic and mean the same band.
+            # A non-literal value ($PORT) has nothing to register, and a name
+            # that merely starts with the token (AC_TEST_PORTABLE) is a
+            # different variable, so the name match is exact plus an optional
+            # numeric suffix.
+            value = value.strip("\"'")
+            if _PORT_NAME_RE.fullmatch(name) and value.isdigit():
+                out.append((name, value))
+            pos = assign.end()
+    return out
+
+
+def _check_port_node(
+    where: str,
+    node: dict,
+    body: str,
+    bands: dict[str, tuple[str, str]],
+    errors: list[str],
+    collision_scope: str,
+) -> None:
+    """The uniqueness/wiring checks shared by a workflow job and a composite
+    action, run once against ONE body string covering the whole node.
+
+    `where` identifies the node in error text; `collision_scope` is the tail
+    of the uniqueness-collision message ("ALL workflows" vs "ALL workflows and
+    actions") so the two call sites keep their existing wording.
+
+    `bands` maps a port value to the (where, varname) that claimed it.
+    AC_TEST_PORT and TEST_BASE_PORT deliberately share one keyspace -- port
+    18500 collides no matter which variable named it -- but each claimant's
+    OWN variable name is kept alongside it so a collision message reports what
+    each side actually wrote, instead of hardcoding the reporting branch's
+    variable name onto both sides.
+
+    A job inheriting a WORKFLOW-level `env:` (see check_ports()) is
+    pre-registered in `bands` under the FILE, not the job -- `where` for a
+    job is always "<file>:<job>", so a match whose claimant is exactly that
+    file prefix with varname TEST_BASE_PORT is this job's own inherited
+    declaration, not a second claimant: every job in the file shares that one
+    line and must neither re-register it nor collide with it.
+    """
+    declared = re.search(r"(?m)^\s*TEST_BASE_PORT:\s*[\"']?(\d+)", body)
+    starts_runtime = RUNTIME_DRIVER in body
+    binds_band = BINDER_RE.search(body) is not None
+
+    # Per raw step text, so a port on ANY line of ANY step is seen, including
+    # a single-line `run:` and a second assignment sharing one line.
+    inline_ports = [pair for run in _steps(node) for pair in _inline_ports(run)]
+    # Two steps in the SAME node (job or action) can independently claim the
+    # same port -- likelier now that one action can carry several inline
+    # ports across sibling steps. `where` names the whole node, so a
+    # cross-node collision message ("X and X both claim...") would repeat
+    # the same file/job on both sides and identify neither step. De-dupe
+    # first and report that shape distinctly.
+    seen_here: set[str] = set()
+    for name, port in inline_ports:
+        if port in seen_here:
+            errors.append(
+                f"{where} claims {name} {port} twice across its steps "
+                "-- bands must be disjoint within a node too"
+            )
+            continue
+        seen_here.add(port)
+        if port in bands:
+            other_where, other_name = bands[port]
+            errors.append(
+                f"{where} claims {name} {port} and {other_where} claims "
+                f"{other_name} {port} -- bands must be disjoint across "
+                f"{collision_scope}"
+            )
+        else:
+            bands[port] = (where, name)
+
+    # THE CHECK THAT MATTERS MOST. A new runtime-bearing job added later
+    # with no band is invisible to the uniqueness check below (it
+    # declares nothing to collide), silently takes the driver's default
+    # --port, and reintroduces exactly the cross-job collision the bands
+    # exist to prevent: two jobs pinned to the same runner, disjoint
+    # concurrency groups, nothing serialising them, both binding 18880.
+    # Any BINDER (not just the runtime driver) owes this declaration --
+    # `prove` and coverage.sh are binders too (see BINDERS above), and a
+    # job whose only binder is `prove` was exempt here while still being
+    # treated as a binder by the ordering check. That gap is a live
+    # negative-control failure downstream: deleting a prove-only job's
+    # band left this check GREEN.
+    if binds_band and not declared and not inline_ports:
+        errors.append(
+            f"{where} binds a port (via "
+            f"{RUNTIME_DRIVER if starts_runtime else 'prove/coverage.sh'}) "
+            "without declaring TEST_BASE_PORT -- it would take the "
+            "default port and collide with any other runtime job on "
+            "the same runner"
+        )
+        return
+
+    if not declared:
+        return
+
+    port = declared.group(1)
+    if bands.get(port) == (where.split(":", 1)[0], "TEST_BASE_PORT"):
+        pass  # already registered once for the whole file; see check_ports()
+    elif port in bands:
+        other_where, other_name = bands[port]
+        if other_where == where:
+            # Same node: it declared TEST_BASE_PORT and also claims the same
+            # port inline. That is the useless "X and X both claim" shape the
+            # inline de-dup above exists to avoid -- name it plainly instead.
+            errors.append(
+                f"{where} declares TEST_BASE_PORT {port} and also claims "
+                f"{other_name} {port} inline on the same node -- bands must "
+                "be disjoint within a node too"
+            )
+        else:
+            errors.append(
+                f"{where} claims TEST_BASE_PORT {port} and {other_where} "
+                f"claims {other_name} {port} -- bands must be disjoint "
+                f"across {collision_scope}"
+            )
+    else:
+        bands[port] = (where, "TEST_BASE_PORT")
+
+    # A declared band that is not passed through is decoration: the
+    # driver still binds its default.
+    if starts_runtime and "--port" not in body:
+        errors.append(
+            f"{where} declares TEST_BASE_PORT but never passes --port; "
+            "the driver would bind its default anyway"
+        )
+    if starts_runtime and "TEST_BASE_PORT" not in body.split("--port")[-1][:40]:
+        errors.append(
+            f"{where} passes --port with something other than "
+            "$TEST_BASE_PORT -- the declaration and the bind must be "
+            "the same value or they drift"
+        )
+
+
+def _register_workflow_env_band(
+    path: pathlib.Path, doc: dict, bands: dict[str, tuple[str, str]], errors: list[str]
+) -> str:
+    """Register a WORKFLOW-level `env:` band ONCE under the file, and return
+    its dumped text so callers can append it to each job's own body.
+
+    A workflow-level `env:` sits on `doc`, one level above every job node
+    `jobs()` hands out, so a job's own `_body(node)` dump never contains it --
+    the same false-positive shape an action-level `env:` has one level up
+    over `runs.steps`. Registering it here, once per FILE rather than once
+    per JOB, is what keeps N jobs sharing one declaration from colliding with
+    each other; `_check_port_node` recognizes a job's own match on an
+    already-file-registered port as its inherited declaration (see its
+    docstring) and neither re-registers nor collides on it.
+    """
+    wf_env = doc.get("env")
+    if not isinstance(wf_env, dict):
+        return ""
+    wf_env_body = yaml.safe_dump(
+        {"env": wf_env}, default_flow_style=False, sort_keys=False
+    )
+    for port in re.findall(r"(?m)^\s*TEST_BASE_PORT:\s*[\"']?(\d+)", wf_env_body):
+        if port in bands:
+            other_where, other_name = bands[port]
+            errors.append(
+                f"{path.name} claims TEST_BASE_PORT {port} and {other_where} "
+                f"claims {other_name} {port} -- bands must be disjoint "
+                "across ALL workflows"
+            )
+        else:
+            bands[port] = (path.name, "TEST_BASE_PORT")
+    return wf_env_body
+
+
 def check_ports() -> int:
     errors: list[str] = []
-    bands: dict[str, str] = {}  # port value -> "file:job" that claimed it
+    bands: dict[str, tuple[str, str]] = {}  # port value -> (where, varname)
 
     for path in workflows():
         doc = load(path)
+        wf_env_body = _register_workflow_env_band(path, doc, bands, errors)
+
         for job, node in jobs(doc):
-            body = _body(node)
-            declared = re.search(r"(?m)^\s*TEST_BASE_PORT:\s*[\"']?(\d+)", body)
-            starts_runtime = RUNTIME_DRIVER in body
-            binds_band = BINDER_RE.search(body) is not None
             where = f"{path.name}:{job}"
 
             order = _order_finding(where, node)
             if order:
                 errors.append(order)
 
-            # THE CHECK THAT MATTERS MOST. A new runtime-bearing job added later
-            # with no band is invisible to the uniqueness check below (it
-            # declares nothing to collide), silently takes the driver's default
-            # --port, and reintroduces exactly the cross-job collision the bands
-            # exist to prevent: two jobs pinned to the same runner, disjoint
-            # concurrency groups, nothing serialising them, both binding 18880.
-            # Any BINDER (not just the runtime driver) owes this declaration --
-            # `prove` and coverage.sh are binders too (see BINDERS above), and a
-            # job whose only binder is `prove` was exempt here while still being
-            # treated as a binder by the ordering check. That gap is a live
-            # negative-control failure downstream: deleting a prove-only job's
-            # band left this check GREEN.
-            if binds_band and not declared:
-                errors.append(
-                    f"{where} binds a port (via "
-                    f"{RUNTIME_DRIVER if starts_runtime else 'prove/coverage.sh'}) "
-                    "without declaring TEST_BASE_PORT -- it would take the "
-                    "default port and collide with any other runtime job on "
-                    "the same runner"
-                )
-                continue
+            _check_port_node(
+                where, node, _body(node) + wf_env_body, bands, errors, "ALL workflows"
+            )
 
-            if not declared:
-                continue
+    for path in actions():
+        doc = load(path)
+        runs = doc.get("runs")
+        if not isinstance(runs, dict):
+            continue
+        steps = runs.get("steps")
+        if not isinstance(steps, list):
+            continue
 
-            port = declared.group(1)
-            if port in bands:
-                errors.append(
-                    f"{where} and {bands[port]} both claim TEST_BASE_PORT "
-                    f"{port} -- bands must be disjoint across ALL workflows"
-                )
-            else:
-                bands[port] = where
+        # Action-granularity, mirroring the job-level treatment above: an
+        # action-level `env:` sits on `doc`, not on any one step, and a
+        # declare-then-bind split across two sibling steps is invisible if
+        # each step's body is checked in isolation. Rooting the body dump
+        # at `doc` (which contains `runs`, which contains every step) puts
+        # the whole action's declarations and every step's binder calls in
+        # ONE substring search, closing both the action-level-env false
+        # positive and the cross-step-declaration false negative. The order
+        # check gets the same treatment: `runs` carries exactly the `steps`
+        # list `_order_finding` wants, so the verifier-precedes-binder rule
+        # applies to the action as a whole instead of going unchecked.
+        rel = path.relative_to(ROOT) if path.is_relative_to(ROOT) else path
+        where = str(rel)
 
-            # A declared band that is not passed through is decoration: the
-            # driver still binds its default.
-            if starts_runtime and "--port" not in body:
-                errors.append(
-                    f"{where} declares TEST_BASE_PORT but never passes --port; "
-                    "the driver would bind its default anyway"
-                )
-            if starts_runtime and "TEST_BASE_PORT" not in body.split("--port")[-1][:40]:
-                errors.append(
-                    f"{where} passes --port with something other than "
-                    "$TEST_BASE_PORT -- the declaration and the bind must be "
-                    "the same value or they drift"
-                )
+        order = _order_finding(where, runs)
+        if order:
+            errors.append(order)
+
+        _check_port_node(
+            where, runs, _body(doc), bands, errors, "ALL workflows and actions"
+        )
 
     return report(
         "lint-ci-ports",
         errors,
-        f"{len(bands)} runtime job(s), all with distinct port bands"
+        f"{len(bands)} port band(s), all distinct"
         if bands
         else "no runtime-bearing jobs",
     )

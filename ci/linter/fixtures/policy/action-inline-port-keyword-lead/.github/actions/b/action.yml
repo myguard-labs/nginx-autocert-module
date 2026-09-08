@@ -1,0 +1,8 @@
+name: b
+description: Claims the same band with a plain assignment.
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: |
+        AC_TEST_PORT=18501 bash ci/tests/e2e/run.sh
