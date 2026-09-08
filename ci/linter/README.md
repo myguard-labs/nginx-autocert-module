@@ -84,8 +84,13 @@ pipx install 'semgrep==1.169.0'     # pinned to the CI version on purpose
 under you and local stops matching CI. Bump each here and in EVERY CI consumer
 together -- `ruff` in `install-linters.sh`; `semgrep` in `install-linters.sh`,
 `lint-c.sh`, and BOTH `.github/workflows/security-scanners.yml` and
-`.github/workflows/ci-deep.yml`. `install-linters.sh` is the canonical pin;
-`grep -rn 'semgrep==' ci/ .github/` lists every site that must move together.
+`.github/workflows/ci-deep.yml` (two install lines each: the pipx path and the
+pip3 fallback). `install-linters.sh` is the canonical pin.
+
+`grep -rn 'semgrep==' ci/ .github/` lists them, plus two lines of this file --
+the example just above, which does need bumping, and this instruction, which
+does not. The `.pre-commit-config.yaml` semgrep hook is `language: system`, so
+it consumes whatever the pin put on `PATH` and needs no edit of its own.
 
 **cpan (Perl modules apt does not carry on every target release)**
 

@@ -1,4 +1,4 @@
-# sync-sha: 5e17ff3b295bd5071a6df77df560bac0d9eb15645828b7cbf52a5a8d5c515438
+# sync-sha: cda69647b1f14216dc5482fb4685e13766b6a4b50997a7bc3c05550d8b918dc9
 name: CI Deep
 
 # Exhaustive dynamic analysis — monthly cron, release, and on-demand only,
@@ -253,7 +253,8 @@ jobs:
           # semgrep: isolate via pipx (PEP 668 blocks a bare pip3 install into the
           # system Python on the Ubuntu 24.04 self-hosted runner). Fall back to a
           # user pip install with --break-system-packages if pipx is unavailable.
-          # Version pinned to match ci/linter/install-linters.sh — bump both together.
+          # Version pinned to match ci/linter/install-linters.sh — bump every
+          # site together; ci/linter/README.md lists them.
           if command -v pipx >/dev/null; then
             pipx install --quiet 'semgrep==1.169.0'
             echo "$HOME/.local/bin" >> "$GITHUB_PATH"

@@ -1,4 +1,4 @@
-# sync-sha: 4fcbe9def1cf070df3620eaf7c13be0cedd091337b127ad167b41616d2749ac7
+# sync-sha: f1bb9238907ffc216d4bd51107043df2934bf8938af50a935dfdfc91ecafd101
 name: Security scanners
 
 # Static / security scanners gate on every PR/push — flawfinder, clang-tidy
@@ -54,7 +54,8 @@ jobs:
           # semgrep: isolate via pipx (PEP 668 blocks a bare pip3 install into the
           # system Python on the Ubuntu 24.04 self-hosted runner). Fall back to a
           # user pip install with --break-system-packages if pipx is unavailable.
-          # Version pinned to match ci/linter/install-linters.sh — bump both together.
+          # Version pinned to match ci/linter/install-linters.sh — bump every
+          # site together; ci/linter/README.md lists them.
           if command -v pipx >/dev/null; then
             pipx install --quiet 'semgrep==1.169.0'
             echo "$HOME/.local/bin" >> "$GITHUB_PATH"
