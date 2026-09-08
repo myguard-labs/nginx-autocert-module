@@ -89,6 +89,18 @@ target_fn(void)
 }
 EOF
 
+	# A stray closer in real CODE, reached before the body opens, must
+	# still drive depth negative and exit 2 -- that backstop is unchanged
+	# and is the one stray-brace shape the literal strip cannot mask.
+	cat >"$dir/fixture_stray_code.c" <<'EOF'
+static ngx_int_t
+target_fn(void)
+}
+{
+    return 0;
+}
+EOF
+
 	cat >"$dir/fixture_no_anchor.c" <<'EOF'
 static ngx_int_t
 some_other_function(void)
@@ -101,17 +113,6 @@ EOF
 static ngx_int_t
 target_fn(void)
 { return 0; }
-EOF
-
-	# Braces inside a comment on the SIGNATURE line must not be mistaken
-	# for a one-line body -- doing so truncates the slice before the real
-	# opener and still exits 0 (a silent wrong answer, the worst shape).
-	cat >"$dir/fixture_comment_braces.c" <<'EOF'
-static ngx_int_t
-target_fn(void) /* {} */
-{
-    return 0;
-}
 EOF
 
 	# A wrapped parameter list carrying a balanced initialiser closes the
@@ -174,8 +175,17 @@ test_c() {
 	source "$SRC_LIB"
 	rc=0
 	body=$(slice_function "$TMP/fixture_stray_close.c" 1 target_fn) || rc=$?
-	[ "$rc" -eq 2 ] || fail "(c) expected rc=2 for a stray '}' driving depth negative, got rc=$rc"
-	pass "(c) stray '}' in a literal: rc=2 as expected"
+	# Braces inside a string literal are stripped before counting, so this
+	# no longer drives depth negative -- the slice is simply CORRECT.
+	[ "$rc" -eq 0 ] || fail "(c) expected rc=0 for braces inside a string literal, got rc=$rc"
+	got=$(printf '%s\n' "$body" | wc -l)
+	[ "$got" -eq 9 ] \
+		|| fail "(c) expected 9 sliced lines through the real closer, got $got"
+	rc=0
+	slice_function "$TMP/fixture_stray_code.c" 1 target_fn >/dev/null || rc=$?
+	[ "$rc" -eq 2 ] \
+		|| fail "(c) stray '}' in real code must exit 2 (depth<0 guard), got rc=$rc"
+	pass "(c) braces in a literal ignored; a stray closer in code still exits 2"
 }
 
 # --- (d) anchor never matches: exit 1 (slice_find_start) ----------------
@@ -232,13 +242,6 @@ test_g() {
 	[ "$end" -eq 0 ] || fail "(g) slice_end_line rc=$end, expected 0 for a one-line body"
 	[ "$got_end" -eq 3 ] || fail "(g) slice_end_line returned $got_end, expected 3"
 
-	# Regression: braces in a signature-line comment are not a body.
-	rc=0
-	body=$(slice_function "$TMP/fixture_comment_braces.c" 1 target_fn) || rc=$?
-	[ "$rc" -eq 0 ] || fail "(g) comment-brace fixture: slice_function rc=$rc, expected 0"
-	got=$(printf '%s\n' "$body" | wc -l)
-	[ "$got" -eq 5 ] \
-		|| fail "(g) comment-brace fixture: expected 5 sliced lines through the real body, got $got (slice truncated at the signature comment)"
 	rc=0
 	body=$(slice_function "$TMP/fixture_param_braces.c" 1 target_fn) || rc=$?
 	[ "$rc" -eq 0 ] || fail "(g) param-brace fixture: slice_function rc=$rc, expected 0"
@@ -252,6 +255,34 @@ test_g() {
 	[ "$got" -eq 6 ] \
 		|| fail "(g) own-line-comment fixture: expected 6 sliced lines through the real body, got $got (slice truncated at the comment)"
 	pass "(g) one-line body + comment and parameter braces: correct slices"
+}
+
+# --- (h) the in-tree proof: real source, not a synthetic fixture --------
+#
+# src/ngx_autocert_json.c is where the literal/comment miscount actually
+# bit. json_value holds `case DQUOTE:` and `case OPEN_BRACE:` character
+# constants; json_object holds a `/* consume { */` comment. Counting any
+# of those as code moves the end line, so pin both against the real file.
+
+test_h() {
+	# shellcheck source=ci/tests/unit/lib/slice.sh
+	source "$SRC_LIB"
+	local src="$DIR/../../../src/ngx_autocert_json.c"
+	[ -r "$src" ] || fail "(h) $src is not readable"
+
+	rc=0
+	got=$(slice_end_line "$src" 1 ngx_autocert_json_value) || rc=$?
+	[ "$rc" -eq 0 ] || fail "(h) slice_end_line(json_value) rc=$rc, expected 0"
+	[ "$got" -eq 156 ] \
+		|| fail "(h) json_value ends at 156 (verified against the file), slicer said $got"
+
+	rc=0
+	got=$(slice_end_line "$src" 1 ngx_autocert_json_object) || rc=$?
+	[ "$rc" -eq 0 ] || fail "(h) slice_end_line(json_object) rc=$rc, expected 0"
+	[ "$got" -eq 228 ] \
+		|| fail "(h) json_object ends at 228 (verified against the file), slicer said $got"
+
+	pass "(h) real src/ngx_autocert_json.c: both function ends exact"
 }
 
 # --- prove each control is real: remove the guard, require red ----------
@@ -319,6 +350,7 @@ test_d
 test_e
 test_f
 test_g
+test_h
 
 # (c)'s guard is the `if (depth < 0) { exit 2 }` line -- remove it and rerun
 # test_c, which must now fail (rc will be 0 instead of 2: the stray '}'
@@ -354,5 +386,10 @@ run_variant "comment_strip" \
 	'/, " ", code)$/d' test_g
 run_variant "param_list_gate" \
 	's/sig_was_closed = sig_closed/sig_was_closed = 1/g' test_g
+# The char-constant strip is what the real src/ngx_autocert_json.c needs:
+# remove it and json_value's end moves 156 -> 227 (the cancelling-error
+# shape that made a comment-only strip worse than none).
+run_variant "char_constant_strip" \
+	'/gsub(q "/d' test_h
 
 echo "✓ all slicer guard assertions passed, including mutation controls"
