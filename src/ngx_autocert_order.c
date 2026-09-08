@@ -1223,14 +1223,29 @@ ngx_autocert_dns_hook_spawn(ngx_autocert_order_t *order, ngx_str_t *hook,
          * new image). Left alone, the hook program would run with SIGPIPE
          * ignored, silently diverging from the default shell/process
          * expectation that writing to a closed pipe kills the process
-         * (e.g. a hook piping into "head"). Restore SIG_DFL here, in the
-         * child only, before exec.
+         * (e.g. a hook piping into "head"). SIGSYS gets the same treatment
+         * for a different reason: an inherited SIG_IGN there turns a
+         * seccomp SECCOMP_RET_TRAP into a silent -ENOSYS on the offending
+         * syscall instead of killing the hook outright, i.e. a fail-open
+         * instead of the fail-closed the sandbox intended. SIGPIPE and
+         * SIGSYS are also the COMPLETE set of SIG_IGN entries in nginx's
+         * signals[] table (ngx_init_signals()) -- every other entry there
+         * installs a real handler, and execve() resets an installed handler
+         * to SIG_DFL automatically, so those need no help here. That
+         * completeness is what makes restoring just these two a full fix
+         * rather than a partial one. Restore SIG_DFL here, in the child
+         * only, before exec.
          */
         {
             struct sigaction  sa;
 
             ngx_memzero(&sa, sizeof(struct sigaction));
             sa.sa_handler = SIG_DFL;
+            /* (void) is deliberate, not a missed error path like the fd
+             * redirection below: sigaction() cannot fail restoring SIG_DFL
+             * for these two signals -- its only failure is EINVAL, which
+             * fires solely for SIGKILL/SIGSTOP or an out-of-range signo,
+             * neither of which applies here. */
             (void) sigaction(SIGPIPE, &sa, NULL);
             (void) sigaction(SIGSYS, &sa, NULL);
         }

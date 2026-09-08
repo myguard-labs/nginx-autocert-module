@@ -200,9 +200,31 @@ done
 # proves the reset happened (see the reasoning header above). Each hook logs
 # a marker file line to prove it ran exactly once and to record its own exit
 # path independent of nginx's error.log parsing.
+#
+# add.sh also pins that ngx_autocert_dns_hook_spawn()'s SIGPIPE/SIGSYS SIG_DFL
+# restore (ngx_autocert_order.c) actually reaches the exec'd hook process, not
+# just correct-looking source nothing runs: nginx's master ignores both
+# signals (ngx_init_signals()), and absent that restore, fork()+execve() would
+# carry the ignore straight into every hook invocation.
+#
+# /proc/self/status SigIgn cannot be read directly here: bash itself always
+# reports SIGPIPE (only) as ignored there regardless of the disposition it
+# was execve()'d with (verified: it also unconditionally restores SIGPIPE to
+# terminate-the-process for any plain command it forks, so the /proc bit does
+# not reflect what a child observes). The two checks below instead drive an
+# OBSERVABLE outcome that differs only by disposition:
+#  - SIGPIPE: `yes` writing into a pipe closed by the reader (`head -c1`) is
+#    killed by SIGPIPE under SIG_DFL (exit 128+13=141) and keeps running
+#    under SIG_IGN (gets EPIPE, exits on its own instead).
+#  - SIGSYS: self-delivering SIGSYS terminates the shell under SIG_DFL
+#    (exit 128+31=159, and the "survived" line below never runs) and is a
+#    silent no-op under SIG_IGN (the "survived" line does run).
 cat >"$PREFIX/hooks/add.sh" <<EOF
 #!/usr/bin/env bash
 echo "add \$\$ start" >> "$PREFIX/hook-calls.log"
+yes x 2>/dev/null | head -c1 >/dev/null
+echo "sigpipe_exit=\${PIPESTATUS[0]}" > "$PREFIX/add-sigcheck.txt"
+( kill -SYS \$BASHPID; echo "sigsys_survived=1" >> "$PREFIX/add-sigcheck.txt" )
 sleep 10
 echo "add \$\$ finished-without-being-killed" >> "$PREFIX/hook-calls.log"
 EOF
@@ -268,6 +290,37 @@ done
 	exit 1
 }
 echo "✓ dns-01 add-hook started (pid $ADD_PID)"
+
+echo "== verifying SIGPIPE/SIGSYS are NOT ignored in the hook child =="
+for i in $(seq 1 20); do
+	[ -s "$PREFIX/add-sigcheck.txt" ] && grep -q '^sigpipe_exit=' "$PREFIX/add-sigcheck.txt" && break
+	sleep 0.25
+	[ "$i" = 20 ] && {
+		echo "::error::add-hook never wrote its sigpipe_exit result"
+		exit 1
+	}
+done
+SIGPIPE_EXIT="$(grep '^sigpipe_exit=' "$PREFIX/add-sigcheck.txt" | cut -d= -f2)"
+# 128+13: `yes` was killed by SIGPIPE writing into head's closed read end --
+# only possible under the default (terminate) disposition.
+[ "$SIGPIPE_EXIT" = "141" ] || {
+	echo "::error::SIGPIPE is ignored in the dns-01 hook child (yes exited $SIGPIPE_EXIT, expected 141=SIGPIPE) -- the SIG_DFL restore regressed"
+	exit 1
+}
+echo "✓ SIGPIPE is not ignored in the dns-01 hook child (yes was killed by it, exit 141)"
+
+for i in $(seq 1 20); do
+	grep -qE '^sigsys_survived=1$' "$PREFIX/add-sigcheck.txt" 2>/dev/null && break
+	sleep 0.25
+	[ "$i" = 20 ] && break
+done
+# Under SIG_DFL, self-delivered SIGSYS terminates the subshell before it can
+# write this line -- its absence after the wait above IS the pass condition.
+grep -qE '^sigsys_survived=1$' "$PREFIX/add-sigcheck.txt" 2>/dev/null && {
+	echo "::error::SIGSYS is ignored in the dns-01 hook child (subshell survived self-delivered SIGSYS) -- the SIG_DFL restore regressed"
+	exit 1
+}
+echo "✓ SIGSYS is not ignored in the dns-01 hook child (self-delivered SIGSYS terminated the subshell)"
 
 echo "== waiting for the timeout to genuinely fire =="
 for i in $(seq 1 40); do
