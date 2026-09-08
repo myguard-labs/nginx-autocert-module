@@ -14,9 +14,21 @@
 # Brace counting is lexical, not a real C tokenizer, but braces inside a
 # /* comment */, a "string literal" or a character constant are stripped
 # from a per-line copy before counting, so those three shapes no longer
-# skew depth. What remains unhandled: a multi-line string continuation and
-# a // comment (this tree uses neither), and any construct needing real
-# parsing. Do NOT attempt full lexing in this helper.
+# skew depth. What remains unhandled, because the strip is per-line:
+#
+#   - a MULTI-LINE comment body. Only a /* ... */ that closes on the same
+#     line is removed, so an apostrophe in a continuation line ("the
+#     caller's frame") is not stripped and can open a bogus character
+#     constant that swallows to the next apostrophe. This bites only when
+#     such a line ALSO carries an unbalanced brace. Measured on this tree:
+#     661 continuation lines carry an odd apostrophe count, 2 of those
+#     carry a brace, and both are the balanced "http{}" so they net zero.
+#     Every one of the 339 function definitions in src/ slices correctly.
+#     Re-run the sweep in test_h's spirit if that ever changes.
+#   - a // comment and a multi-line string continuation (this tree has
+#     neither), and any construct needing real parsing.
+#
+# Do NOT attempt full lexing in this helper.
 #
 # Strip the three together or not at all. Stripping only comments is worse
 # than stripping nothing: in src/ngx_autocert_json.c a spurious `{` from a

@@ -270,17 +270,24 @@ test_h() {
 	local src="$DIR/../../../src/ngx_autocert_json.c"
 	[ -r "$src" ] || fail "(h) $src is not readable"
 
-	rc=0
-	got=$(slice_end_line "$src" 1 ngx_autocert_json_value) || rc=$?
-	[ "$rc" -eq 0 ] || fail "(h) slice_end_line(json_value) rc=$rc, expected 0"
-	[ "$got" -eq 156 ] \
-		|| fail "(h) json_value ends at 156 (verified against the file), slicer said $got"
+	# Derive the expected end from the file rather than hardcoding a line
+	# number: the first column-0 "}" at or after the signature IS the
+	# closer for these two (neither has a nested column-0 brace). That
+	# keeps the test honest when json.c is edited, while still being an
+	# independent oracle -- it does not use the slicer to check itself.
+	local fn sig want got
+	for fn in ngx_autocert_json_value ngx_autocert_json_object; do
+		sig=$(grep -n "^$fn(" "$src" | head -1 | cut -d: -f1)
+		[ -n "$sig" ] || fail "(h) no signature found for $fn in $src"
+		want=$(awk -v st="$sig" 'NR > st && /^}/ { print NR; exit }' "$src")
+		[ -n "$want" ] || fail "(h) no column-0 closer found after $fn"
 
-	rc=0
-	got=$(slice_end_line "$src" 1 ngx_autocert_json_object) || rc=$?
-	[ "$rc" -eq 0 ] || fail "(h) slice_end_line(json_object) rc=$rc, expected 0"
-	[ "$got" -eq 228 ] \
-		|| fail "(h) json_object ends at 228 (verified against the file), slicer said $got"
+		rc=0
+		got=$(slice_end_line "$src" 1 "$fn") || rc=$?
+		[ "$rc" -eq 0 ] || fail "(h) slice_end_line($fn) rc=$rc, expected 0"
+		[ "$got" -eq "$want" ] \
+			|| fail "(h) $fn ends at $want (first column-0 closer after line $sig), slicer said $got"
+	done
 
 	pass "(h) real src/ngx_autocert_json.c: both function ends exact"
 }
