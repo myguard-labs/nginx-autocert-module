@@ -1,12 +1,9 @@
-# sync-sha: 4c3bea85b4a9274a01a9ec3d21c690772126ca888a565da652a8d1437e703fe2
+# sync-sha: 4eb566c669be021531c55c703a7025ecce46cdece128918ce91ce2f3326e07d2
 name: Valgrind
 
 # Manual Valgrind memcheck lite soak — 30s soak of the HTTP-01 serve path, no
 # helgrind. PR/release coverage lives in ci-deep.yml so normal pushes do not
 # steal self-hosted runner lanes from Build & Test.
-#
-# Action pins (keep in sync with build-test.yml header):
-# actions/checkout@v5        -> 93cb6efe18208431cddfb8368fd83d5badbf9bfd
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true

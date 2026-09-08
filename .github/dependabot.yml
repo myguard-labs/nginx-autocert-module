@@ -2,54 +2,26 @@ version: 2
 updates:
   # GitHub Actions: all actions in .github/workflows/ are pinned by SHA.
   # Dependabot tracks and auto-bumps these via pull requests.
+  #
+  # `directories` (not the singular `directory`) because dependabot-core does
+  # not walk composite actions under .github/actions/*/action.yml on its own
+  # (dependabot-core#7495, #6704 remain open). Without the second entry, the
+  # composite actions' own `uses:` pins would silently go stale while their
+  # copies in .github/workflows/ get bumped, leaving two versions of the same
+  # action running in one job graph. Drop the second entry once 7495 lands.
   - package-ecosystem: github-actions
-    directory: /
+    directories:
+      - "/"
+      - "/.github/actions/*"
     schedule:
       interval: weekly
       day: monday
-    reviewers:
-      - eilandert
+    cooldown:
+      default-days: 7
     assignees:
       - eilandert
 
-  # NOTE: The following tools are PINNED but NOT tracked by dependabot:
-  #
-  # ruff (0.16.1):
-  #   - Pinned in ci/linter/install-linters.sh line 64 as pipx spec.
-  #   - Dependabot's `pip` ecosystem cannot track bare version strings in shell
-  #     scripts (it requires requirements.txt or pyproject.toml).
-  #   - Maintenance: Manual update in install-linters.sh, or extract to a
-  #     requirements file for dependabot tracking. Rationale for pinning:
-  #     an unpinned ruff version changes linter findings, causing local scans
-  #     to diverge from CI.
-  #
-  # semgrep (1.169.0):
-  #   - Pinned in ci/linter/install-linters.sh line 73 as pipx spec.
-  #   - Same limitation as ruff: dependabot cannot track pip specs in shell
-  #     scripts.
-  #   - Maintenance: Manual update in install-linters.sh, or extract to a
-  #     requirements file. Rationale for pinning: an unpinned semgrep version
-  #     changes findings under you, so local stops matching CI.
-  #
-  # actionlint (1.7.7):
-  #   - Pinned in ci/linter/install-linters.sh line 180 as a binary download
-  #     with SHA256 verification (lines 180-196).
-  #   - Dependabot has no ecosystem for binary releases pinned in shell scripts.
-  #   - Maintenance: Manual update to version and SHA in install-linters.sh.
-  #
-  # gitleaks (8.30.1):
-  #   - Pinned in .github/workflows/security-scanners.yml via binary download
-  #     with SHA256 verification.
-  #   - Dependabot has no ecosystem for binary releases pinned in workflow
-  #     environment or shell steps.
-  #   - Maintenance: Manual update to version and SHA in
-  #     .github/workflows/security-scanners.yml.
-  #
-  # For pip tools (ruff, semgrep), the preferred long-term path is extracting
-  # the pinned versions into a dedicated requirements.txt file (e.g.,
-  # ci/linter/requirements.txt) and consuming it in install-linters.sh, then
-  # adding a `pip` ecosystem entry here to track it. For binary tools
-  # (actionlint, gitleaks), consider tracking updates manually or scripting
-  # the SHA256 fetch as part of release management. Currently, both are
-  # updated ad-hoc with the understanding that they are critical security and
-  # linting tools whose drift is caught by periodic manual review.
+# Not covered here: ruff, semgrep, actionlint (pinned in
+# ci/linter/install-linters.sh) and gitleaks (pinned in
+# .github/workflows/security-scanners.yml). Dependabot has no ecosystem for
+# pipx specs or SHA-verified binary downloads in shell scripts.

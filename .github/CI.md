@@ -19,6 +19,11 @@ All third-party actions are pinned to immutable commit SHAs. Workflows use
 read-only repository permissions except CodeQL/SARIF upload jobs, which also
 receive `security-events: write`.
 
+`.github/dependabot.yml` is the source of truth for GitHub Action pins across
+`.github/workflows/` and `.github/actions/*`; it opens a PR per bump. Workflow
+headers no longer carry hand-maintained "keep in sync" pin tables — check
+`.github/dependabot.yml` and the individual `uses:` lines instead.
+
 ## Local validation
 
 ```bash
