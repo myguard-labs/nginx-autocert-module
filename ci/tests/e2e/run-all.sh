@@ -59,6 +59,7 @@ PORT_BASES=(
     15000 15001 15353 15354 15355 15356 15357 15358
     15453 15455 15463 15465 15466 15473 15475 15483 15487 15489
     15493 15571 15581 18089 18090 18185 18190
+    14090 15590
 )
 
 set_port() {
@@ -130,6 +131,7 @@ SCRIPTS=(
   mock-finalize-ready.sh:sudo
   mock-download-400-retry.sh:sudo
   mock-order-poll-retry.sh:sudo
+  mock-dns-fake-peer.sh:sudo
   mock-freshness-wrong-domain.sh:sudo
   mock-origin-pin.sh:sudo
   store-certbot.sh:sudo
