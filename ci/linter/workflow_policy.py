@@ -55,6 +55,7 @@ ROOT = pathlib.Path(
     or pathlib.Path(__file__).resolve().parents[2]
 )
 WORKFLOWS = ROOT / ".github" / "workflows"
+ACTIONS = ROOT / ".github" / "actions"
 
 
 class PolicyError(Exception):
@@ -131,6 +132,19 @@ def workflows() -> list[pathlib.Path]:
     """
     return sorted(
         [*WORKFLOWS.glob("*.yml"), *WORKFLOWS.glob("*.yaml")],
+        key=lambda p: p.name,
+    )
+
+
+def actions() -> list[pathlib.Path]:
+    """Every composite action file, BOTH extensions.
+
+    Composite actions (.github/actions/**/action.yml) can declare and use
+    port bindings just as workflows do. Consistent port band uniqueness
+    requires checking both.
+    """
+    return sorted(
+        [*ACTIONS.glob("**/action.yml"), *ACTIONS.glob("**/action.yaml")],
         key=lambda p: p.name,
     )
 
@@ -408,6 +422,57 @@ def check_ports() -> int:
 
             # A declared band that is not passed through is decoration: the
             # driver still binds its default.
+            if starts_runtime and "--port" not in body:
+                errors.append(
+                    f"{where} declares TEST_BASE_PORT but never passes --port; "
+                    "the driver would bind its default anyway"
+                )
+            if starts_runtime and "TEST_BASE_PORT" not in body.split("--port")[-1][:40]:
+                errors.append(
+                    f"{where} passes --port with something other than "
+                    "$TEST_BASE_PORT -- the declaration and the bind must be "
+                    "the same value or they drift"
+                )
+
+    for path in actions():
+        doc = load(path)
+        runs = doc.get("runs")
+        if not isinstance(runs, dict):
+            continue
+        steps = runs.get("steps")
+        if not isinstance(steps, list):
+            continue
+        for idx, step in enumerate(steps):
+            if not isinstance(step, dict):
+                continue
+            body = _body(step)
+            declared = re.search(r"(?m)^\s*TEST_BASE_PORT:\s*[\"']?(\d+)", body)
+            starts_runtime = RUNTIME_DRIVER in body
+            binds_band = BINDER_RE.search(body) is not None
+            where = f"{path.name}:runs.steps[{idx}]"
+
+            if binds_band and not declared:
+                errors.append(
+                    f"{where} binds a port (via "
+                    f"{RUNTIME_DRIVER if starts_runtime else 'prove/coverage.sh'}) "
+                    "without declaring TEST_BASE_PORT -- it would take the "
+                    "default port and collide with any other runtime job on "
+                    "the same runner"
+                )
+                continue
+
+            if not declared:
+                continue
+
+            port = declared.group(1)
+            if port in bands:
+                errors.append(
+                    f"{where} and {bands[port]} both claim TEST_BASE_PORT "
+                    f"{port} -- bands must be disjoint across ALL workflows and actions"
+                )
+            else:
+                bands[port] = where
+
             if starts_runtime and "--port" not in body:
                 errors.append(
                     f"{where} declares TEST_BASE_PORT but never passes --port; "
