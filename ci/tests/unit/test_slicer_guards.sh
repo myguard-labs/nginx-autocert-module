@@ -217,17 +217,26 @@ run_variant() {
 
 	# Run test_fn in a FRESH bash process against the MUTATED lib (exported
 	# via env, not sourced by re-parsing this file), expecting failure.
-	if MUTATED_SRC_LIB="$variant_lib" bash "$0" __run_single__ "$test_fn"; then
+	# Require exit 1 specifically -- the status `fail` produces. Any other
+	# non-zero (127 from a typo'd $test_fn, 2 from a broken __run_single__)
+	# means the harness broke, NOT that the assertion went red, and must not
+	# be credited as a passing control.
+	rc=0
+	MUTATED_SRC_LIB="$variant_lib" bash "$0" __run_single__ "$test_fn" || rc=$?
+	if [ "$rc" -eq 0 ]; then
 		fail "MUTATION CONTROL FAILED: $label — removing the guard did NOT turn $test_fn() red (still exit 0)"
-	else
-		pass "mutation control: removing '$label' guard turns $test_fn() red, as required"
+	elif [ "$rc" -ne 1 ]; then
+		fail "MUTATION CONTROL FAILED: $label — $test_fn() child exited $rc, expected 1 (assertion red); the harness is broken"
 	fi
+	pass "mutation control: removing '$label' guard turns $test_fn() red, as required"
 }
 
 if [ "${1:-}" = "__run_single__" ]; then
 	# Re-invoked by run_variant: point SRC_LIB at the mutated copy before
 	# running the single named assertion function.
 	SRC_LIB="${MUTATED_SRC_LIB:?__run_single__ requires MUTATED_SRC_LIB to be set by run_variant}"
+	declare -F "$2" >/dev/null \
+		|| { echo "__run_single__: no such test function: $2" >&2; exit 2; }
 	TMP="$(mktemp -d)"
 	trap 'rm -rf "$TMP"' EXIT
 	make_fixtures "$TMP"
@@ -268,5 +277,10 @@ run_variant "major1_end_anchor_guard" \
 	's/if (!closed) exit 1/if (opened \&\& depth != 0) exit 1/' test_e
 run_variant "major1_end_anchor_guard" \
 	's/if (!closed) exit 1/if (opened \&\& depth != 0) exit 1/' test_f
+# (g)'s guard is the `pre_depth == 0 && n_open > 0` disjunct that lets a line
+# which both opens and closes the body terminate the slice. Remove it and the
+# one-line body is never recognised as closed, so test_g must go red.
+run_variant "one_line_body_disjunct" \
+	's/(opened || (pre_depth == 0 \&\& n_open > 0))/(opened)/g' test_g
 
 echo "✓ all slicer guard assertions passed, including mutation controls"
