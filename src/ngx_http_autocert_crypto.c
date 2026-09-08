@@ -270,7 +270,8 @@ done:
 
     /* The memory BIO holds a second plaintext copy of the PKCS#8 key. BIO_free
      * releases it to the malloc arena without wiping, so cleanse it on EVERY
-     * exit — the caller's copy in `out` is wiped by the caller at ITS last use. */
+     * exit — the caller's copy in `out` is wiped by the caller at ITS last
+     * use. */
     if (data != NULL && len > 0) {
         OPENSSL_cleanse(data, (size_t) len);
     }
