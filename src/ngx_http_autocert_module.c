@@ -170,6 +170,14 @@ static ngx_command_t ngx_http_autocert_commands[] = {
       ngx_conf_set_sec_slot, NGX_HTTP_MAIN_CONF_OFFSET,
       offsetof( ngx_http_autocert_main_conf_t, runtime_ttl ), NULL },
 
+    /* Per-worker, per-second ceiling on synchronous cert loads done on the TLS
+     * handshake path. Bounds the SNI-flood amplification the per-name throttle
+     * cannot (ngx_autocert_loadcap.h). 0 = unlimited (pre-1.x behaviour). */
+    { ngx_string( "autocert_handshake_load_limit" ),
+      NGX_HTTP_MAIN_CONF | NGX_CONF_TAKE1, ngx_conf_set_num_slot,
+      NGX_HTTP_MAIN_CONF_OFFSET,
+      offsetof( ngx_http_autocert_main_conf_t, handshake_load_limit ), NULL },
+
     { ngx_string( "autocert_key_type" ), NGX_HTTP_MAIN_CONF | NGX_CONF_1MORE,
       ngx_http_autocert_key_type, NGX_HTTP_MAIN_CONF_OFFSET, 0, NULL },
 
@@ -409,6 +417,7 @@ ngx_http_autocert_create_main_conf(ngx_conf_t *cf)
     amcf->dns_hook_timeout = NGX_CONF_UNSET;
 
     amcf->runtime_ttl = NGX_CONF_UNSET;
+    amcf->handshake_load_limit = NGX_CONF_UNSET_UINT;
 
     return amcf;
 }
@@ -457,6 +466,17 @@ ngx_http_autocert_init_main_conf(ngx_conf_t *cf, void *conf)
      * e2e suite needs them to exercise eviction without waiting days.
      */
     ngx_conf_init_value(amcf->runtime_ttl, 7 * 24 * 60 * 60);
+
+    /*
+     * Default 64 loads/worker/second. A load is one cache entry's slots: open +
+     * fstat + up to 1 MB read + PEM parse per slot, order-of-100us each. 64
+     * bounds the handshake-path disk work a worker can be made to do to a small
+     * fraction of a second while sitting far above any legitimate burst — the
+     * budget is only ever charged by a name whose entry has NOT been refreshed
+     * this second, so steady-state serving of cached certs charges nothing at
+     * all, and even a cold start with 64 configured names clears in one second.
+     */
+    ngx_conf_init_uint_value(amcf->handshake_load_limit, 64);
 
     if (amcf->runtime_ttl < 0) {
         ngx_log_error(NGX_LOG_EMERG, cf->log, 0,

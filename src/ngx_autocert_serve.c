@@ -12,6 +12,8 @@
 #include "ngx_http_autocert_crypto.h"
 #include "ngx_autocert_shared.h"
 #include "ngx_autocert_requests.h"
+/* per-worker per-second handshake cert-load cap */
+#include "ngx_autocert_loadcap.h"
 
 #include <ngx_http_ssl_module.h>
 #if (NGX_HTTP_V2)
@@ -126,6 +128,9 @@ typedef struct {
     ngx_array_t        *names;       /* ngx_str_t: the issuable name set */
     ngx_shm_zone_t     *alpn_zone;   /* M10b tls-alpn-01 cert store; NULL=off */
     ngx_shm_zone_t     *requests_zone; /* A4: runtime-issued names; NULL=off */
+    ngx_uint_t          load_limit; /* max synchronous cert loads per worker per
+                                     * second on the handshake path; 0 = off.
+                                     * autocert_handshake_load_limit. */
     ngx_uint_t          slot_mask; /* bit s set => slot s (EC/RSA) is config-
                                     * enabled; only enabled slots are reloaded
                                     * + installed, so a stale opposite-keytype
@@ -152,6 +157,16 @@ static int  ngx_autocert_alpn_conn_index = -1;
 static ngx_rbtree_t         ngx_autocert_cache_rbtree;
 static ngx_rbtree_node_t    ngx_autocert_cache_sentinel;
 static ngx_pool_t          *ngx_autocert_cache_pool; /* NULL until first use */
+
+/*
+ * Per-worker budget for synchronous certificate loads on the handshake path.
+ * The per-name `checked` throttle below bounds reloads per NAME per second,
+ * which does nothing against a flood of DISTINCT SNIs — each one is a fresh
+ * cache entry and therefore a fresh open+read+PEM-parse on the event loop, with
+ * the attacker choosing how many. This is the missing global bound. Rationale
+ * and the exhausted-budget contract: ngx_autocert_loadcap.h.
+ */
+static ngx_autocert_loadcap_t  ngx_autocert_cache_loadcap;
 
 /*
  * Per-worker lookup index of the configured issuance names, built once from
@@ -280,6 +295,7 @@ ngx_http_autocert_serve_init(ngx_conf_t *cf,
     sctx->alpn_zone = amcf->alpn_zone; /* M10b: NULL unless tls-alpn-01 wired */
     sctx->requests_zone =
         amcf->requests_zone; /* A4: NULL unless autolabel wired */
+    sctx->load_limit = amcf->handshake_load_limit;
 
     /*
      * Build the enabled-slot mask from the configured key_type list so serving
@@ -979,7 +995,35 @@ ngx_http_autocert_cert_cb(SSL *ssl_conn, void *arg)
          * throttled we install whatever the slots already hold. checked starts
          * at 0, so the first handshake always loads.
          */
-        if (now != cert->checked) {
+        /*
+         * Two independent bounds, both required:
+         *
+         *   now != cert->checked        per-NAME: at most one disk refresh per
+         *                               second for this cache entry.
+         *   loadcap_admit(...)          per-WORKER: at most `load_limit` disk
+         *                               refreshes per second across ALL names.
+         *
+         * The per-name one alone is useless against an SNI flood, since every
+         * distinct name is a distinct entry (see ngx_autocert_loadcap.h). The
+         * per-name test comes first deliberately: it is free and it is the
+         * common case, so a busy server serving cached certs never charges the
+         * global budget and can never starve a genuinely new name.
+         *
+         * When the budget is exhausted we fall through with `cert->checked`
+         * DELIBERATELY NOT updated. That does two things: this handshake
+         * installs whatever the slots already hold (the last-good certificate
+         * for this exact name, or nothing at all — in which case the code below
+         * returns 1 and nginx serves its configured/bootstrap certificate, as
+         * it does pre-issuance), and the load is retried on the very next
+         * handshake once the second rolls over. Leaving `checked` alone is what
+         * makes this a DEFERRAL rather than a drop; setting it here would
+         * suppress the retry for the rest of the second. No path here can serve
+         * another name's certificate or fail the handshake.
+         */
+        if (now != cert->checked
+            && ngx_autocert_loadcap_admit(&ngx_autocert_cache_loadcap, now,
+                                          sctx->load_limit))
+        {
             cert->checked = now;
             for (s = 0; s < NGX_AUTOCERT_NSLOTS; s++) {
                 if (!(sctx->slot_mask & ((ngx_uint_t) 1 << s))) {
@@ -1007,6 +1051,11 @@ ngx_http_autocert_cert_cb(SSL *ssl_conn, void *arg)
                 (void) ngx_http_autocert_cache_reload(cert, s, &store, &host,
                                                       sctx, c->log);
             }
+
+        } else if (now != cert->checked) {
+            ngx_log_debug1(NGX_LOG_DEBUG_HTTP, c->log, 0,
+                           "autocert: handshake load budget exhausted, "
+                           "serving cached cert for \"%V\"", &host);
         }
 
         if (cert->slots[NGX_AUTOCERT_SLOT_EC].cert == NULL
