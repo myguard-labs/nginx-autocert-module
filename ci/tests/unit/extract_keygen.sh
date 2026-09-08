@@ -78,8 +78,25 @@ if [ "$endfn" -lt "$start" ]; then
 	exit 1
 fi
 # first column-0 closing brace at or after _post(): its end
-end=$(awk -v s="$endfn" 'NR >= s && $0 == "}" { print NR; exit }' "$SRC")
-if [ -z "${end:-}" ]; then
+# Use brace-depth counting to find the true function end, not just the first
+# lone } which could be followed by a trailing comment on a reformatted function.
+if ! end=$(awk -v s="$endfn" '
+	NR >= s {
+		if ($0 ~ /^ngx_autocert_keygen_post\(/) { entered = 1 }
+		# Count braces once the body is open. The function ends when depth
+		# returns to zero -- NOT at "the next lone } in column 1", which is
+		# also the terminator of the NEXT function if this one was
+		# reformatted. Measured: with that reformat, a lone-} rule would miss
+		# the real end and include trailing code.
+		if (entered) {
+			n = gsub(/{/, "{"); depth += n
+			n = gsub(/}/, "}"); depth -= n
+			if (opened && depth == 0) { print NR; exit }
+			if (depth > 0) { opened = 1 }
+		}
+	}
+	END { if (opened && depth != 0) exit 1 }
+' "$SRC"); then
 	echo "✗ could not find the end of ngx_autocert_keygen_post" >&2
 	exit 1
 fi

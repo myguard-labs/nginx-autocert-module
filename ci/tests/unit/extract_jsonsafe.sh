@@ -52,17 +52,36 @@ for FN in "${FNS[@]}"; do
     # running. Such a consumer defines NGX_AUTOCERT_SLICE_SKIP_<FN> before the
     # include. Guarding beats __attribute__((unused)): that silences the
     # warning but still emits the body, so the link dependency remains.
+    # Extract the function. Captured into a variable rather than redirected into
+    # $OUT inside a block: shellcheck's SC2094 fires (info, and CI gates on info)
+    # whenever a block that writes $OUT also mentions it, even in an error branch.
+    if ! body=$(awk -v s="$rtype" -v name="$FN" '
+        NR >= s {
+            print
+            if ($0 ~ ("^" name "\\(")) { entered = 1 }
+            # Count braces once the body is open. The function ends when depth
+            # returns to zero -- NOT at "the next lone } in column 1", which is
+            # also the terminator of the NEXT function if this one was
+            # reformatted (e.g. `} /* json_safe */`). Measured: with that
+            # reformat, a lone-} rule silently emitted more than needed,
+            # swallowing the following function, and still exited 0.
+            if (entered) {
+                n = gsub(/{/, "{"); depth += n
+                n = gsub(/}/, "}"); depth -= n
+                if (opened && depth == 0) { closed = 1; exit }
+                if (depth > 0) { opened = 1 }
+            }
+        }
+        END { if (!closed) exit 1 }
+    ' "$SRC"); then
+        echo "✗ ${FN}() body never closed at brace depth 0 in $SRC (reformatted?)" >&2
+        rm -f "$OUT"
+        exit 1
+    fi
+
     {
         printf '#ifndef NGX_AUTOCERT_SLICE_SKIP_%s\n' "$FN"
-
-        awk -v s="$rtype" -v name="$FN" '
-            NR >= s {
-                print
-                if (entered && $0 == "}") { exit }
-                if ($0 ~ ("^" name "\\(")) { entered = 1 }
-            }
-        ' "$SRC"
-
+        printf '%s\n' "$body"
         printf '#endif /* NGX_AUTOCERT_SLICE_SKIP_%s */\n' "$FN"
         echo ""
     } >> "$OUT"
