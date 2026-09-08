@@ -1,0 +1,8 @@
+name: a
+description: Claims a band via env VAR=val.
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: |
+        env AC_TEST_PORT=18500 bash ci/tests/e2e/run.sh

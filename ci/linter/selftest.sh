@@ -176,6 +176,13 @@ policy_msg_ action-inline-port-collision-plain ports \
 # claimants and reddens a correct tree.
 policy_ 0 action-inline-port-prefixed-identifier ports
 
+# A statement also begins after `env`, and after the `then`/`do`/`else`
+# keywords. `env VAR=val cmd` is idiomatic for setting a port for one
+# invocation; an opener set that misses either hands back the false negative
+# the uniqueness check exists to prevent.
+policy_ 1 action-inline-port-env-prefix ports
+policy_ 1 action-inline-port-keyword-lead ports
+
 # Direct master `push:` and `schedule:` are deliberate member entry points;
 # neither duplicates the PR invocation. These green controls ensure cadence
 # remains focused on a second `pull_request:` trigger.

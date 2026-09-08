@@ -400,28 +400,35 @@ def _order_finding(where: str, node: dict) -> str | None:
 # preceding real `\n` would match it either. No LINE anchor works across
 # every scalar style safe_dump can choose.
 #
-# An IDENTIFIER boundary does. The lookbehind rejects a longer variable that
-# merely ends in this name (`SAVED_AC_TEST_PORT=18185`), which an unanchored
-# match would otherwise fold into the uniqueness set as a phantom second
-# claimant -- a false collision that reddens a correct tree.
+# A STATEMENT boundary does, and one rule covers every over-match shape. A
+# shell assignment is only an assignment at the start of a statement, so
+# requiring one rejects all of these, each of which occurs in ordinary
+# authoring and each of which an unanchored match folds into the uniqueness
+# set as a phantom second claimant -- a false collision that reddens a correct
+# tree:
 #
-# A shell assignment is only an assignment at a STATEMENT boundary. Requiring
-# one rejects the two remaining over-match shapes that a bare identifier
-# boundary still admits, both of which occur in ordinary authoring:
-#
-#   echo "using AC_TEST_PORT=18500"   <- diagnostic, claims nothing
+#   SAVED_AC_TEST_PORT=18500          <- longer identifier ending in the name
 #   # AC_TEST_PORT=18500              <- commented-out old band
+#   echo "AC_TEST_PORT=18500 in use"  <- diagnostic, claims nothing
+#   msg="AC_TEST_PORT=18500 in use"   <- ditto, no filler word to hide behind
 #
-# Either would otherwise enter the uniqueness set as a phantom second claimant
-# and redden a correct tree. A commented-out band sitting above the live one is
-# the likeliest shape in practice -- exactly what a developer leaves behind
-# when changing a port.
-# The quote characters are in the boundary set because `_body()`'s single-
-# quoted scalar opens as `run: 'export AC_TEST_PORT=...`, putting the first
-# statement immediately after the quote. That does not re-admit the echo
-# shape: `echo "using AC_TEST_PORT=` has `using ` between the quote and the
-# token, and only optional whitespace or `export` may sit there.
-_STMT_LEAD = r"(?:^|[;&|('\"]|\\n|\n)[ \t]*(?:export[ \t]+)?"
+# A commented-out band sitting above the live one is the likeliest in practice:
+# exactly what a developer leaves behind when changing a port.
+#
+# The openers are the real ones a `run:` block uses -- `;`, `&&`/`||` (via the
+# bare `&`/`|`), a subshell or group `(`/`{`, a backtick, a real or escaped
+# newline -- plus the keywords `then`/`do`/`else`, and `env` alongside `export`
+# as a permitted prefix word. `env VAR=val cmd` is idiomatic for setting a port
+# for one invocation and MUST be seen; missing it hands back the false negative
+# this check exists to prevent.
+#
+# The single quote is admitted only as the DUMP PREFIX `run: '`, not as a bare
+# quote character. That is the one quote form `_body()` actually emits (a plain
+# block dumps single-quoted, opening as `run: 'export AC_TEST_PORT=...`), and
+# scoping it this way is what keeps `msg="AC_TEST_PORT=..."` out: a bare quote
+# in the class would admit any string whose first word is the token.
+_STMT_OPEN = r"(?:^|run:[ \t]*'|[;&|({`]|\\n|\n|(?:^|[ \t;])(?:then|do|else)[ \t])"
+_STMT_LEAD = _STMT_OPEN + r"[ \t]*(?:(?:export|env)[ \t]+)*"
 INLINE_PORT_RE = re.compile(_STMT_LEAD + r"(AC_TEST_PORT[0-9]*)=(\d+)\b")
 
 
