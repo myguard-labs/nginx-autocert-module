@@ -397,11 +397,32 @@ def _order_finding(where: str, node: dict) -> str | None:
 # `run: |` block) dumps as a SINGLE-quoted scalar, and PyYAML opens it as
 # `run: 'export AC_TEST_PORT=...`  -- the assignment sits right after the
 # opening quote, MID-LINE, not at column 0, so neither `(?m)^` nor a
-# preceding real `\n` would match it either. There is no anchor that reliably
-# precedes this token across every scalar style safe_dump can choose, so the
-# check does not try to anchor at all: it matches `AC_TEST_PORT` wherever it
-# occurs, the same way a human reading the dumped text would find it.
-INLINE_PORT_RE = re.compile(r"AC_TEST_PORT[0-9]*=(\d+)\b")
+# preceding real `\n` would match it either. No LINE anchor works across
+# every scalar style safe_dump can choose.
+#
+# An IDENTIFIER boundary does. The lookbehind rejects a longer variable that
+# merely ends in this name (`SAVED_AC_TEST_PORT=18185`), which an unanchored
+# match would otherwise fold into the uniqueness set as a phantom second
+# claimant -- a false collision that reddens a correct tree.
+#
+# A shell assignment is only an assignment at a STATEMENT boundary. Requiring
+# one rejects the two remaining over-match shapes that a bare identifier
+# boundary still admits, both of which occur in ordinary authoring:
+#
+#   echo "using AC_TEST_PORT=18500"   <- diagnostic, claims nothing
+#   # AC_TEST_PORT=18500              <- commented-out old band
+#
+# Either would otherwise enter the uniqueness set as a phantom second claimant
+# and redden a correct tree. A commented-out band sitting above the live one is
+# the likeliest shape in practice -- exactly what a developer leaves behind
+# when changing a port.
+# The quote characters are in the boundary set because `_body()`'s single-
+# quoted scalar opens as `run: 'export AC_TEST_PORT=...`, putting the first
+# statement immediately after the quote. That does not re-admit the echo
+# shape: `echo "using AC_TEST_PORT=` has `using ` between the quote and the
+# token, and only optional whitespace or `export` may sit there.
+_STMT_LEAD = r"(?:^|[;&|('\"]|\\n|\n)[ \t]*(?:export[ \t]+)?"
+INLINE_PORT_RE = re.compile(_STMT_LEAD + r"(AC_TEST_PORT[0-9]*)=(\d+)\b")
 
 
 def _check_port_node(
@@ -422,7 +443,7 @@ def _check_port_node(
     starts_runtime = RUNTIME_DRIVER in body
     binds_band = BINDER_RE.search(body) is not None
 
-    inline_ports = INLINE_PORT_RE.findall(body)
+    inline_ports = [m[1] for m in INLINE_PORT_RE.findall(body)]
     # Two steps in the SAME node (job or action) can independently claim the
     # same port -- likelier now that one action can carry several inline
     # ports across sibling steps. `where` names the whole node, so a

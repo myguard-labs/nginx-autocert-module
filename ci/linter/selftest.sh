@@ -169,6 +169,13 @@ policy_msg_ action-band-collision ports \
 policy_msg_ action-inline-port-collision-plain ports \
     'claims AC_TEST_PORT 18500 twice across its steps'
 
+# A shell assignment only counts at a statement boundary. A prefixed variable
+# (SAVED_AC_TEST_PORT=), a diagnostic echo of the value, and a commented-out
+# old band all mention the token without claiming the port; an INLINE_PORT_RE
+# matching the bare token folds them into the uniqueness set as phantom second
+# claimants and reddens a correct tree.
+policy_ 0 action-inline-port-prefixed-identifier ports
+
 # Direct master `push:` and `schedule:` are deliberate member entry points;
 # neither duplicates the PR invocation. These green controls ensure cadence
 # remains focused on a second `pull_request:` trigger.
