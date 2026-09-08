@@ -10,7 +10,7 @@ runs exactly once per PR. The rest are scheduled or manual only.
 | Workflow | Required check (exact name GitHub surfaces) | Coverage |
 |---|---|---|
 | `build-test.yml` | `Build&Test / Validation` | shell syntax, ShellCheck, cppcheck, whitespace, workflow lint |
-| `build-test.yml` | `Build&Test / Resolve nginx + angie versions` | pins the mainline nginx and Angie versions the build jobs consume |
+| `build-test.yml` | `Build&Test / Resolve nginx + angie versions` | output plumbing only — pins the mainline nginx and Angie versions the build jobs consume |
 | `build-test.yml` | `Build&Test / Build & load (nginx …)` † | latest mainline nginx build, module load, config rejection, no-network serve/lifecycle tests |
 | `build-test.yml` | `Build&Test / Build & load (angie …)` † | latest Angie API compile drift guard |
 | `build-test.yml` | `Build&Test / Guard suite` | config-rejection and lifecycle guard assertions |
@@ -26,7 +26,8 @@ runs exactly once per PR. The rest are scheduled or manual only.
 version, or the e2e matrix flavor), so the surfaced check name changes with
 the pin. Branch protection cannot match a name that moves — require the
 stable checks above and treat these as informational, or pin them by the
-`ci.yml` caller job (`Build&Test`) instead.
+`ci.yml` caller job (`Build&Test`) instead — noting that the caller job gates
+every `build-test.yml` job at once, not only the daggered three.
 
 `build-test.yml`, `codeql.yml` and `security-scanners.yml` also carry their own
 bounded `push:`/`schedule:` triggers for direct master coverage; they
