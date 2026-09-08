@@ -570,6 +570,7 @@ main(void)
                                            1000000 };
         ngx_uint_t               lim, nn, rr, k, res, gen, ok;
         ngx_uint_t               bad_admit = 0, bad_res = 0, bad_charge = 0;
+        ngx_uint_t               bad_wedge_once = 0;
 
         for (k = 0; k < 64 + 1 + sizeof(big) / sizeof(big[0]); k++) {
 
@@ -611,6 +612,23 @@ main(void)
                         bad_admit++;
                     }
 
+                    /* The wedge path is a once-per-window admission, not a
+                     * standing exemption: a second call in the SAME window
+                     * with identical args must now be denied, because the
+                     * first call already charged both pools closed. Reusing
+                     * `cap` here (no memzero) is the point -- it is what
+                     * distinguishes this from the ok==1 check above, which a
+                     * cap that always admits n > limit would also pass. */
+                    if (lim > 0 && nn > lim && ok == 1) {
+                        ngx_uint_t  ok2;
+
+                        ok2 = ngx_autocert_loadcap_admit_retry_n(&cap, 30000,
+                                                                 lim, nn, rr);
+                        if (ok2 != 0) {
+                            bad_wedge_once++;
+                        }
+                    }
+
                     /* Charging must stay inside both pools -- a slip here is
                      * what makes `reserve - spent_res` underflow later. */
                     if (cap.spent > gen || cap.spent_res > res) {
@@ -629,6 +647,10 @@ main(void)
         CHECK(bad_charge == 0,
               "sweep: neither pool is ever overcharged (no underflow of "
               "reserve - spent_res)");
+        CHECK(bad_wedge_once == 0,
+              "sweep: the wedge path (n > limit) admits at most once per "
+              "window -- an immediate second call with the same args is "
+              "denied");
     }
 
     if (failures) {
