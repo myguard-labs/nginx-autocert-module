@@ -1,4 +1,4 @@
-# sync-sha: 43aa26bb79dfb8442e3b2468cb4c900a435a38771ef9d4c1ff2e596c7867f666
+# sync-sha: ed5f099fda478186aac40379721070b0854ce18edf1e3a8103bd8f00a58cc09d
 name: CI Deep
 
 # Exhaustive dynamic analysis — monthly cron, release, and on-demand only,
@@ -10,7 +10,7 @@ name: CI Deep
 # findings, they just don't upload.
 #
 # Jobs: fuzz (FUZZ_SECS, 3600s default) · memcheck soak · helgrind soak · scanners ·
-#       e2e-angie (the Pebble suite on angie).
+#       coverage (gcov, non-blocking) · e2e-angie (the Pebble suite on angie).
 #   * e2e-angie moved here out of build-test.yml: at ~11.5 minutes it was the
 #     per-PR wall-clock, while covering the same module logic as the nginx leg
 #     that still runs on every PR. build-test.yml keeps build-angie, so an angie
@@ -330,6 +330,68 @@ jobs:
             ${{ github.workspace }}/clang-tidy.log
             ${{ github.workspace }}/semgrep.log
           retention-days: 14
+
+  # --------------------------------------------------------------- coverage
+  # ci/tools/coverage.sh is a maintained gcov harness (AC_BUILD_PROFILE=coverage
+  # via ci-build.sh, then the unit suite + a bounded local worker workload) that
+  # no workflow invoked before this job -- line coverage was never measured on
+  # this repo despite the script being kept current. Non-blocking
+  # (continue-on-error) while it beds in: repo policy per the script's own
+  # header is "coverage high as practical", not a %% gate, so this job reports
+  # a number rather than enforcing one. Lives here, not build-test.yml, so it
+  # never adds wall-clock or a red merge-gate check to every PR; monthly/
+  # release/on-demand matches its exploratory, non-authoritative status.
+  coverage:
+    name: Coverage (gcov, non-blocking)
+    runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || fromJSON('["self-hosted","builder02","lxc"]') }}
+    timeout-minutes: 30
+    continue-on-error: true
+    env:
+      # coverage.sh's bounded server workload binds a UNIX socket
+      # (unix:$prefix/coverage.sock), never a TCP port, so it cannot collide
+      # with another job's port band -- but lint-ci-ports.sh still treats
+      # coverage.sh as a BINDER and requires every binder to name a band, so
+      # this job claims one exclusively for the record.
+      TEST_BASE_PORT: "19900"
+    steps:
+      - name: Checkout module
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          persist-credentials: false
+      - name: Setup build deps + ccache
+        uses: ./.github/actions/setup  # zizmor: ignore[self-repository] actionlint rejects $/ (actionlint#711)
+        with:
+          packages: >-
+            build-essential ccache curl gcovr libpcre2-dev libssl-dev
+            pkg-config wget zlib1g-dev
+          ccache-key: ci-deep-coverage
+      - name: Run coverage.sh (instrumented build + unit suite + report)
+        run: bash ci/tools/coverage.sh
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        with:
+          name: coverage-report
+          path: |
+            ${{ github.workspace }}/.build/unit/html
+            ${{ github.workspace }}/.build/unit/coverage-summary.json
+            ${{ github.workspace }}/.build/unit/coverage.info.src
+          if-no-files-found: warn
+          retention-days: 14
+      - name: Notify Discord on failure
+        if: failure() && github.event_name == 'schedule'
+        env:
+          DISCORD_BOT_TOKEN: ${{ secrets.DISCORD_BOT_TOKEN }}
+          DISCORD_CHANNEL_BUILDS: ${{ secrets.DISCORD_CHANNEL_BUILDS }}
+          GH_REPOSITORY: ${{ github.repository }}
+          GH_RUN_ID: ${{ github.run_id }}
+          GH_SERVER_URL: ${{ github.server_url }}
+        run: |
+          [ -n "$DISCORD_BOT_TOKEN" ] || exit 0
+          curl -fsS -X POST -H "Authorization: Bot $DISCORD_BOT_TOKEN" \
+            -H "Content-Type: application/json" \
+            "https://discord.com/api/v10/channels/$DISCORD_CHANNEL_BUILDS/messages" \
+            -d "{\"content\":\"🔴 $GH_REPOSITORY — CI Deep / coverage FAILED. $GH_SERVER_URL/$GH_REPOSITORY/actions/runs/$GH_RUN_ID\"}" || true
 
   # ------------------------------------------------------------------ angie e2e
   # The full Pebble issuance/renewal suite against angie. Lives here rather than
