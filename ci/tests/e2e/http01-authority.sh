@@ -115,8 +115,9 @@ http {
         autocert on;
     }
     # xn--fsq.example.com is the A-label (punycode) form of the IDN
-    # 例.example.com. It is autocert-ENABLED, so it is the case (d) probe for
-    # whether nginx folds a U-label Host onto its A-label server_name.
+    # 例.example.com. It is autocert-ENABLED, and is what case (d) probes for
+    # A-label matching, including case-insensitivity. No U-label Host is ever
+    # sent -- see the header for why such a probe would prove nothing.
     server {
         listen $PORT;
         http2 on;
@@ -195,9 +196,10 @@ fetch_h2_both() {
 # that: the reachable case is an intercepting proxy, which returns its own
 # error page with a 200/502 and a body that trivially lacks the keyauth. (A
 # refused connection does not reach here at all -- `set -e` aborts on curl's
-# exit 7 inside fetch_h1_both.) It is deliberately NOT a discriminator for the
-# enable gate: autocert itself also returns 404 for an unknown token,
-# byte-identically, so the code alone cannot say which path declined.
+# exit 7 inside fetch_h1_both/fetch_h2_both.) It is deliberately NOT a
+# discriminator for the enable gate: autocert itself also returns 404 for an
+# unknown token, byte-identically, so the code alone cannot say which path
+# declined.
 # $4 = the expected status; every current call site wants the 404
 # fall-through, so state it explicitly rather than defaulting.
 assert_no_leak() {
@@ -257,19 +259,27 @@ echo "== (d) A-label (IDN) authority matching =="
 # ngx_http_validate_host() before selection runs, so it returns 400 whether or
 # not the IDN vhost exists and discriminates nothing. Verified by probing a
 # config with the vhost deleted.
+# Under CONTROL these two positives are vacuous -- b is default_server with
+# autocert on, so ANY Host gets the keyauth and they cannot distinguish an
+# IDN match from a default-server fall-through. They stay enabled (a passing
+# assertion is still a passing assertion) but say so, since CI runs both steps
+# and only the primary one makes them evidence.
+d_note=""
+[ "$CONTROL" = 1 ] && d_note=" [CONTROL: default-server fall-through, not IDN evidence]"
+
 got=$(fetch_h1 xn--fsq.example.com)
 if [ "$got" != "$KEYAUTH" ]; then
     echo "::error::(d) canonical A-label authority did not receive the keyauth: got '$got'"
     exit 1
 fi
-echo "✓ (d) canonical A-label authority served exact key authorization"
+echo "✓ (d) canonical A-label authority served exact key authorization$d_note"
 
 got=$(fetch_h1 XN--FSQ.EXAMPLE.COM)
 if [ "$got" != "$KEYAUTH" ]; then
     echo "::error::(d) upper-cased A-label authority did not receive the keyauth: got '$got'"
     exit 1
 fi
-echo "✓ (d) A-label authority matches case-insensitively"
+echo "✓ (d) A-label authority matches case-insensitively$d_note"
 
 # Same A-label, different registrable domain: parsed fine, reaches matching,
 # matches nothing, falls to the disabled default server.

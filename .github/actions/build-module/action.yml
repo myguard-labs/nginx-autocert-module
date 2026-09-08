@@ -1,4 +1,4 @@
-# sync-sha: 5613185331c41ce82ab7d4d087c34944354a466483fca943c7e46d0efe2583c8
+# sync-sha: 4e8e825865c5bc59cd96de0dc5d8115a349f76507dadb6f093ca37f9edf6f14d
 name: Build module + load/serve tests
 description: >
   Fetch one flavor (nginx | angie), configure + build the autocert dynamic
@@ -254,8 +254,9 @@ runs:
         # A wrong authority must never receive another name's token: a vhost
         # without `autocert on` does not serve the seeded keyauth. Covers a
         # different disabled vhost on the same port, an unknown Host falling
-        # to the default server, and a U-label vs canonical A-label pair, over
-        # both h1 Host and h2c :authority. Exact cases: script header.
+        # to the default server, and canonical / upper-cased / non-matching
+        # A-label probes, over both h1 Host and h2c :authority. Exact cases:
+        # script header.
         SERVER_BIN="$SERVER_BIN" \
           NGX_BUILD_DIR="$GITHUB_WORKSPACE/${{ inputs.dir }}" \
           AC_TEST_PORT=18396 \
