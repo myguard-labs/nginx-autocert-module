@@ -281,22 +281,20 @@ offers no matching challenge.
 | `tls-alpn-01` | A `listen 443 ssl;` vhost. Validation is a TLS handshake with ALPN `acme-tls/1` + SNI. The module serves a challenge cert in-handshake. | No |
 | `dns-01` | Both DNS hooks (below). No `:80`/`:443` needed for validation itself. | **Yes** — the only type that can issue `*.example.com`. |
 
-The HTTP-01 handler is registered once in the content phase for the whole
+The HTTP-01 handler is registered once in the post-read phase for the whole
 `http{}` block, matches the `/.well-known/acme-challenge/` URI prefix, and serves
 the token only when the resolved server has autocert enabled. The `:80` vhost that
 answers the CA must therefore be (or inherit) an autocert-enabled server — a bare
 `listen 80;` vhost with autocert disabled will decline the challenge. The `:80` /
 `:443` requirements above are the ACME protocol's, not enforced by the module.
 
-> **A content handler on the `:80` vhost shadows the challenge.** Because the
-> token is served from a phase *handler*, any `location` that sets a content
-> handler covering `/.well-known/acme-challenge/` wins instead — a catch-all
+> **No `location` carve-out is needed.** The handler runs in the post-read
+> phase, which is the first phase of every request — before location matching,
+> before `rewrite`/`return`, and before the content phase short-circuits to a
+> location's own content handler. A catch-all
 > `location / { return 301 https://$host$request_uri; }`, a `root` plus the
-> static handler, or a `proxy_pass`. The CA then reads a redirect, the wrong
-> body, or a 404, and the order fails with *"authorization did not become
-> valid"* — with nothing logged by this module, since its handler never ran.
-> Either keep the `:80` vhost free of a catch-all, or carve the prefix out
-> ahead of it:
+> static handler, a `proxy_pass` or a `fastcgi_pass` on the `:80` vhost
+> therefore no longer shadows the challenge:
 >
 > ```nginx
 > server {
@@ -304,17 +302,17 @@ answers the CA must therefore be (or inherit) an autocert-enabled server — a b
 >     server_name example.com;
 >     autocert on;
 >
->     # Empty block: it sets no content handler, so the phase handler above
->     # stays reachable. Longest-prefix wins, so this beats `location /`
->     # wherever it appears in the file.
->     location ^~ /.well-known/acme-challenge/ { }
->
+>     # No carve-out for /.well-known/acme-challenge/ required; the challenge
+>     # is answered before this location is ever matched.
 >     location / { return 301 https://$host$request_uri; }
 > }
 > ```
 >
-> `^~` additionally stops nginx from evaluating regex locations, which would
-> otherwise be tried after the prefix match and could take the request back.
+> Requests outside the `/.well-known/acme-challenge/` prefix are declined
+> untouched and take their normal path through every later phase, so this
+> costs one prefix comparison per request and changes nothing else. An
+> explicit `location ^~ /.well-known/acme-challenge/ { }` carve-out remains
+> harmless if you already have one.
 
 ### DNS-01 hook contract
 

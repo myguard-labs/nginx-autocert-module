@@ -48,6 +48,15 @@ http {
         listen $PORT;
         server_name a.example.com;
         autocert on;
+        # Regression guard (challenge handler must run in the PRECONTENT phase):
+        # a catch-all location with its own content handler. The content phase
+        # short-circuits to r->content_handler before running any content-phase
+        # handler, so a challenge handler registered there is shadowed entirely
+        # and HTTP-01 validation silently returns this 301 instead of the
+        # keyauth. A 'location /' match is what a real deployment has.
+        location / {
+            return 301 https://a.example.com\$request_uri;
+        }
     }
 }
 EOF
@@ -66,7 +75,7 @@ done
 grep autocert "$PREFIX/logs/error.log" || true
 
 echo "== fetch valid token =="
-got=$(curl -fsS "http://127.0.0.1:$PORT/.well-known/acme-challenge/$TOKEN")
+got=$(curl --noproxy '*' -fsS "http://127.0.0.1:$PORT/.well-known/acme-challenge/$TOKEN")
 if [ "$got" != "$KEYAUTH" ]; then
     echo "::error::wrong keyauth: got '$got' want '$KEYAUTH'"
     exit 1
@@ -74,19 +83,19 @@ fi
 echo "✓ served exact key authorization"
 
 echo "== unknown token -> 404 =="
-code=$(curl -s -o /dev/null -w '%{http_code}' \
+code=$(curl --noproxy '*' -s -o /dev/null -w '%{http_code}' \
     "http://127.0.0.1:$PORT/.well-known/acme-challenge/doesnotexist")
 [ "$code" = "404" ] || { echo "::error::unknown token gave $code, want 404"; exit 1; }
 echo "✓ unknown token 404"
 
 echo "== token with extra path segment -> 404 =="
-code=$(curl -s -o /dev/null -w '%{http_code}' \
+code=$(curl --noproxy '*' -s -o /dev/null -w '%{http_code}' \
     "http://127.0.0.1:$PORT/.well-known/acme-challenge/$TOKEN/extra")
 [ "$code" = "404" ] || { echo "::error::nested path gave $code, want 404"; exit 1; }
 echo "✓ nested path declined"
 
 echo "== Content-Length matches keyauth =="
-content_len=$(curl -fsS -D - -o /dev/null \
+content_len=$(curl --noproxy '*' -fsS -D - -o /dev/null \
     "http://127.0.0.1:$PORT/.well-known/acme-challenge/$TOKEN" \
     | awk 'tolower($1)=="content-length:"{gsub(/\r/,"",$2); print $2}')
 [ "$content_len" = "${#KEYAUTH}" ] || {
@@ -136,5 +145,15 @@ if [ "$n200" -ne 2 ] || [ "$nkey" -ne 2 ] \
     exit 1
 fi
 echo "✓ GET-with-body discarded; keepalive framing intact across pipelined requests"
+
+echo "== catch-all content handler still owns non-challenge URIs =="
+code=$(curl --noproxy '*' -s -o /dev/null -w '%{http_code}' \
+    "http://127.0.0.1:$PORT/index.html")
+[ "$code" = "301" ] || {
+    echo "::error::non-challenge URI gave $code, want 301 (the vhost's"
+    echo "::error::catch-all must be untouched; without it this file's"
+    echo "::error::challenge assertions do not exercise the shadowing bug)"
+    exit 1; }
+echo "✓ non-challenge URI still 301 from the location's own content handler"
 
 echo "✓ M5 HTTP-01 challenge serve path verified"

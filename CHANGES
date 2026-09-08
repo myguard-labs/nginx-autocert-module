@@ -1,5 +1,20 @@
 Changes unreleased
 
+    *) Bugfix: an HTTP-01 challenge is no longer shadowed by the vhost's own
+       configuration. The challenge handler ran in the content phase, which
+       nginx short-circuits to a matched location's content handler before any
+       content-phase handler runs, and which in any case is reached only after
+       the rewrite phase has already finalized a `return`. Any :80 vhost with
+       a catch-all -- `location / { return 301 https://...; }`, a proxy_pass,
+       a fastcgi_pass, or a root plus the static handler -- answered the CA
+       with a redirect, the wrong body or a 404 instead of the key
+       authorization, and the order failed with "authorization did not become
+       valid" with nothing logged by the module, since its handler never ran.
+       The handler now runs in the post-read phase, ahead of location matching
+       and of every rewrite, so no `location ^~ /.well-known/acme-challenge/`
+       carve-out is needed. Requests outside that URI prefix are declined
+       untouched and are unaffected.
+
     *) Feature: an RSA certificate key is now generated on a thread pool
        thread instead of the worker's event loop. With autocert_key_type set
        to rsa2048, rsa3072 or rsa4096, generating the leaf key blocked the
