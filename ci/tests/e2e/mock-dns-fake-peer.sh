@@ -892,13 +892,13 @@ echo "answer" >"$MODE_FILE"
 # enough while resolving"), so a full second issuance is NOT a reliable
 # post-reload observable in this harness. What IS module-owned and provable:
 # the reloaded driver re-arms and starts a FRESH bootstrap/resolve attempt
-# (i.e. it is not wedged on the cancelled in-flight resolve from stage 7) --
+# (i.e. it is not wedged on stage 7's failing resolve) --
 # wait for a new "registering ACME account" attempt, then let it either
 # succeed to a second issuance or fail again (both prove the driver is alive
 # and cycling, matching the survival+re-arm bar the sibling reload tests use).
 wait_for_new "autocert: registering ACME account via" "$WAIT_TRIES" "$BOOTSTRAP_ATTEMPTS_BEFORE_8" \
 	"a fresh post-reload bootstrap/resolve attempt (driver not wedged)"
-echo "✓ driver started a fresh bootstrap/resolve attempt after the reload (not wedged on the cancelled in-flight resolve)"
+echo "✓ driver started a fresh bootstrap/resolve attempt after the reload (not wedged on stage 7's failing resolve)"
 
 ISSUED_TOTAL=$(count_issued)
 if [ "$ISSUED_TOTAL" -eq 2 ]; then
