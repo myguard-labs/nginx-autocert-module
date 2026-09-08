@@ -13,7 +13,7 @@ finding shellcheck could have named in two seconds. Every script is standalone;
 | `lint-sh.sh` | `*.sh`, `*.bash`, `.githooks/*` | shellcheck `-S warning` |
 | `lint-yaml.sh` | `*.yml`, `*.yaml` | yamllint (errors block, warnings visible), actionlint + zizmor (`--persona=pedantic`) on `.github/workflows/` |
 | `lint-ci-runners.sh` | `.github/workflows/` | fork PRs never select the self-hosted pool; `pull_request_target` forbidden; every `runs-on` names labels that exist, including on workflows no pull request can reach |
-| `lint-ci-ports.sh` | `.github/workflows/` | every port-binding job declares a distinct `TEST_BASE_PORT` band, binds it, and verifies it above the FIRST binding step |
+| `lint-ci-ports.sh` | `.github/workflows/`, `.github/actions/` | every port-binding job or composite action declares a distinct `TEST_BASE_PORT` band (or inline `AC_TEST_PORT*`), binds it, and verifies it above the FIRST binding step |
 | `lint-ci-cadence.sh` | `.github/workflows/` | a `workflow_call` member carries no `push:`/`pull_request:` of its own, so it runs once per change rather than twice on two uncancellable concurrency keys (`schedule:` allowed) |
 | `lint-ci-secrets.sh` | `.github/workflows/` | a `workflow_call` member declares the secrets it needs with `required: true`; callers wire them by name and never use `secrets: inherit` |
 | `lint-sync-stamp.sh` | `.github/workflows/`, `.github/scripts/`, `.github/actions/` | every skeleton-shared file carries a current `# sync-sha:` stamp, so an adopter can diff two repos' `--list` output and see exactly what drifted |

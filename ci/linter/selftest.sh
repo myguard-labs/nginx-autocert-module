@@ -159,7 +159,15 @@ policy_ 0 action-cross-step-declare-bind ports
 # `path.name` alone names the same string for both sides of a collision and
 # identifies neither. Assert the message actually distinguishes them by path.
 policy_msg_ action-band-collision ports \
-    'actions/first/action\.yml and .*actions/second/action\.yml both claim TEST_BASE_PORT 19830'
+    'actions/second/action\.yml and .*actions/first/action\.yml both claim TEST_BASE_PORT 19830'
+
+# A plain multi-line `run:` block (no backslash continuation, no `${{ }}`)
+# dumps as a single-quoted scalar with the assignment mid-line, not at
+# string-start or after a literal backslash-n -- the two shapes an earlier
+# INLINE_PORT_RE anchored on. Also exercises the same-node "claims ... twice"
+# wording for a collision between two steps of ONE action.
+policy_msg_ action-inline-port-collision-plain ports \
+    'claims AC_TEST_PORT 18500 twice across its steps'
 
 # Direct master `push:` and `schedule:` are deliberate member entry points;
 # neither duplicates the PR invocation. These green controls ensure cadence

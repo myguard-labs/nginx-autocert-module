@@ -142,10 +142,16 @@ def actions() -> list[pathlib.Path]:
     Composite actions (.github/actions/**/action.yml) can declare and use
     port bindings just as workflows do. Consistent port band uniqueness
     requires checking both.
+
+    Sorted by full path, not `p.name`: every composite action file is named
+    `action.yml`, so a `name`-keyed sort leaves every key equal and Python's
+    stable sort just preserves raw glob (filesystem) order -- undefined
+    across machines, so error messages that name two actions by ordinal
+    position ("first ... and second ...") would flip depending on which box
+    ran the check.
     """
     return sorted(
         [*ACTIONS.glob("**/action.yml"), *ACTIONS.glob("**/action.yaml")],
-        key=lambda p: p.name,
     )
 
 
@@ -376,13 +382,26 @@ def _order_finding(where: str, node: dict) -> str | None:
 # this way (build-module's e2e steps) must enter the uniqueness set or the
 # whole check is vacuous for it.
 #
-# NOT anchored to line-start: a multi-line `run:` block containing a shell
-# comment, `${{ }}` expression, or other special YAML character forces
-# yaml.safe_dump to re-emit it as one escaped double-quoted scalar, with the
-# original newlines flattened to literal "\n" text -- `(?m)^` never matches
-# mid-line, so the assignment would be invisible in exactly the body this
-# check exists to read.
-INLINE_PORT_RE = re.compile(r"(?:^|\\n)\s*AC_TEST_PORT[0-9]*=(\d+)\b")
+# NOT anchored to line-start or to a preceding newline: `_body()` re-dumps the
+# node with `yaml.safe_dump`, and the scalar style that dump picks depends on
+# the `run:` text's content, which also decides whether the assignment even
+# lands at the start of a text line.
+#
+# A block containing a shell comment, `${{ }}` expression, backslash
+# continuation, or other special YAML character forces an escaped
+# DOUBLE-quoted scalar, with the original newlines flattened to literal
+# backslash-n text -- that shape needs the `\\n` branch, since there is no
+# real newline to anchor `^` on.
+#
+# A PLAIN multi-line block with none of those (the common case, e.g. a bare
+# `run: |` block) dumps as a SINGLE-quoted scalar, and PyYAML opens it as
+# `run: 'export AC_TEST_PORT=...`  -- the assignment sits right after the
+# opening quote, MID-LINE, not at column 0, so neither `(?m)^` nor a
+# preceding real `\n` would match it either. There is no anchor that reliably
+# precedes this token across every scalar style safe_dump can choose, so the
+# check does not try to anchor at all: it matches `AC_TEST_PORT` wherever it
+# occurs, the same way a human reading the dumped text would find it.
+INLINE_PORT_RE = re.compile(r"AC_TEST_PORT[0-9]*=(\d+)\b")
 
 
 def _check_port_node(
@@ -404,7 +423,21 @@ def _check_port_node(
     binds_band = BINDER_RE.search(body) is not None
 
     inline_ports = INLINE_PORT_RE.findall(body)
+    # Two steps in the SAME node (job or action) can independently claim the
+    # same port -- likelier now that one action can carry several inline
+    # ports across sibling steps. `where` names the whole node, so a
+    # cross-node collision message ("X and X both claim...") would repeat
+    # the same file/job on both sides and identify neither step. De-dupe
+    # first and report that shape distinctly.
+    seen_here: set[str] = set()
     for port in inline_ports:
+        if port in seen_here:
+            errors.append(
+                f"{where} claims AC_TEST_PORT {port} twice across its steps "
+                "-- bands must be disjoint within a node too"
+            )
+            continue
+        seen_here.add(port)
         if port in bands:
             errors.append(
                 f"{where} and {bands[port]} both claim AC_TEST_PORT "
@@ -509,7 +542,7 @@ def check_ports() -> int:
     return report(
         "lint-ci-ports",
         errors,
-        f"{len(bands)} runtime job(s), all with distinct port bands"
+        f"{len(bands)} port band(s), all distinct"
         if bands
         else "no runtime-bearing jobs",
     )

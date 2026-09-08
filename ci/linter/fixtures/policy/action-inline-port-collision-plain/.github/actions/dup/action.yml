@@ -1,0 +1,16 @@
+name: dup
+description: fixture -- two steps inline-claim the SAME AC_TEST_PORT with a
+  plain multi-line run block (no backslash continuation, no ${{ }} expression),
+  so YAML dumps each as a single-quoted folded scalar with real newlines
+  instead of an escaped scalar with literal "\n" text
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: |
+        export AC_TEST_PORT=18500
+        ./run-one.sh
+    - shell: bash
+      run: |
+        export AC_TEST_PORT=18500
+        ./run-two.sh
