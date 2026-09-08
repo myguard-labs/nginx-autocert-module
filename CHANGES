@@ -1,5 +1,21 @@
 Changes unreleased
 
+    *) Bugfix: the handshake certificate-load budget no longer lets a flood of
+       distinct SNI names starve a deferred one. autocert_handshake_load_limit
+       bounded the synchronous loads a worker performs per second, but the
+       window was first-come-first-served: a client opening enough handshakes
+       for never-seen names at the start of every second drained the whole
+       budget before a name deferred by the previous second was retried, and
+       did so again every second, so that name kept serving its last-good
+       cached certificate -- or the bootstrap certificate, if it had none --
+       for as long as the flood lasted. A quarter of each second's budget (at
+       least one unit whenever the limit is 2 or more) is now reserved for
+       names the cap itself deferred earlier. A flood is made of first
+       attempts and cannot reach that reserve, so a deferred name is retried
+       within a bounded number of seconds regardless of flood size. The total
+       admitted per second is unchanged, and a worker below its budget never
+       reaches the reserve, so the split is invisible outside an actual flood.
+
     *) Bugfix: an HTTP-01 challenge is no longer shadowed by the vhost's own
        configuration. Any :80 vhost with a catch-all -- `location / { return
        301 https://...; }`, a proxy_pass, a fastcgi_pass, or a root plus the

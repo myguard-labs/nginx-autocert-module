@@ -73,12 +73,27 @@ flood(ngx_autocert_loadcap_t *cap, time_t now, ngx_uint_t nnames,
 
     loads = 0;
     for (i = 0; i < nnames; i++) {
-        /* per-name gate: always true here, each name is a new entry */
+        /* per-name gate: always true here, each name is a new entry. Every
+         * flood name is a FIRST attempt (retry 0) -- a name only becomes a
+         * retry by having been denied in an earlier window, which is exactly
+         * what the attacker cannot manufacture at will. */
         if (ngx_autocert_loadcap_admit(cap, now, limit)) {
             loads++;
         }
     }
     return loads;
+}
+
+
+/*
+ * The general (non-reserved) share of `limit`: what a first attempt can reach
+ * in one window. Mirrors ngx_autocert_loadcap_reserve() so the expectations
+ * below read as arithmetic rather than magic numbers.
+ */
+static ngx_uint_t
+general_of(ngx_uint_t limit)
+{
+    return limit - ngx_autocert_loadcap_reserve(limit);
 }
 
 
@@ -94,8 +109,12 @@ main(void)
     for (i = 0; i < 10; i++) {
         admitted += ngx_autocert_loadcap_admit(&cap, 1000, 4);
     }
-    CHECK(admitted == 4, "zeroed cap admits exactly limit loads in one second");
-    CHECK(cap.spent == 4, "spent stops at the limit, it does not keep counting");
+    CHECK(admitted == general_of(4),
+          "zeroed cap admits exactly the general share of limit in one second");
+    CHECK(cap.spent == general_of(4),
+          "spent stops at the general share, it does not keep counting");
+    CHECK(cap.spent_res == 0,
+          "first attempts never touch the retry reserve");
 
     /* The zeroed state must not be mistaken for "second 0, already spent" --
      * ngx_time() is never 0 in a live worker, but the reset is on inequality
@@ -136,8 +155,11 @@ main(void)
      * certs for the rest, deferring their loads to later seconds.
      */
     ngx_memzero(&cap, sizeof(cap));
-    CHECK(flood(&cap, 5000, 10000, 64) == 64,
-          "an SNI flood of 10000 distinct names costs 64 loads, not 10000");
+    CHECK(flood(&cap, 5000, 10000, 64) == general_of(64),
+          "an SNI flood of 10000 distinct names costs at most the general "
+          "share of the budget, not 10000");
+    CHECK(cap.spent + cap.spent_res <= 64,
+          "an SNI flood never exceeds the configured per-second limit");
 
     /* And the deferral is real: the next second admits a fresh budget, so a
      * legitimate name caught behind the flood still loads rather than being
@@ -178,12 +200,14 @@ main(void)
                 slot_reloads += 2;
             }
         }
-        CHECK(reqs == 32, "dual-slot: 32 handshakes admitted, not 64");
+        CHECK(reqs == general_of(limit) / 2,
+              "dual-slot: handshakes admitted are the general share / 2, "
+              "not one per name");
         CHECK(slot_reloads <= limit,
               "dual-slot: total slot reloads stay within the configured "
               "limit (<=64, not 128)");
-        CHECK(slot_reloads == 64,
-              "dual-slot: the full budget is used, none wasted");
+        CHECK(slot_reloads == general_of(limit),
+              "dual-slot: the whole general share is used, none wasted");
     }
 
     /*
@@ -198,13 +222,15 @@ main(void)
           "all-or-nothing setup: 7 of 10 admitted");
     CHECK(cap.spent == 7, "all-or-nothing setup: spent is exactly 7");
     CHECK(ngx_autocert_loadcap_admit_n(&cap, 8000, 10, 5) == 0,
-          "all-or-nothing: a request of 5 with only 3 left is denied");
+          "all-or-nothing: a request of 5 with only 1 general unit left is "
+          "denied");
     CHECK(cap.spent == 7,
           "all-or-nothing: spent is UNCHANGED by the denied request "
           "(no partial charge)");
-    CHECK(ngx_autocert_loadcap_admit_n(&cap, 8000, 10, 3) == 1,
-          "all-or-nothing: the exact remaining amount is still admitted");
-    CHECK(cap.spent == 10, "all-or-nothing: spent now reflects the full 10");
+    CHECK(ngx_autocert_loadcap_admit_n(&cap, 8000, 10, 1) == 1,
+          "all-or-nothing: the exact remaining general amount is admitted");
+    CHECK(cap.spent == general_of(10),
+          "all-or-nothing: spent now reflects the full general share");
 
     /*
      * --- wedge case: a batch bigger than the configured limit must never
@@ -227,6 +253,136 @@ main(void)
     CHECK(ngx_autocert_loadcap_admit_n(&cap, 9001, 1, 2) == 1,
           "wedge: the next second admits again -- progress is made, "
           "not a permanent stall");
+
+    /*
+     * --- FAIRNESS: a deferred name is retried within a BOUNDED number of
+     * windows under a sustained flood ---
+     *
+     * This is the starvation the plain fixed window could not prevent. Model a
+     * client that opens enough distinct-SNI handshakes at the TOP of every
+     * window to drain whatever budget a first attempt can reach, and one
+     * legitimate name that arrives AFTER the flood in each window. On the
+     * unmodified fixed window the legitimate name is denied in window 1, and
+     * denied again in window 2, and in window 3, ... forever: the flood always
+     * gets there first and there is nothing it cannot spend. With the reserve,
+     * the legitimate name is a RETRY from window 2 onward and draws on a pool
+     * the flood -- made entirely of first attempts -- can never touch, so it
+     * loads in window 2.
+     *
+     * The assertion is the bound, not a specific window: served within a small
+     * constant number of windows, and NOT "eventually, if the flood stops".
+     */
+    {
+        ngx_uint_t  limit, slots, w, deferred, served_in_window;
+
+        limit = 64;
+        slots = 2;                       /* dual-key deployment: EC + RSA */
+        deferred = 0;                    /* victim not yet denied by cap */
+        served_in_window = 0;
+
+        ngx_memzero(&cap, sizeof(cap));
+
+        for (w = 1; w <= 8 && served_in_window == 0; w++) {
+            time_t  now = 20000 + (time_t) w;
+
+            /* The flood: 10000 distinct new SNIs, first in the window. */
+            for (i = 0; i < 10000; i++) {
+                (void) ngx_autocert_loadcap_admit_retry_n(&cap, now, limit,
+                                                          slots, 0);
+            }
+
+            /* The victim, arriving after the flood has had its turn. */
+            if (ngx_autocert_loadcap_admit_retry_n(&cap, now, limit, slots,
+                                                   deferred))
+            {
+                served_in_window = w;
+
+            } else {
+                deferred = 1;            /* serve.c sets cert->deferred here */
+            }
+        }
+
+        CHECK(served_in_window != 0,
+              "fairness: a deferred name is retried under a sustained flood "
+              "instead of being starved indefinitely");
+        CHECK(served_in_window != 0 && served_in_window <= 2,
+              "fairness: the retry happens within 2 windows, a bound the "
+              "flood cannot push out");
+    }
+
+    /*
+     * --- the reserve is retry-ONLY: a flood cannot spend it by pretending
+     * to be busy ---
+     *
+     * A first attempt stops at the general share even when it asks forever,
+     * leaving the reserve intact for names the cap itself deferred. This is
+     * what makes the bound above independent of flood size.
+     */
+    ngx_memzero(&cap, sizeof(cap));
+    (void) flood(&cap, 21000, 100000, 64);
+    CHECK(cap.spent_res == 0,
+          "reserve: 100000 first attempts leave the retry reserve untouched");
+    CHECK(ngx_autocert_loadcap_admit_retry_n(&cap, 21000, 64, 2, 1) == 1,
+          "reserve: a retry is admitted in the SAME window the flood "
+          "exhausted the general share");
+    CHECK(ngx_autocert_loadcap_admit_retry_n(&cap, 21000, 64, 2, 0) == 0,
+          "reserve: a first attempt is still denied in that window");
+
+    /*
+     * --- the reserve is bounded too: it does not become a second unbounded
+     * budget for retries ---
+     */
+    {
+        ngx_uint_t  reserve, admitted_retries;
+
+        reserve = ngx_autocert_loadcap_reserve(64);
+        ngx_memzero(&cap, sizeof(cap));
+        (void) flood(&cap, 22000, 100000, 64);   /* drain the general share */
+        admitted_retries = 0;
+        for (i = 0; i < 10000; i++) {
+            admitted_retries += ngx_autocert_loadcap_admit_retry_n(&cap, 22000,
+                                                                   64, 1, 1);
+        }
+        CHECK(admitted_retries == reserve,
+              "reserve: retries are capped at the reserve, not unbounded");
+        CHECK(cap.spent + cap.spent_res <= 64,
+              "reserve: general + reserve never exceeds the configured limit");
+    }
+
+    /*
+     * --- a retry prefers the general pool, so the split is invisible on a
+     * quiet worker ---
+     */
+    ngx_memzero(&cap, sizeof(cap));
+    CHECK(ngx_autocert_loadcap_admit_retry_n(&cap, 23000, 64, 2, 1) == 1,
+          "quiet worker: a retry is admitted");
+    CHECK(cap.spent == 2 && cap.spent_res == 0,
+          "quiet worker: the retry spends the general pool, not the reserve");
+
+    /* --- reserve sizing: never zero once splittable, never the whole budget,
+     * so first-time loads (cache warm-up) are never locked out --- */
+    CHECK(ngx_autocert_loadcap_reserve(1) == 0,
+          "reserve sizing: limit 1 is not splittable (reserve 0)");
+    CHECK(ngx_autocert_loadcap_reserve(2) == 1
+          && ngx_autocert_loadcap_reserve(3) == 1,
+          "reserve sizing: a small limit still reserves one unit");
+    CHECK(ngx_autocert_loadcap_reserve(64) == 16,
+          "reserve sizing: a quarter of the budget");
+    for (i = 1; i <= 1024; i++) {
+        if (ngx_autocert_loadcap_reserve(i) >= i) {
+            break;
+        }
+    }
+    CHECK(i == 1025,
+          "reserve sizing: the reserve is never the whole budget for any "
+          "limit in 1..1024");
+
+    /* limit 1 keeps its degenerate first-come behaviour: no reserve to give. */
+    ngx_memzero(&cap, sizeof(cap));
+    CHECK(flood(&cap, 24000, 500, 1) == 1,
+          "limit 1: still exactly one load per second (no reserve to split)");
+    CHECK(ngx_autocert_loadcap_admit_retry_n(&cap, 24000, 1, 1, 1) == 0,
+          "limit 1: a retry gets no reserve either, the budget is spent");
 
     if (failures) {
         fprintf(stderr, "\n%d FAILURE(S)\n", failures);

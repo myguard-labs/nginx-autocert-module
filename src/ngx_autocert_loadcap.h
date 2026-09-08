@@ -27,6 +27,37 @@
  * delays a load, it never abandons one, and it never substitutes another name's
  * certificate. Serving a wrong certificate or failing the handshake are both
  * excluded by construction — this code only ever answers "load now?" with no.
+ *
+ * FAIRNESS. "Retried in the next second" is only true if the retry actually
+ * wins budget in that second, and a plain fixed window is first-come-first-
+ * served: a client that opens enough distinct-SNI handshakes at the top of
+ * every window drains the whole budget before the deferred name is retried,
+ * and does so again the next window, and the next. The deferred name then
+ * keeps serving its last-good cached certificate (or the bootstrap one) for as
+ * long as the flood lasts — unbounded, which is starvation, not deferral.
+ *
+ * The fix is a RESERVE. Each window's budget is split in two:
+ *
+ *     general  = limit - reserve   any request may draw from it
+ *     reserve  = limit / 4 (>=1)   ONLY a request marked as a RETRY may draw
+ *                                  from it — that is, a name the cap itself
+ *                                  denied in an EARLIER window.
+ *
+ * A flood is made of names the cap has never seen, so every one of its
+ * requests is a first attempt and can only ever touch `general`. It therefore
+ * cannot consume the reserve no matter how many distinct SNIs it presents.
+ * A name deferred in window W arrives in window W+1 as a retry, competing for
+ * the reserve against other deferred names only — a set the attacker cannot
+ * inflate, because entering it requires having already been denied. That turns
+ * "retried eventually, maybe never" into a bounded wait: with R reserve units
+ * and D genuinely deferred names, every deferred name is retried within
+ * ceil(D / R) windows regardless of flood size.
+ *
+ * Retries draw from `general` FIRST and only fall back to the reserve, so on
+ * an idle or lightly loaded worker the split is invisible: the full `limit` is
+ * still available to whoever asks, and the reserve is simply never reached.
+ * The reserve costs the flood nothing it was entitled to either — those units
+ * were always going to be spent on somebody.
  */
 #ifndef NGX_AUTOCERT_LOADCAP_H_INCLUDED
 #define NGX_AUTOCERT_LOADCAP_H_INCLUDED
@@ -43,34 +74,64 @@
  * `second` does not equal now, and ngx_time() is never 0 in a running worker.
  */
 typedef struct {
-    time_t      second;    /* the wall second `spent` is counted against */
-    ngx_uint_t  spent;     /* loads admitted during that second */
+    time_t      second;     /* the wall second the counters are charged to */
+    ngx_uint_t  spent;      /* units taken from the general pool that second */
+    ngx_uint_t  spent_res;  /* units taken from the retry reserve that second */
 } ngx_autocert_loadcap_t;
+
+
+/*
+ * Size of the retry-only reserve carved out of `limit` for the window. A
+ * quarter of the budget, never less than one unit once there is more than one
+ * unit to split, and never the whole budget — a reserve equal to `limit` would
+ * lock first-time loads (cache warm-up after a reload, the common case) out
+ * entirely, which is a worse failure than the starvation it guards against.
+ * limit == 1 yields reserve 0: there is nothing to split, and the degenerate
+ * single-unit budget keeps its existing first-come behaviour.
+ */
+static ngx_inline ngx_uint_t
+ngx_autocert_loadcap_reserve(ngx_uint_t limit)
+{
+    if (limit < 2) {
+        return 0;
+    }
+
+    return limit / 4 ? limit / 4 : 1;
+}
 
 
 /*
  * Ask for permission to perform `n` synchronous certificate loads at `now`,
  * as one all-or-nothing reservation: either all `n` units are admitted and
- * charged together, or none are and `spent` is left untouched. This is what
- * lets a caller reserve for a whole batch of slot reloads up front instead of
- * charging per-iteration inside the loop, which would let a request that only
- * partially fits the remaining budget still perform some of its disk I/O.
+ * charged together, or none are and the counters are left untouched. This is
+ * what lets a caller reserve for a whole batch of slot reloads up front instead
+ * of charging per-iteration inside the loop, which would let a request that
+ * only partially fits the remaining budget still perform some of its disk I/O.
+ *
+ * `retry` marks a request whose name this cap DENIED in an earlier window. Such
+ * a request may draw on the retry reserve when the general pool is exhausted;
+ * a first attempt (`retry` 0) may not. See the FAIRNESS note at the top of this
+ * file for why that bounds the wait of a deferred name under a sustained flood.
+ * The caller owns the per-name "was deferred" bit — the cap is stateless per
+ * name by design (one struct per worker, not per entry).
  *
  * WEDGE CASE: `n > limit` (limit != 0) can never be admitted by definition --
  * an all-or-nothing rule that kept saying no would wedge certificate loading
  * permanently, which is worse than the bug this cap fixes. Instead, whenever
  * the request cannot ever fit under the configured limit, treat the limit as
- * `n` for this call (i.e. admit once spent == 0) so the batch still goes
- * through exactly once per second rather than never. This only engages when
- * the operator has configured a limit smaller than the unit count of a single
- * request (e.g. `autocert_handshake_load_limit 1` with two enabled slots);
- * ordinary configurations (limit >= n) are unaffected and get the strict
- * bound.
+ * `n` for this call (i.e. admit once nothing has been spent yet) so the batch
+ * still goes through exactly once per second rather than never. This only
+ * engages when the operator has configured a limit smaller than the unit count
+ * of a single request (e.g. `autocert_handshake_load_limit 1` with two enabled
+ * slots); ordinary configurations (limit >= n) are unaffected and get the
+ * strict bound.
  */
 static ngx_inline ngx_uint_t
-ngx_autocert_loadcap_admit_n(ngx_autocert_loadcap_t *cap, time_t now,
-    ngx_uint_t limit, ngx_uint_t n)
+ngx_autocert_loadcap_admit_retry_n(ngx_autocert_loadcap_t *cap, time_t now,
+    ngx_uint_t limit, ngx_uint_t n, ngx_uint_t retry)
 {
+    ngx_uint_t  reserve, general, left;
+
     if (limit == 0) {
         return 1;                            /* cap disabled */
     }
@@ -82,28 +143,57 @@ ngx_autocert_loadcap_admit_n(ngx_autocert_loadcap_t *cap, time_t now,
     if (cap->second != now) {
         cap->second = now;
         cap->spent = 0;
+        cap->spent_res = 0;
     }
+
+    reserve = ngx_autocert_loadcap_reserve(limit);
+    general = limit - reserve;
 
     /* Wedge guard: a request that can never fit under `limit` (n > limit) is
      * admitted once per window instead of denied forever -- see comment
-     * above the function. */
+     * above the function. Charging both pools closes the window for every
+     * later request, retry or not, exactly as the pre-reserve code did. */
     if (n > limit) {
-        /* Never fits -- admit exactly once per window (spent == 0) so
-         * progress is still made, and charge the real `limit` so no further
-         * admission happens this second. */
-        if (cap->spent != 0) {
+        if (cap->spent != 0 || cap->spent_res != 0) {
             return 0;
         }
-        cap->spent = limit;
+        cap->spent = general;
+        cap->spent_res = reserve;
         return 1;
     }
 
-    if (cap->spent > limit - n) {
-        return 0;                    /* would exceed budget: charge nothing */
+    /* General pool first, for retries too: on a quiet worker the reserve is
+     * never reached and the split is invisible. */
+    if (n <= general && cap->spent <= general - n) {
+        cap->spent += n;
+        return 1;
     }
 
-    cap->spent += n;
+    if (!retry) {
+        return 0;                    /* first attempt: reserve is off limits */
+    }
+
+    /* Retry fallback: spend from the reserve, all-or-nothing as above. */
+    left = reserve - cap->spent_res;
+    if (n > left) {
+        return 0;
+    }
+
+    cap->spent_res += n;
     return 1;
+}
+
+
+/*
+ * Ask for permission to perform `n` synchronous certificate loads at `now` as
+ * a FIRST attempt (no access to the retry reserve). Kept as the plain-batch
+ * spelling of ngx_autocert_loadcap_admit_retry_n().
+ */
+static ngx_inline ngx_uint_t
+ngx_autocert_loadcap_admit_n(ngx_autocert_loadcap_t *cap, time_t now,
+    ngx_uint_t limit, ngx_uint_t n)
+{
+    return ngx_autocert_loadcap_admit_retry_n(cap, now, limit, n, 0);
 }
 
 
@@ -112,7 +202,7 @@ ngx_autocert_loadcap_admit_n(ngx_autocert_loadcap_t *cap, time_t now,
  * Returns 1 when the load is admitted (and charges it), 0 when the per-second
  * budget for `now` is exhausted and the caller must fall back to the cached
  * certificate. `limit` of 0 means unlimited: the cap is off and every call is
- * admitted without touching the counter, so an operator can restore the exact
+ * admitted without touching the counters, so an operator can restore the exact
  * pre-cap behaviour.
  *
  * Rolling into a new second (including a backwards clock step, which compares
@@ -121,12 +211,13 @@ ngx_autocert_loadcap_admit_n(ngx_autocert_loadcap_t *cap, time_t now,
  * worker and buys nothing here: the property we need is "bounded work per
  * second", not smoothness, and the worst case of a fixed window (2 * limit
  * across a second boundary) is still a constant, which is the whole point.
+ * Fairness WITHIN a window is the reserve's job, not the window shape's.
  */
 static ngx_inline ngx_uint_t
 ngx_autocert_loadcap_admit(ngx_autocert_loadcap_t *cap, time_t now,
     ngx_uint_t limit)
 {
-    return ngx_autocert_loadcap_admit_n(cap, now, limit, 1);
+    return ngx_autocert_loadcap_admit_retry_n(cap, now, limit, 1, 0);
 }
 
 

@@ -109,6 +109,14 @@ typedef struct {
     ngx_str_node_t      sn;          /* {node (key=crc32), str=host}; first! */
     ngx_autocert_slot_t slots[NGX_AUTOCERT_NSLOTS];   /* EC, RSA */
     time_t              checked; /* last time we stat()'d, coarse (all slots) */
+    unsigned            deferred:1; /* the handshake load budget denied this
+                                     * name in an earlier window and it has not
+                                     * refreshed since. Set on denial, cleared
+                                     * on a refresh; while set the name draws on
+                                     * the loadcap's retry reserve, which a
+                                     * flood of first-attempt names cannot
+                                     * touch. See ngx_autocert_loadcap.h
+                                     * (FAIRNESS). */
 } ngx_autocert_cert_t;
 
 
@@ -1042,13 +1050,24 @@ ngx_http_autocert_cert_cb(SSL *ssl_conn, void *arg)
          * makes this a DEFERRAL rather than a drop; setting it here would
          * suppress the retry for the rest of the second. No path here can serve
          * another name's certificate or fail the handshake.
+         *
+         * A deferral also sets cert->deferred, which is passed back to the cap
+         * on the next attempt. A denied name then draws on the cap's retry
+         * reserve — a slice of each window that only previously-denied names
+         * may spend — so a sustained flood of fresh SNIs, which are all first
+         * attempts, cannot keep winning the whole budget ahead of it. Without
+         * that the window is first-come-first-served and a deferred name can be
+         * starved for as long as the flood lasts. Details and the bound:
+         * ngx_autocert_loadcap.h (FAIRNESS).
          */
         if (now != cert->checked
-            && ngx_autocert_loadcap_admit_n(&ngx_autocert_cache_loadcap, now,
-                                            sctx->load_limit,
-                                            sctx->slot_count))
+            && ngx_autocert_loadcap_admit_retry_n(&ngx_autocert_cache_loadcap,
+                                                  now, sctx->load_limit,
+                                                  sctx->slot_count,
+                                                  cert->deferred))
         {
             cert->checked = now;
+            cert->deferred = 0;         /* refreshed: no longer owed a retry */
             for (s = 0; s < NGX_AUTOCERT_NSLOTS; s++) {
                 if (!(sctx->slot_mask & ((ngx_uint_t) 1 << s))) {
                     /* Slot not config-enabled (e.g. dropped in a dual->single
@@ -1077,6 +1096,9 @@ ngx_http_autocert_cert_cb(SSL *ssl_conn, void *arg)
             }
 
         } else if (now != cert->checked) {
+            /* Denied. Remember it, so this name presents as a retry in a later
+             * window and may draw on the reserve the flood cannot reach. */
+            cert->deferred = 1;
             ngx_log_debug1(NGX_LOG_DEBUG_HTTP, c->log, 0,
                            "autocert: handshake load budget exhausted, "
                            "serving cached cert for \"%V\"", &host);
