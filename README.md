@@ -763,7 +763,9 @@ publishing the new one.
 ## CI
 
 A failure surfaces as a red run plus the uploaded artifact. `ci-deep.yml` also
-pings Discord on failure; nothing else notifies.
+pings Discord on failure; `notify-scheduled-failure.yml` files/updates a
+tracking issue when a scheduled `build-test.yml` run fails; nothing else
+notifies.
 
 `ci.yml` is the orchestrator and calls the PR-time members below, so a PR asks
 for one run rather than several independent ones.
@@ -780,6 +782,7 @@ for one run rather than several independent ones.
 | `ci-deep.yml` | monthly, manual | long fuzz, memcheck + helgrind soaks, security scanners, angie Pebble e2e |
 | `windows-build.yml` | PR touching `src/`, `config`, the pins or the workflow itself; push to master; manual | native win32 build gate: MSVC x64 static link against the pinned nginx, then assert the module reached `objs/ngx_modules.c` and that `nginx -t` accepts `autocert_store_path` while rejecting a bogus directive. Then **starts `nginx.exe`** and verifies the HTTP-01 challenge-serve path (exact key authorization, 404s for unknown/nested tokens, `Content-Length`, and keepalive framing after a GET-with-body), the multi-worker singleton guarantee, and full RFC 8738 IPv4-literal ACME **issuance** against a native `pebble-windows-amd64` binary (no Docker), and a second-issuance **renewal** lane that reissues over an existing live generation and requires a changed certificate serial (win32 has no `RENAME_EXCHANGE`, so the renewal commit path differs from POSIX and needs its own coverage) |
 | `bump.yml` | weekly (Mon 04:00 UTC), manual | regenerate the nginx/angie version + sha256 pins in [`.github/versions.env`](.github/versions.env) and open a PR. Not a gate — it produces a reviewable change instead of letting builds drift onto a new upstream on their own |
+| `notify-scheduled-failure.yml` | on completion of a scheduled `build-test.yml` run | files or comments on a `ci-scheduled-failure`-labeled tracking issue when the scheduled run failed (not cancelled). Split out of `build-test.yml` (kept as its own workflow, `workflow_run`-triggered, rather than a job inside it) so its `issues: write` permission never widens the token every PR and push job in `build-test.yml` runs with |
 
 **nginx and angie are pinned.** `.github/versions.env` is the single source of
 truth for both versions and their tarball sha256s; `resolve` in
