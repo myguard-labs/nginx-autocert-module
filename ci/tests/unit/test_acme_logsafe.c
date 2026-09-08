@@ -77,11 +77,20 @@ main(void)
          * reaches this log site when parse_url rejects it, and must be
          * escaped so it cannot forge a log line.
          *
-         * MUTATION CONTROL: The assertion "raw LF byte never appears in the
-         * output" fails if ngx_autocert_acme_log_safe() is replaced with a
-         * passthrough that just returns src unchanged. Revert lines ~263-266
-         * in acme.c to remove the escaping call, and this assertion goes RED:
-         * out will still contain the raw \n, failing the memchr check. */
+         * MUTATION CONTROL, AND ITS LIMIT. This assertion goes RED when
+         * ngx_autocert_acme_log_safe() ITSELF is broken -- make it a
+         * passthrough that returns src unchanged and the raw \n survives,
+         * failing the memchr check. That is what this test guards.
+         *
+         * It does NOT guard the call sites. This file includes only
+         * generated_acme_logsafe.inc, which extract_acme_logsafe.sh slices
+         * out of acme.c BY FUNCTION NAME, so nothing here reaches
+         * ngx_autocert_acme_request(). Deleting the log_safe() call from a
+         * caller leaves every assertion below green -- verified by applying
+         * exactly that mutation and re-running the extractor, which still
+         * emitted the helper unchanged. A caller-side regression needs an
+         * e2e log assertion or a lint rule over CA-controlled %V arguments;
+         * do not read a green run here as proof the callers are wrapped. */
         {
             u_char  raw[] = "https://example.com/path\nautocert: FORGED";
             src.data = raw;
