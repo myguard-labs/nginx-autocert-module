@@ -150,6 +150,84 @@ main(void)
     CHECK(flood(&cap, 6000, 500, 1) == 1,
           "limit 1 admits exactly one load per second");
 
+    /*
+     * --- DUAL-SLOT: the cap must charge the WHOLE reload batch, not one
+     * unit per batch regardless of slot count ---
+     *
+     * This is the CodeRabbit MAJOR: serve.c's gate charged a single unit via
+     * ngx_autocert_loadcap_admit() and then reloaded up to NGX_AUTOCERT_NSLOTS
+     * slots in the loop it guarded, so a dual-key (EC+RSA) deployment got 2x
+     * the configured budget. Model one admitted "handshake" as a request for
+     * 2 units (2 enabled slots) via admit_n, repeated once per distinct SNI
+     * (the per-name gate always passes here, same as flood() above). With
+     * limit 64 and 2 slots/name, total slot reloads across the flood must
+     * stay <= 64 -- NOT 128. This assertion is red against the unfixed
+     * single-unit-per-batch charging (it would allow 64 batches * 2 slots =
+     * 128 slot reloads).
+     */
+    {
+        ngx_uint_t  reqs, slot_reloads, limit;
+
+        ngx_memzero(&cap, sizeof(cap));
+        limit = 64;
+        reqs = 0;
+        slot_reloads = 0;
+        for (i = 0; i < 10000; i++) {
+            if (ngx_autocert_loadcap_admit_n(&cap, 7000, limit, 2)) {
+                reqs++;
+                slot_reloads += 2;
+            }
+        }
+        CHECK(reqs == 32, "dual-slot: 32 handshakes admitted, not 64");
+        CHECK(slot_reloads <= limit,
+              "dual-slot: total slot reloads stay within the configured "
+              "limit (<=64, not 128)");
+        CHECK(slot_reloads == 64,
+              "dual-slot: the full budget is used, none wasted");
+    }
+
+    /*
+     * --- all-or-nothing: a request that does not fully fit charges NOTHING
+     * ---
+     *
+     * 3 units remain (limit 10, spent 7); a request for 5 must be denied and
+     * must not partially charge the 3 that *would* fit.
+     */
+    ngx_memzero(&cap, sizeof(cap));
+    CHECK(ngx_autocert_loadcap_admit_n(&cap, 8000, 10, 7) == 1,
+          "all-or-nothing setup: 7 of 10 admitted");
+    CHECK(cap.spent == 7, "all-or-nothing setup: spent is exactly 7");
+    CHECK(ngx_autocert_loadcap_admit_n(&cap, 8000, 10, 5) == 0,
+          "all-or-nothing: a request of 5 with only 3 left is denied");
+    CHECK(cap.spent == 7,
+          "all-or-nothing: spent is UNCHANGED by the denied request "
+          "(no partial charge)");
+    CHECK(ngx_autocert_loadcap_admit_n(&cap, 8000, 10, 3) == 1,
+          "all-or-nothing: the exact remaining amount is still admitted");
+    CHECK(cap.spent == 10, "all-or-nothing: spent now reflects the full 10");
+
+    /*
+     * --- wedge case: a batch bigger than the configured limit must never
+     * wedge cert loading permanently ---
+     *
+     * limit 1 with 2 enabled slots (e.g. autocert_handshake_load_limit 1 with
+     * both EC and RSA configured) can never satisfy an all-or-nothing
+     * reservation of 2 units. Denying forever would permanently stop
+     * certificate loading, which is worse than the unbounded-cost bug this
+     * cap fixes. The documented behaviour: such a request is admitted once
+     * per window (making progress every second) and consumes the whole
+     * window's budget, rather than being denied forever.
+     */
+    ngx_memzero(&cap, sizeof(cap));
+    CHECK(ngx_autocert_loadcap_admit_n(&cap, 9000, 1, 2) == 1,
+          "wedge: a 2-unit request under limit 1 is admitted once "
+          "(does not wedge)");
+    CHECK(ngx_autocert_loadcap_admit_n(&cap, 9000, 1, 2) == 0,
+          "wedge: a second 2-unit request in the same second is denied");
+    CHECK(ngx_autocert_loadcap_admit_n(&cap, 9001, 1, 2) == 1,
+          "wedge: the next second admits again -- progress is made, "
+          "not a permanent stall");
+
     if (failures) {
         fprintf(stderr, "\n%d FAILURE(S)\n", failures);
         return 1;

@@ -49,6 +49,65 @@ typedef struct {
 
 
 /*
+ * Ask for permission to perform `n` synchronous certificate loads at `now`,
+ * as one all-or-nothing reservation: either all `n` units are admitted and
+ * charged together, or none are and `spent` is left untouched. This is what
+ * lets a caller reserve for a whole batch of slot reloads up front instead of
+ * charging per-iteration inside the loop, which would let a request that only
+ * partially fits the remaining budget still perform some of its disk I/O.
+ *
+ * WEDGE CASE: `n > limit` (limit != 0) can never be admitted by definition --
+ * an all-or-nothing rule that kept saying no would wedge certificate loading
+ * permanently, which is worse than the bug this cap fixes. Instead, whenever
+ * the request cannot ever fit under the configured limit, treat the limit as
+ * `n` for this call (i.e. admit once spent == 0) so the batch still goes
+ * through exactly once per second rather than never. This only engages when
+ * the operator has configured a limit smaller than the unit count of a single
+ * request (e.g. `autocert_handshake_load_limit 1` with two enabled slots);
+ * ordinary configurations (limit >= n) are unaffected and get the strict
+ * bound.
+ */
+static ngx_inline ngx_uint_t
+ngx_autocert_loadcap_admit_n(ngx_autocert_loadcap_t *cap, time_t now,
+    ngx_uint_t limit, ngx_uint_t n)
+{
+    if (limit == 0) {
+        return 1;                            /* cap disabled */
+    }
+
+    if (n == 0) {
+        return 1;                            /* nothing to charge */
+    }
+
+    if (cap->second != now) {
+        cap->second = now;
+        cap->spent = 0;
+    }
+
+    /* Wedge guard: a request that can never fit under `limit` (n > limit) is
+     * admitted once per window instead of denied forever -- see comment
+     * above the function. */
+    if (n > limit) {
+        /* Never fits -- admit exactly once per window (spent == 0) so
+         * progress is still made, and charge the real `limit` so no further
+         * admission happens this second. */
+        if (cap->spent != 0) {
+            return 0;
+        }
+        cap->spent = limit;
+        return 1;
+    }
+
+    if (cap->spent > limit - n) {
+        return 0;                    /* would exceed budget: charge nothing */
+    }
+
+    cap->spent += n;
+    return 1;
+}
+
+
+/*
  * Ask for permission to perform one synchronous certificate load at `now`.
  * Returns 1 when the load is admitted (and charges it), 0 when the per-second
  * budget for `now` is exhausted and the caller must fall back to the cached
@@ -67,21 +126,7 @@ static ngx_inline ngx_uint_t
 ngx_autocert_loadcap_admit(ngx_autocert_loadcap_t *cap, time_t now,
     ngx_uint_t limit)
 {
-    if (limit == 0) {
-        return 1;                            /* cap disabled */
-    }
-
-    if (cap->second != now) {
-        cap->second = now;
-        cap->spent = 0;
-    }
-
-    if (cap->spent >= limit) {
-        return 0;                            /* budget exhausted this second */
-    }
-
-    cap->spent++;
-    return 1;
+    return ngx_autocert_loadcap_admit_n(cap, now, limit, 1);
 }
 
 

@@ -136,6 +136,15 @@ typedef struct {
                                     * + installed, so a stale opposite-keytype
                                     * file left after a dual->single rollback is
                                     * never served. */
+    ngx_uint_t          slot_count; /* popcount(slot_mask), cached at config
+                                     * time: the number of slots the handshake
+                                     * reload loop will actually touch disk
+                                     * for. This is the unit the loadcap must
+                                     * charge -- NOT NGX_AUTOCERT_NSLOTS --
+                                     * since disabled slots take the free
+                                     * "drop cached material" path below and
+                                     * never call
+                                     * ngx_http_autocert_cache_reload. */
 } ngx_autocert_serve_ctx_t;
 
 
@@ -325,6 +334,23 @@ ngx_http_autocert_serve_init(ngx_conf_t *cf,
             /* No explicit list: the default keytype is EC (p384). */
             sctx->slot_mask = (1u << NGX_AUTOCERT_SLOT_EC);
         }
+    }
+
+    /*
+     * Cache the enabled-slot count once, at config time, off the TLS
+     * handshake hot path. This is the number of synchronous disk loads one
+     * admitted refresh actually performs, and therefore the unit the
+     * per-worker loadcap below must charge (see ngx_autocert_loadcap.h).
+     */
+    {
+        ngx_uint_t  s, mask = sctx->slot_mask, count = 0;
+
+        for (s = 0; s < NGX_AUTOCERT_NSLOTS; s++) {
+            if (mask & ((ngx_uint_t) 1 << s)) {
+                count++;
+            }
+        }
+        sctx->slot_count = count;
     }
 
     ngx_log_debug3(NGX_LOG_DEBUG_HTTP, cf->log, 0,
@@ -1018,8 +1044,9 @@ ngx_http_autocert_cert_cb(SSL *ssl_conn, void *arg)
          * another name's certificate or fail the handshake.
          */
         if (now != cert->checked
-            && ngx_autocert_loadcap_admit(&ngx_autocert_cache_loadcap, now,
-                                          sctx->load_limit))
+            && ngx_autocert_loadcap_admit_n(&ngx_autocert_cache_loadcap, now,
+                                            sctx->load_limit,
+                                            sctx->slot_count))
         {
             cert->checked = now;
             for (s = 0; s < NGX_AUTOCERT_NSLOTS; s++) {
