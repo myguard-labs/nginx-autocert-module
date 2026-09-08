@@ -207,6 +207,14 @@ run_variant() {
 	local variant_lib="$TMP/slice_${label}.sh"
 	sed "$sed_expr" "$SRC_LIB" >"$variant_lib"
 
+	# A sed expression that no longer matches anything in the real lib
+	# (e.g. a guard line got reworded) silently yields an unmutated copy,
+	# and the "expecting failure" check below would then pass for the
+	# wrong reason -- the assertion never actually ran against a mutant.
+	# Require the variant to differ from the real lib before trusting it.
+	cmp -s "$SRC_LIB" "$variant_lib" \
+		&& fail "MUTATION CONTROL FAILED: $label — sed expression matched nothing; variant is byte-identical to $SRC_LIB"
+
 	# Run test_fn in a FRESH bash process against the MUTATED lib (exported
 	# via env, not sourced by re-parsing this file), expecting failure.
 	if MUTATED_SRC_LIB="$variant_lib" bash "$0" __run_single__ "$test_fn"; then
@@ -219,7 +227,7 @@ run_variant() {
 if [ "${1:-}" = "__run_single__" ]; then
 	# Re-invoked by run_variant: point SRC_LIB at the mutated copy before
 	# running the single named assertion function.
-	SRC_LIB="$MUTATED_SRC_LIB"
+	SRC_LIB="${MUTATED_SRC_LIB:?__run_single__ requires MUTATED_SRC_LIB to be set by run_variant}"
 	TMP="$(mktemp -d)"
 	trap 'rm -rf "$TMP"' EXIT
 	make_fixtures "$TMP"
