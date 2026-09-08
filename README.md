@@ -309,10 +309,21 @@ answers the CA must therefore be (or inherit) an autocert-enabled server — a b
 > ```
 >
 > Requests outside the `/.well-known/acme-challenge/` prefix are declined
-> untouched and take their normal path through every later phase, so this
-> costs one prefix comparison per request and changes nothing else. An
-> explicit `location ^~ /.well-known/acme-challenge/ { }` carve-out remains
-> harmless if you already have one.
+> untouched and take their normal path through every later phase, so for them
+> this costs one prefix comparison and changes nothing else. An explicit
+> `location ^~ /.well-known/acme-challenge/ { }` carve-out remains harmless if
+> you already have one.
+>
+> **Challenge responses are served from server-level config.** Serving before
+> location matching means no `location` has been selected when the token is
+> written, so location-level directives do not apply to the challenge response:
+> `server_tokens`, `access_log off`, `error_page`, and the keepalive settings
+> (`keepalive_timeout`, `keepalive_requests`, `keepalive_time`) are taken from
+> the enclosing `server` (or `http`) level instead. `client_max_body_size` is
+> likewise not enforced for a challenge URI — the module discards any request
+> body as a stream, so an oversized body costs bandwidth, not memory. This
+> applies only to `/.well-known/acme-challenge/` URIs; every other request is
+> configured exactly as before.
 
 ### DNS-01 hook contract
 

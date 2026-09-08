@@ -1611,6 +1611,19 @@ ngx_http_autocert_postconfig(ngx_conf_t *cf)
          * The handler prefix-checks the URI and returns NGX_DECLINED for
          * everything outside /.well-known/acme-challenge/, so no other request
          * changes behaviour.
+         *
+         * Limitation of serving this early: at POST_READ no location has
+         * matched yet, so r->loc_conf is still the server's DEFAULT location
+         * config and ngx_http_update_location_config() never runs for a
+         * challenge request. Location-level directives therefore do not apply
+         * to challenge responses -- server_tokens, access_log off, error_page,
+         * and the keepalive decision (keepalive_timeout / keepalive_requests /
+         * keepalive_time) are all taken from server level. Calling
+         * ngx_http_update_location_config() here would not help: there is no
+         * matched location to update from. The challenge response is a fixed
+         * ~87-byte text/plain body on a well-known URI, so serving it from
+         * server-level config is the accepted trade for being ahead of every
+         * rewrite and content handler.
          */
         h = ngx_array_push(&cmcf2->phases[NGX_HTTP_POST_READ_PHASE].handlers);
         if (h == NULL) {
@@ -1624,11 +1637,7 @@ ngx_http_autocert_postconfig(ngx_conf_t *cf)
 
 
 /*
- * Post-read-phase handler for HTTP-01 validation. If the request URI is
- * /.well-known/acme-challenge/<token>, look the token up in the challenge store
- * and return its key authorization as text/plain; otherwise decline so the
- * normal location handling proceeds. The token store is shared with the helper
- * which fills it during the order flow (M6); M5 proves the serve path.
+ * Phase-handler wrapper around ngx_http_autocert_challenge_serve().
  *
  * The post-read phase uses ngx_http_core_generic_phase(), whose return-code
  * contract differs from the content phase: NGX_DECLINED falls through to the
@@ -1652,12 +1661,20 @@ ngx_http_autocert_challenge_handler(ngx_http_request_t *r)
         return NGX_DECLINED;
     }
 
-    if (rc == NGX_DONE || rc == NGX_AGAIN) {
+    if (rc == NGX_DONE) {
         return rc;
     }
 
-    /* NGX_OK (response fully sent), NGX_ERROR or an NGX_HTTP_* status: the
-     * request is ours and terminates here. */
+    /*
+     * NGX_OK (response fully sent), NGX_AGAIN (ngx_http_output_filter did not
+     * drain the whole body), NGX_ERROR or an NGX_HTTP_* status: the request is
+     * ours and terminates here. ngx_http_finalize_request() is what
+     * ngx_http_core_content_phase() does with exactly these values -- it sets
+     * the write event handler for NGX_AGAIN, whereas returning NGX_AGAIN to
+     * ngx_http_core_generic_phase() would stop the phase loop with neither a
+     * finalize nor a write handler and stall the response until the client
+     * times out.
+     */
     ngx_http_finalize_request(r, rc);
 
     return NGX_DONE;
@@ -1676,6 +1693,14 @@ ngx_http_autocert_challenge_serve(ngx_http_request_t *r)
     static const size_t             pfxlen =
                                         sizeof(NGX_HTTP_AUTOCERT_WK_PREFIX) - 1;
 
+    /*
+     * r->uri is already normalized here: ngx_http_process_request_uri() runs
+     * during request-line parsing, before ANY phase, and resolves %xx escapes,
+     * "." / ".." segments and duplicate slashes. So this literal prefix
+     * compare cannot be bypassed by encoding or traversal, and the token
+     * segment below is a real path segment. A future phase move must preserve
+     * that ordering or this argument no longer holds.
+     */
     if (r->uri.len < pfxlen
         || ngx_strncmp(r->uri.data, NGX_HTTP_AUTOCERT_WK_PREFIX, pfxlen) != 0)
     {
@@ -1712,11 +1737,18 @@ ngx_http_autocert_challenge_serve(ngx_http_request_t *r)
 
     /*
      * Drain any request body before producing our own response. A GET/HEAD may
-     * still carry a Content-Length / chunked body; a content-phase handler that
-     * emits output without discarding it leaves those bytes in the connection
-     * buffer, desyncing keepalive framing (the next pipelined request
-     * mis-parses the leftover as its start line). Mirrors
+     * still carry a Content-Length / chunked body; a post-read-phase handler
+     * that emits output without discarding it leaves those bytes in the
+     * connection buffer, desyncing keepalive framing (the next pipelined
+     * request mis-parses the leftover as its start line). Mirrors
      * ngx_http_stub_status_module.
+     *
+     * Note this discard sets r->discard_body, and
+     * ngx_http_core_find_config_phase() skips its client_max_body_size check
+     * when that flag is set -- so for challenge URIs the configured body-size
+     * cap does not apply. The discard is streaming (bytes are read and thrown
+     * away, never buffered), so the cost of an oversized body is bandwidth,
+     * not memory.
      */
     rc = ngx_http_discard_request_body(r);
     if (rc != NGX_OK) {

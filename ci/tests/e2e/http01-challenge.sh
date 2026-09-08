@@ -22,6 +22,7 @@ HTTP_SO="$NGX_BUILD_DIR/objs/ngx_http_autocert_module.so"
 
 PREFIX="${PREFIX:-/tmp/ac-http01}"
 PORT="${AC_TEST_PORT:-${AC_PORT_8088:-8088}}"
+PORT2="${AC_TEST_PORT2:-$((PORT + 1))}"
 TOKEN="evaGxfADs6pSRb2LMJ7rzMrXXX0123456789abcdefg"
 KEYAUTH="$TOKEN.9jg46WB3rR_AHD-EBXdN7cBkH1WOu0tA3M9fm21mqTI"
 
@@ -44,18 +45,41 @@ events {}
 http {
     autocert_store_path $PREFIX/store;
     autocert_test_challenge $TOKEN "$KEYAUTH";
+    # Regression guards: the challenge handler must run in the POST_READ phase.
+    # Two DIFFERENT shadowing mechanisms are covered, one per server below --
+    # a handler registered any later than POST_READ loses to at least one of
+    # them, so both vhosts must serve the keyauth for the fix to be proven.
     server {
+        # Mechanism 1: rewrite-phase finalization. "return 301" is
+        # ngx_http_rewrite_module, which registers in SERVER_REWRITE/REWRITE.
+        # Both of those run BEFORE PRECONTENT (and before CONTENT), so the
+        # request is finalized with the redirect and no later-phase challenge
+        # handler ever runs -- a PRECONTENT registration does not fix this.
         listen $PORT;
         server_name a.example.com;
         autocert on;
-        # Regression guard (challenge handler must run in the PRECONTENT phase):
-        # a catch-all location with its own content handler. The content phase
-        # short-circuits to r->content_handler before running any content-phase
-        # handler, so a challenge handler registered there is shadowed entirely
-        # and HTTP-01 validation silently returns this 301 instead of the
-        # keyauth. A 'location /' match is what a real deployment has.
         location / {
             return 301 https://a.example.com\$request_uri;
+        }
+    }
+    server {
+        # Mechanism 2: content-phase short-circuit.
+        # ngx_http_core_content_phase() jumps straight to r->content_handler
+        # before running ANY content-phase handler, so a challenge handler
+        # registered in the content phase is shadowed entirely.
+        #
+        # empty_gif is used because it is a LOCATION content handler: it sets
+        # clcf->handler, which is what becomes r->content_handler, exactly as
+        # proxy_pass / fastcgi_pass / grpc_pass do -- and unlike them it needs
+        # no network dependency. Note "root" would NOT work here:
+        # ngx_http_static_module registers as a content-PHASE handler
+        # (phases[NGX_HTTP_CONTENT_PHASE]), not as r->content_handler, so it
+        # does not trigger the short-circuit at all.
+        listen $PORT2;
+        server_name b.example.com;
+        autocert on;
+        location / {
+            empty_gif;
         }
     }
 }
@@ -155,5 +179,31 @@ code=$(curl --noproxy '*' -s -o /dev/null -w '%{http_code}' \
     echo "::error::challenge assertions do not exercise the shadowing bug)"
     exit 1; }
 echo "✓ non-challenge URI still 301 from the location's own content handler"
+
+# The 301 vhost above only exercises the REWRITE-phase mechanism. This second
+# vhost exercises the content-phase short-circuit: `location / { empty_gif; }`
+# sets r->content_handler, which ngx_http_core_content_phase() calls before any
+# content-phase handler runs. A challenge handler registered in the content
+# phase is shadowed here even though the 301 vhost's assertions have nothing to
+# say about it.
+echo "== challenge served past a location content handler (content-phase short-circuit) =="
+got2=$(curl --noproxy '*' -fsS "http://127.0.0.1:$PORT2/.well-known/acme-challenge/$TOKEN")
+if [ "$got2" != "$KEYAUTH" ]; then
+    echo "::error::empty_gif vhost served '$got2' want '$KEYAUTH'"
+    exit 1
+fi
+echo "✓ keyauth served past the location content handler"
+
+echo "== location content handler still owns non-challenge URIs on that vhost =="
+ctype=$(curl --noproxy '*' -fsS -D - -o /dev/null \
+    "http://127.0.0.1:$PORT2/index.html" \
+    | awk 'tolower($1)=="content-type:"{gsub(/\r/,"",$2); print $2}')
+[ "$ctype" = "image/gif" ] || {
+    echo "::error::non-challenge URI on the empty_gif vhost gave content-type"
+    echo "::error::'$ctype', want image/gif (the location content handler must"
+    echo "::error::still own it; without that the challenge assertion there"
+    echo "::error::exercises no short-circuit at all)"
+    exit 1; }
+echo "✓ non-challenge URI still handled by the location content handler"
 
 echo "✓ M5 HTTP-01 challenge serve path verified"
