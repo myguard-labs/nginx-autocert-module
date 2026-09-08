@@ -51,10 +51,20 @@ slice_function() {
             print
             if ($0 ~ ("^" name "\\(")) { entered = 1 }
             if (entered) {
-                n = gsub(/{/, "{"); depth += n
+                pre_depth = depth
+                n_open = gsub(/{/, "{"); depth += n_open
                 n = gsub(/}/, "}"); depth -= n
                 if (depth < 0) { negative = 1; exit 2 }
-                if (opened && depth == 0) { closed = 1; exit }
+                # A one-line body ("{ return 0; }") opens and closes on the
+                # same line: depth is already back down to 0 by the time we
+                # reach this check, so a lone (opened && depth == 0) test
+                # (which only sees opened from a PRIOR line) never fires for
+                # it. (pre_depth == 0 && n_open > 0) catches "this line
+                # itself went positive", so the same-line close is not
+                # missed.
+                if ((opened || (pre_depth == 0 && n_open > 0)) && depth == 0) {
+                    closed = 1; exit
+                }
                 if (depth > 0) { opened = 1 }
             }
         }
@@ -85,10 +95,17 @@ slice_end_line() {
         NR >= s {
             if ($0 ~ ("^" name "\\(")) { entered = 1 }
             if (entered) {
-                n = gsub(/{/, "{"); depth += n
+                pre_depth = depth
+                n_open = gsub(/{/, "{"); depth += n_open
                 n = gsub(/}/, "}"); depth -= n
                 if (depth < 0) { negative = 1; exit 2 }
-                if (opened && depth == 0) { print NR; closed = 1; exit }
+                # See slice_function matching comment above: a one-line body
+                # opens and closes on the same line, so opened (only ever
+                # set on a PRIOR line) misses it -- pre_depth==0 && n_open>0
+                # detects "this line itself went positive".
+                if ((opened || (pre_depth == 0 && n_open > 0)) && depth == 0) {
+                    print NR; closed = 1; exit
+                }
                 if (depth > 0) { opened = 1 }
             }
         }

@@ -24,6 +24,11 @@
 #       slice_function itself).
 #   (f) slice_end_line on the same no-anchor source exits 1 via its own
 #       `if (!closed) exit 1` guard.
+#   (g) a one-line function body ("{ return 0; }" on the signature's next
+#       line) slices correctly instead of running to EOF: `{` and `}` both
+#       land on the same line as the *first* positive depth, so an `opened`
+#       flag set only AFTER the depth==0 check never sees depth==0 while
+#       opened is true on that line -- MINOR from PR #263 round 3.
 #
 # Each assertion is proven to be a REAL negative control, not a vacuous one:
 # this file also runs itself with the corresponding guard commented out via
@@ -90,6 +95,12 @@ some_other_function(void)
 {
     return 0;
 }
+EOF
+
+	cat >"$dir/fixture_one_line_body.c" <<'EOF'
+static ngx_int_t
+target_fn(void)
+{ return 0; }
 EOF
 }
 
@@ -169,6 +180,21 @@ test_f() {
 	pass "(f) slice_end_line on a no-anchor source: rc=1 as expected"
 }
 
+# --- (g) one-line function body: `{ ... }` on one line slices correctly -
+
+test_g() {
+	# shellcheck source=ci/tests/unit/lib/slice.sh
+	source "$SRC_LIB"
+	rc=0
+	body=$(slice_function "$TMP/fixture_one_line_body.c" 1 target_fn) || rc=$?
+	[ "$rc" -eq 0 ] || fail "(g) slice_function rc=$rc, expected 0 for a one-line body"
+	got=$(printf '%s\n' "$body" | wc -l)
+	[ "$got" -eq 3 ] || fail "(g) expected 3 sliced lines (through the one-line body), got $got"
+	printf '%s\n' "$body" | grep -qE '^\{ return 0; \}$' \
+		|| fail "(g) sliced body does not include the one-line open+close brace line"
+	pass "(g) one-line function body: correct 3-line slice"
+}
+
 # --- prove each control is real: remove the guard, require red ----------
 #
 # A control that was never observed red proves nothing (test-evidence.md).
@@ -209,6 +235,7 @@ test_c
 test_d
 test_e
 test_f
+test_g
 
 # (c)'s guard is the `if (depth < 0) { exit 2 }` line -- remove it and rerun
 # test_c, which must now fail (rc will be 0 instead of 2: the stray '}'
