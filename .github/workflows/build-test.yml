@@ -1,4 +1,4 @@
-# sync-sha: 049a227126b7aa2ac2591243bdcba345b7bc94843297010a1c0736d1c544d27c
+# sync-sha: 186f857bbc567a4fce6a213186cf1c7eb4c7c0e31c119e923bb43613f053b458
 name: Build & Test
 
 # Third-party actions pinned to commit SHAs for supply-chain safety.
@@ -41,8 +41,19 @@ on:
   # No pull_request: — ci.yml is the sole PR entry point and calls this
   # workflow. push: is kept so master still gets direct coverage, as does the
   # daily Validation schedule below.
-  workflow_dispatch: {}
-  workflow_call: {}
+  workflow_dispatch:
+    inputs:
+      build_stable:
+        description: Also build the NGINX_STABLE pin (normally weekly-scheduled only).
+        type: boolean
+        default: false
+  workflow_call:
+    inputs:
+      build_stable:
+        description: Also build the NGINX_STABLE pin (normally weekly-scheduled only).
+        type: boolean
+        default: false
+        required: false
   # This CI is otherwise PR-only, so a self-hosted-runner toolchain drift (e.g.
   # a cppcheck upgrade on builder02) goes unnoticed on master until the next
   # innocent PR eats the blame (#144/#145, 2026-08-08: a README-only PR failed
@@ -50,9 +61,10 @@ on:
   # Run just the Validation job daily so drift surfaces same-day against
   # master, not against whichever PR happens to open next. The other jobs
   # (build/unit/e2e matrices) stay PR-only to keep self-hosted runner cost
-  # down: `resolve` carries the only `schedule` guard, and every other job
-  # transitively `needs:` it, so they all cascade-skip. Validation has no
-  # `needs:` and no `if:`, which is what leaves it running on the tick.
+  # down: `resolve` skips on any schedule tick (every other PR-matrix job
+  # transitively `needs:` it, so they cascade-skip too), while `resolve-stable`
+  # carries its own separate schedule guard and opts in only on the Monday
+  # tick. Validation has no `needs:` and no `if:`, so it runs on both ticks.
   schedule:
     # 03:17 UTC daily — off-peak, staggered vs ci-deep's 03:30 monthly run.
     - cron: '17 3 * * *'
@@ -205,16 +217,23 @@ jobs:
             echo "angie_sha256=$ANGIE_SHA256"
           } >> "$GITHUB_OUTPUT"
 
-  # Builds the NGINX_STABLE pin (weekly schedule + workflow_dispatch only,
-  # never pull_request/push), which nothing built after ci-deep's "stable"
-  # matrix cell was cut (mem_d12cfa8625434f889ac88a76cf8d5438).
+  # Builds the NGINX_STABLE pin (weekly schedule, or an explicit opt-in via
+  # the build_stable input; never pull_request/push), which nothing built
+  # after ci-deep's "stable" matrix cell was cut
+  # (mem_d12cfa8625434f889ac88a76cf8d5438).
   resolve-stable:
     name: Resolve nginx stable version (scheduled)
     # Weekly tick only (see the '41 3 * * 1' cron above), not the daily one --
     # NGINX_STABLE only moves weekly, so a daily build here would be 7x more
-    # runs than the pin can ever change. workflow_dispatch stays unconditional
-    # for on-demand runs.
-    if: github.event.schedule == '41 3 * * 1' || github.event_name == 'workflow_dispatch'
+    # runs than the pin can ever change. `inputs.build_stable` is an explicit
+    # opt-in for on-demand runs: a reusable workflow inherits the CALLING
+    # event (github.event_name/github.event are not rewritten to
+    # workflow_call), so ci.yml's own `workflow_dispatch: {}` trigger would
+    # otherwise make every manual orchestrator run look like
+    # `event_name == 'workflow_dispatch'` here too and silently turn this job
+    # on. `inputs` always resolves (declared inputs default when the caller
+    # supplies none), so this is safe on schedule/push where no inputs exist.
+    if: github.event.schedule == '41 3 * * 1' || inputs.build_stable
     runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || fromJSON('["self-hosted","builder02","lxc"]') }}
     timeout-minutes: 5
     outputs:
@@ -254,7 +273,7 @@ jobs:
   build-nginx-stable:
     name: Build & load (nginx stable ${{ needs.resolve-stable.outputs.nginx_stable_version }})
     needs: [validation, resolve-stable]
-    if: github.event.schedule == '41 3 * * 1' || github.event_name == 'workflow_dispatch'
+    if: github.event.schedule == '41 3 * * 1' || inputs.build_stable
     runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || fromJSON('["self-hosted","builder02","lxc"]') }}
     timeout-minutes: 20
     steps:
@@ -270,10 +289,9 @@ jobs:
           url: ${{ needs.resolve-stable.outputs.nginx_stable_url }}
           dir: ${{ needs.resolve-stable.outputs.nginx_stable_dir }}
           sha256: ${{ needs.resolve-stable.outputs.nginx_stable_sha256 }}
-          # ci-build.sh otherwise always resolves NGINX_VERSION from
-          # .github/versions.env's mainline pin, ignoring the stable tarball
-          # this action already fetched+verified -- pin it explicitly so the
-          # job actually builds stable, not mainline.
+          # ci-build.sh resolves NGINX_VERSION from the mainline pin unless
+          # the caller presets it -- pin it explicitly so the job actually
+          # builds stable, not mainline.
           nginx_version: ${{ needs.resolve-stable.outputs.nginx_stable_version }}
           nginx_version_sha256: ${{ needs.resolve-stable.outputs.nginx_stable_sha256 }}
 

@@ -1,4 +1,4 @@
-# sync-sha: 3a8b1363ad2e2ae1b9195b917dadc4ef8c34b2e97e465097f3f806cce83764fe
+# sync-sha: 92b62da98e6f3bbe75ccc43f56f640f5c2bfdddcb7e61b42353714997b9622d5
 name: Build module + load/serve tests
 description: >
   Fetch one flavor (nginx | angie), configure + build the autocert dynamic
@@ -35,8 +35,8 @@ inputs:
       NGINX_VERSION pin from .github/versions.env. Set this (with
       nginx_version_sha256) when the caller must build a specific version
       that is NOT that pin -- e.g. the stable-branch job -- since ci-build.sh
-      otherwise always resolves to NGINX_VERSION regardless of which tarball
-      this action already fetched and verified above.
+      resolves NGINX_VERSION from the mainline pin unless the caller presets
+      it.
     required: false
     default: ''
   nginx_version_sha256:
