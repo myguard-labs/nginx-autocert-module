@@ -345,6 +345,14 @@ argv[2] = "<txt-value>"               # 43-char base64url(SHA-256(keyauth))
 argv[3] = NULL
 ```
 
+**argv layout:** The positional arguments start immediately after argv[0] with no `--`
+separator. Hooks that use `getopt` should be careful not to misinterpret argv[1] or
+argv[2] as options. In practice, `argv[1]` always starts with an underscore or letter
+(the record name), and `argv[2]` is a 43-character base64url digest (base64url alphabet:
+`[A-Za-z0-9_-]`). Both are CA-controlled (derived from ACME challenge data), so they
+cannot start with `-` in the current ACME protocol. Nevertheless, defensive hook code
+should treat them as positional data, not option flags.
+
 **No environment variables are added by the module** — the hook inherits the
 worker's environment verbatim. This is the certbot-manual convention: pass your
 DNS-provider credentials in the worker's environment; the domain and value arrive

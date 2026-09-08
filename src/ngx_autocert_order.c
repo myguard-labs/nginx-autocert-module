@@ -1559,6 +1559,12 @@ ngx_autocert_order_dns_hook(ngx_autocert_order_t *order, ngx_str_t *hook,
     ngx_memcpy(txt_cstr, order->dns_txt_value.data, order->dns_txt_value.len);
     txt_cstr[order->dns_txt_value.len] = '\0';
 
+    /* argv layout: { hook, "_acme-challenge.<name>", <txt>, NULL }. No `--`
+     * separator: argv[1] always starts with underscore/letter (record name),
+     * and argv[2] is a 43-char base64url digest (can only be [A-Za-z0-9_-]).
+     * Both are CA-derived (ACME challenge data), so neither can start with `-`
+     * in practice. Defensive hooks should treat argv[1:] as positional data.
+     * See the README "DNS-01 hook contract" section for details. */
     argv[0] = (char *) hook_cstr;
     argv[1] = (char *) name_cstr;
     argv[2] = (char *) txt_cstr;
