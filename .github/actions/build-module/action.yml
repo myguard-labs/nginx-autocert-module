@@ -1,4 +1,4 @@
-# sync-sha: 021b255cedbf1d82fc7f4fa833aaab71640dcadbe6730d50f2ac7d4f0015e563
+# sync-sha: 92b62da98e6f3bbe75ccc43f56f640f5c2bfdddcb7e61b42353714997b9622d5
 name: Build module + load/serve tests
 description: >
   Fetch one flavor (nginx | angie), configure + build the autocert dynamic
@@ -28,6 +28,23 @@ inputs:
       self-hosted runner's persistent ~/.cache/src-tarballs -- is built and
       tested as if it were genuine.
     required: true
+  nginx_version:
+    description: >
+      Optional NGINX_VERSION override passed to ci-build.sh. Empty (default)
+      preserves today's behavior: ci-build.sh's own `-z` guard adopts the
+      NGINX_VERSION pin from .github/versions.env. Set this (with
+      nginx_version_sha256) when the caller must build a specific version
+      that is NOT that pin -- e.g. the stable-branch job -- since ci-build.sh
+      resolves NGINX_VERSION from the mainline pin unless the caller presets
+      it.
+    required: false
+    default: ''
+  nginx_version_sha256:
+    description: >
+      Expected sha256 for nginx_version, exported as NGINX_VERSION_SHA256.
+      Required alongside nginx_version whenever it is set; empty otherwise.
+    required: false
+    default: ''
 
 runs:
   using: composite
@@ -86,6 +103,8 @@ runs:
         AC_BUILD_DIR="${{ inputs.dir }}" \
           AC_BUILD_EXTRA_CC_OPT="-Wall -Wextra -Werror" \
           AC_BUILD_WITH_HTTP_ACME_MODULE="$acme_module" \
+          NGINX_VERSION="${{ inputs.nginx_version }}" \
+          NGINX_VERSION_SHA256="${{ inputs.nginx_version_sha256 }}" \
           bash ci/tools/ci-build.sh release
         # Full build (not `make modules`): the load test needs the server
         # binary too. angie names it objs/angie, nginx names it objs/nginx.

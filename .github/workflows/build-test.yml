@@ -1,4 +1,4 @@
-# sync-sha: bbffed3f723e578b3a3fc0f6325bc9d3832060b328c2051ce93a19c8dd5904ef
+# sync-sha: 81088b65dfe91609e4183c9b4eecfe81a8f333c770fdda7035f20fab574a0aeb
 name: Build & Test
 
 # Third-party actions pinned to commit SHAs for supply-chain safety.
@@ -41,8 +41,19 @@ on:
   # No pull_request: — ci.yml is the sole PR entry point and calls this
   # workflow. push: is kept so master still gets direct coverage, as does the
   # daily Validation schedule below.
-  workflow_dispatch: {}
-  workflow_call: {}
+  workflow_dispatch:
+    inputs:
+      build_stable:
+        description: Also build the NGINX_STABLE pin (normally weekly-scheduled only).
+        type: boolean
+        default: false
+  workflow_call:
+    inputs:
+      build_stable:
+        description: Also build the NGINX_STABLE pin (normally weekly-scheduled only).
+        type: boolean
+        default: false
+        required: false
   # This CI is otherwise PR-only, so a self-hosted-runner toolchain drift (e.g.
   # a cppcheck upgrade on builder02) goes unnoticed on master until the next
   # innocent PR eats the blame (#144/#145, 2026-08-08: a README-only PR failed
@@ -50,12 +61,19 @@ on:
   # Run just the Validation job daily so drift surfaces same-day against
   # master, not against whichever PR happens to open next. The other jobs
   # (build/unit/e2e matrices) stay PR-only to keep self-hosted runner cost
-  # down: `resolve` carries the only `schedule` guard, and every other job
-  # transitively `needs:` it, so they all cascade-skip. Validation has no
-  # `needs:` and no `if:`, which is what leaves it running on the tick.
+  # down: `resolve` skips on any schedule tick (every other PR-matrix job
+  # transitively `needs:` it, so they cascade-skip too), while `resolve-stable`
+  # carries its own separate schedule guard and opts in only on the Monday
+  # tick. Validation has no `needs:` and no `if:`, so it runs on both ticks.
   schedule:
     # 03:17 UTC daily — off-peak, staggered vs ci-deep's 03:30 monthly run.
     - cron: '17 3 * * *'
+    # 03:41 UTC weekly (Mondays) — stable-branch build only (resolve-stable /
+    # build-nginx-stable below). NGINX_STABLE only moves weekly (bump.yml), so
+    # gating those two jobs to this tick instead of the daily one above keeps
+    # the ~20min self-hosted stable build from running 7x more often than its
+    # pin can even change; the daily tick stays Validation-only.
+    - cron: '41 3 * * 1'
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
@@ -198,6 +216,84 @@ jobs:
             echo "angie_url=https://download.angie.software/files/angie-$ANGIE_VERSION.tar.gz"
             echo "angie_sha256=$ANGIE_SHA256"
           } >> "$GITHUB_OUTPUT"
+
+  # Builds the NGINX_STABLE pin (weekly schedule, or an explicit opt-in via
+  # the build_stable input; never pull_request/push), which nothing built
+  # after ci-deep's "stable" matrix cell was cut
+  # (mem_d12cfa8625434f889ac88a76cf8d5438).
+  resolve-stable:
+    name: Resolve nginx stable version (scheduled / opt-in)
+    # Weekly tick only (see the '41 3 * * 1' cron above), not the daily one --
+    # NGINX_STABLE only moves weekly, so a daily build here would be 7x more
+    # runs than the pin can ever change. `inputs.build_stable` is an explicit
+    # opt-in for on-demand runs: a reusable workflow inherits the CALLING
+    # event (github.event_name/github.event are not rewritten to
+    # workflow_call), so ci.yml's own `workflow_dispatch: {}` trigger would
+    # otherwise make every manual orchestrator run look like
+    # `event_name == 'workflow_dispatch'` here too and silently turn this job
+    # on. `inputs` always resolves (declared inputs default when the caller
+    # supplies none), so this is safe on schedule/push where no inputs exist.
+    if: github.event.schedule == '41 3 * * 1' || inputs.build_stable
+    runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || fromJSON('["self-hosted","builder02","lxc"]') }}
+    timeout-minutes: 5
+    outputs:
+      nginx_stable_version: ${{ steps.v.outputs.nginx_stable_version }}
+      nginx_stable_dir: ${{ steps.v.outputs.nginx_stable_dir }}
+      nginx_stable_url: ${{ steps.v.outputs.nginx_stable_url }}
+      nginx_stable_sha256: ${{ steps.v.outputs.nginx_stable_sha256 }}
+    steps:
+      - name: Checkout module
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          persist-credentials: false
+      - name: Read pinned nginx stable version
+        id: v
+        run: |
+          set -euo pipefail
+          # Mirrors `resolve` above, not .github/scripts/load-versions.sh:
+          # that script only dumps every KEY=value from versions.env into
+          # $GITHUB_ENV -- it produces no step outputs, so it can't yield the
+          # derived nginx_stable_dir/url this job's downstream steps need.
+          f=.github/versions.env
+          [ -f "$f" ] || { echo "::error::$f not found"; exit 1; }
+          # shellcheck disable=SC1090
+          . "$f"
+          for k in NGINX_STABLE NGINX_STABLE_SHA256; do
+            eval "v=\${$k:-}"
+            [ -n "$v" ] || { echo "::error::$k missing from $f"; exit 1; }
+          done
+          echo "Pinned nginx stable: $NGINX_STABLE"
+          {
+            echo "nginx_stable_version=$NGINX_STABLE"
+            echo "nginx_stable_dir=nginx-$NGINX_STABLE"
+            echo "nginx_stable_url=https://nginx.org/download/nginx-$NGINX_STABLE.tar.gz"
+            echo "nginx_stable_sha256=$NGINX_STABLE_SHA256"
+          } >> "$GITHUB_OUTPUT"
+
+  build-nginx-stable:
+    name: Build & load (nginx stable ${{ needs.resolve-stable.outputs.nginx_stable_version }})
+    needs: [validation, resolve-stable]
+    if: github.event.schedule == '41 3 * * 1' || inputs.build_stable
+    runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || fromJSON('["self-hosted","builder02","lxc"]') }}
+    timeout-minutes: 20
+    steps:
+      - name: Checkout module
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          persist-credentials: false
+      - name: Build module + load/serve tests
+        uses: ./.github/actions/build-module  # zizmor: ignore[self-repository] actionlint rejects $/ (actionlint#711)
+        with:
+          flavor: nginx
+          version: ${{ needs.resolve-stable.outputs.nginx_stable_version }}
+          url: ${{ needs.resolve-stable.outputs.nginx_stable_url }}
+          dir: ${{ needs.resolve-stable.outputs.nginx_stable_dir }}
+          sha256: ${{ needs.resolve-stable.outputs.nginx_stable_sha256 }}
+          # ci-build.sh resolves NGINX_VERSION from the mainline pin unless
+          # the caller presets it -- pin it explicitly so the job actually
+          # builds stable, not mainline.
+          nginx_version: ${{ needs.resolve-stable.outputs.nginx_stable_version }}
+          nginx_version_sha256: ${{ needs.resolve-stable.outputs.nginx_stable_sha256 }}
 
   build-nginx:
     name: Build & load (nginx ${{ needs.resolve.outputs.nginx_version }})
