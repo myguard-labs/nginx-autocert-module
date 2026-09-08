@@ -18,6 +18,12 @@
 #       which the deleted `if [ -z "${end:-}" ]; then exit 1; fi` used to
 #       cover and the bare `END { if (opened && depth != 0) exit 1 }` form
 #       did not).
+#   (e) slice_function on a source with no matching anchor exits 1 via the
+#       END-block `if (!closed) exit 1` guard (round-1's fix, distinct from
+#       (d)'s slice_find_start guard -- this is the END anchor guard inside
+#       slice_function itself).
+#   (f) slice_end_line on the same no-anchor source exits 1 via its own
+#       `if (!closed) exit 1` guard.
 #
 # Each assertion is proven to be a REAL negative control, not a vacuous one:
 # this file also runs itself with the corresponding guard commented out via
@@ -41,8 +47,14 @@ pass() {
 }
 
 # --- fixtures -----------------------------------------------------------
+#
+# Shared by the main run below and by run_variant's __run_single__
+# re-invocation, so the four fixtures exist in exactly one place.
 
-cat >"$TMP/fixture_reformatted.c" <<'EOF'
+make_fixtures() {
+	local dir="$1"
+
+	cat >"$dir/fixture_reformatted.c" <<'EOF'
 static ngx_int_t
 target_fn(void)
 {
@@ -51,7 +63,7 @@ target_fn(void)
 } /* target_fn */
 EOF
 
-cat >"$TMP/fixture_unclosed.c" <<'EOF'
+	cat >"$dir/fixture_unclosed.c" <<'EOF'
 static ngx_int_t
 target_fn(void)
 {
@@ -60,7 +72,7 @@ target_fn(void)
     /* missing closing brace for target_fn itself */
 EOF
 
-cat >"$TMP/fixture_stray_close.c" <<'EOF'
+	cat >"$dir/fixture_stray_close.c" <<'EOF'
 static ngx_int_t
 target_fn(void)
 {
@@ -72,21 +84,24 @@ target_fn(void)
 }
 EOF
 
-cat >"$TMP/fixture_no_anchor.c" <<'EOF'
+	cat >"$dir/fixture_no_anchor.c" <<'EOF'
 static ngx_int_t
 some_other_function(void)
 {
     return 0;
 }
 EOF
+}
+
+make_fixtures "$TMP"
 
 # --- (a) trailing comment on the real closer: correct line count --------
 
 test_a() {
 	# shellcheck source=ci/tests/unit/lib/slice.sh
 	source "$SRC_LIB"
-	body=$(slice_function "$TMP/fixture_reformatted.c" 1 target_fn)
-	rc=$?
+	rc=0
+	body=$(slice_function "$TMP/fixture_reformatted.c" 1 target_fn) || rc=$?
 	[ "$rc" -eq 0 ] || fail "(a) slice_function rc=$rc, expected 0"
 	got=$(printf '%s\n' "$body" | wc -l)
 	[ "$got" -eq 6 ] || fail "(a) expected 6 sliced lines (through the commented closer), got $got"
@@ -128,6 +143,32 @@ test_d() {
 	pass "(d) anchor never matches: rc=1 as expected"
 }
 
+# --- (e) slice_function's OWN end-anchor guard: exit 1 when the source has
+# no matching function at all (distinct from (d), which only exercises
+# slice_find_start) ---------------------------------------------------
+
+test_e() {
+	# shellcheck source=ci/tests/unit/lib/slice.sh
+	source "$SRC_LIB"
+	rc=0
+	slice_function "$TMP/fixture_no_anchor.c" 1 target_fn >/dev/null || rc=$?
+	[ "$rc" -eq 1 ] || fail "(e) expected rc=1 from slice_function's END anchor guard, got rc=$rc"
+	pass "(e) slice_function on a no-anchor source: rc=1 as expected"
+}
+
+# --- (f) slice_end_line's OWN end-anchor guard: exit 1 on the same
+# no-anchor source -- slice_end_line has zero coverage otherwise ---------
+
+test_f() {
+	# shellcheck source=ci/tests/unit/lib/slice.sh
+	source "$SRC_LIB"
+	rc=0
+	line=$(slice_end_line "$TMP/fixture_no_anchor.c" 1 target_fn) || rc=$?
+	[ "$rc" -eq 1 ] || fail "(f) expected rc=1 from slice_end_line's END anchor guard, got rc=$rc"
+	[ -z "$line" ] || fail "(f) expected no output on stdout, got: $line"
+	pass "(f) slice_end_line on a no-anchor source: rc=1 as expected"
+}
+
 # --- prove each control is real: remove the guard, require red ----------
 #
 # A control that was never observed red proves nothing (test-evidence.md).
@@ -155,24 +196,7 @@ if [ "${1:-}" = "__run_single__" ]; then
 	SRC_LIB="$MUTATED_SRC_LIB"
 	TMP="$(mktemp -d)"
 	trap 'rm -rf "$TMP"' EXIT
-	cat >"$TMP/fixture_stray_close.c" <<'FIXEOF'
-static ngx_int_t
-target_fn(void)
-{
-    if (1) {
-        return 0;
-    }
-    char *s = "}}";
-    return 1;
-}
-FIXEOF
-	cat >"$TMP/fixture_no_anchor.c" <<'FIXEOF'
-static ngx_int_t
-some_other_function(void)
-{
-    return 0;
-}
-FIXEOF
+	make_fixtures "$TMP"
 	"$2"
 	exit $?
 fi
@@ -183,6 +207,8 @@ test_a
 test_b
 test_c
 test_d
+test_e
+test_f
 
 # (c)'s guard is the `if (depth < 0) { exit 2 }` line -- remove it and rerun
 # test_c, which must now fail (rc will be 0 instead of 2: the stray '}'
@@ -196,5 +222,16 @@ run_variant "finding2_depth_guard" '/if (depth < 0) { negative = 1; exit 2 }/d' 
 # shellcheck disable=SC2016  # sed script: no shell expansion wanted here
 run_variant "finding1_anchor_guard" \
 	's/if \[ -z "\${line:-}" \]; then/if false; then/' test_d
+
+# (e)/(f)'s guard is the END-block `if (!closed) exit 1` in BOTH
+# slice_function and slice_end_line -- this is round 1's MAJOR 1 fix
+# itself. Revert it to the pre-fix shape (round 1's exact bug) and rerun
+# both (e) and (f), which must now fail: a no-anchor source never sets
+# `opened`, so `opened && depth != 0` is false and the mutated guard
+# silently accepts what should be an error.
+run_variant "major1_end_anchor_guard" \
+	's/if (!closed) exit 1/if (opened \&\& depth != 0) exit 1/' test_e
+run_variant "major1_end_anchor_guard" \
+	's/if (!closed) exit 1/if (opened \&\& depth != 0) exit 1/' test_f
 
 echo "✓ all slicer guard assertions passed, including mutation controls"
