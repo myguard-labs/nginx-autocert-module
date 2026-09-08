@@ -1249,21 +1249,19 @@ ngx_autocert_dns_hook_spawn(ngx_autocert_order_t *order, ngx_str_t *hook,
             (void) sigaction(SIGPIPE, &sa, NULL);
             (void) sigaction(SIGSYS, &sa, NULL);
 
-            /* Disposition and mask are independent kernel state, and execve()
-             * preserves the mask as well. Restoring SIG_DFL above therefore
-             * does not help if either signal is also BLOCKED: a blocked
-             * SIGPIPE still turns a broken-pipe write into EPIPE rather than
-             * killing the hook, and a blocked SIGSYS leaves a seccomp trap
-             * pending instead of terminating it -- the same fail-open this
-             * block exists to close. ngx_worker_process_init() does clear the
-             * worker mask, so nothing is blocked in practice today; unblock
-             * explicitly anyway so the guarantee holds without depending on
-             * that, and on the sigmask this child just restored from the
-             * parent. */
+            /* The mask half of the same problem: execve() preserves it too,
+             * and a blocked signal defeats the SIG_DFL restore above just as
+             * an inherited SIG_IGN would. Clear the whole mask rather than
+             * unblocking these two -- the hook is an arbitrary
+             * operator-configured program, and the standard contract for
+             * spawning one (a shell, posix_spawn with POSIX_SPAWN_SETSIGMASK,
+             * glibc system()) is a clean mask. Unblocking only SIGPIPE/SIGSYS
+             * would still hand the hook, say, a blocked SIGALRM that stops
+             * timeout(1) inside it from ever firing. (void) for the same
+             * reason as above: SIG_SETMASK is always valid, and a child
+             * between fork and exec has no safe way to report a failure. */
             sigemptyset(&set);
-            sigaddset(&set, SIGPIPE);
-            sigaddset(&set, SIGSYS);
-            (void) sigprocmask(SIG_UNBLOCK, &set, NULL);
+            (void) sigprocmask(SIG_SETMASK, &set, NULL);
         }
 
         /*

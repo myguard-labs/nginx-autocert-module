@@ -224,7 +224,7 @@ cat >"$PREFIX/hooks/add.sh" <<EOF
 echo "add \$\$ start" >> "$PREFIX/hook-calls.log"
 yes x 2>/dev/null | head -c1 >/dev/null
 echo "sigpipe_exit=\${PIPESTATUS[0]}" > "$PREFIX/add-sigcheck.txt"
-( kill -SYS \$BASHPID; echo "sigsys_survived=1" >> "$PREFIX/add-sigcheck.txt" )
+( echo "sigsys_attempted=1" >> "$PREFIX/add-sigcheck.txt"; kill -SYS \$BASHPID; echo "sigsys_survived=1" >> "$PREFIX/add-sigcheck.txt" )
 sleep 10
 echo "add \$\$ finished-without-being-killed" >> "$PREFIX/hook-calls.log"
 EOF
@@ -314,6 +314,15 @@ for i in $(seq 1 20); do
 	sleep 0.25
 	[ "$i" = 20 ] && break
 done
+# The SIGSYS assertion below is a bare negative -- "sigsys_survived=1 is
+# absent" is also what a hook that never reached the kill would produce. Gate
+# it on the positive marker the subshell writes BEFORE self-signalling, so the
+# absence below is unambiguously evidence of TERMINATION rather than of
+# non-execution.
+grep -qE '^sigsys_attempted=1$' "$PREFIX/add-sigcheck.txt" 2>/dev/null || {
+	echo "::error::add-hook never reached its SIGSYS self-signal -- the SIGSYS assertion below would pass vacuously"
+	exit 1
+}
 # Under SIG_DFL, self-delivered SIGSYS terminates the subshell before it can
 # write this line -- its absence after the wait above IS the pass condition.
 grep -qE '^sigsys_survived=1$' "$PREFIX/add-sigcheck.txt" 2>/dev/null && {
