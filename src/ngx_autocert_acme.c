@@ -35,6 +35,7 @@
 static ngx_int_t ngx_autocert_acme_parse_url(ngx_autocert_acme_request_t *r);
 static ngx_int_t ngx_autocert_acme_check_origin(ngx_autocert_acme_request_t *r);
 static ngx_int_t ngx_autocert_acme_url_part_safe(ngx_str_t *s);
+static ngx_str_t ngx_autocert_acme_log_safe(ngx_pool_t *pool, ngx_str_t *src);
 static void ngx_autocert_acme_resolve_handler(ngx_resolver_ctx_t *ctx);
 static ngx_int_t ngx_autocert_acme_connect(ngx_autocert_acme_request_t *r,
     struct sockaddr *sockaddr, socklen_t socklen);
@@ -260,8 +261,10 @@ ngx_autocert_acme_request(ngx_autocert_acme_request_t *r)
                    "autocert: request %V \"%V\"", &r->method, &r->url);
 
     if (ngx_autocert_acme_parse_url(r) != NGX_OK) {
+        ngx_str_t  safe_url = ngx_autocert_acme_log_safe(r->pool, &r->url);
+
         ngx_log_error(NGX_LOG_ERR, r->log, 0,
-                      "autocert: invalid CA URL \"%V\"", &r->url);
+                      "autocert: invalid CA URL \"%V\"", &safe_url);
         return NGX_ERROR;
     }
 

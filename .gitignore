@@ -18,6 +18,11 @@ core
 core.*
 vgcore.*
 
+# gcc/clang dump files from -fdump-* runs; these land NEXT TO THE SOURCE as
+# src/<file>.c.<pid>.dump and are large (tens of MB), so an unguarded
+# `git add -A` after a local analysis run sweeps them into the commit.
+*.dump
+
 # coverage artifacts
 *.gcda
 *.gcno
