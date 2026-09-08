@@ -1,4 +1,4 @@
-# sync-sha: 727f3a8072d31ee5ca0ced661362327bdd83db88974dbebb2260fc99f140d1b1
+# sync-sha: 56e053618e06d40aa6ce472aeed095c27a5d30b3126a40a6c53155fe8ca2a52a
 name: Notify scheduled job failure
 
 # Split out of build-test.yml (PR #285): a job inside a workflow_call member
@@ -74,15 +74,29 @@ jobs:
           JOB_RESULTS=$(gh api "repos/${GH_REPO}/actions/runs/${RUN_ID}/jobs" \
             --jq '[.jobs[] | "\(.name)=\(.conclusion)"] | join(", ")')
 
-          # Ensure the tracking label exists (idempotent; ignore "already
-          # exists" failure) so lookup below is exact-match on a label rather
-          # than GitHub's eventually-consistent, substring-matching search
-          # index -- fuzzy title search can miss a just-created issue
-          # (opening duplicates) or match an unrelated issue that happens to
-          # share words with the title.
+          # Ensure the tracking label exists. Creation failing with "already
+          # exists" is fine and expected; a transient 5xx or secondary
+          # rate-limit is not, and gh label create can't tell us which one
+          # happened, so treat the create's own exit status as uninformative
+          # and instead CONFIRM the label is actually present afterwards.
+          # If it isn't, we still file the issue -- unlabelled, with a note
+          # -- rather than going silently red here and filing nothing: a
+          # filed-but-unlabelled issue is recoverable (the label can be
+          # attached by hand), while a red notifier with no issue at all is
+          # exactly the silent-rot condition this workflow exists to catch.
+          # The tradeoff is that an unlabelled issue breaks the exact-match
+          # dedup lookup below (it only searches issues carrying the label),
+          # so a persistent label outage can produce duplicate issues across
+          # runs; that is judged preferable to producing none.
           gh label create "$ISSUE_LABEL" \
             --description "Auto-filed by the scheduled CI failure notifier" \
             --color ededed 2>/dev/null || true
+
+          label_ok=false
+          if gh label list --json name --jq '.[].name' \
+              | grep -qxF "$ISSUE_LABEL"; then
+            label_ok=true
+          fi
 
           BODY=$(cat <<EOF
           Scheduled workflow **${WORKFLOW_NAME}** failed.
@@ -94,19 +108,39 @@ jobs:
           EOF
           )
 
-          # Exact-match the title among open issues carrying the tracking
-          # label, rather than trusting `gh issue list --search`.
-          existing=$(gh issue list --label "$ISSUE_LABEL" --state open \
-            --json number,title --jq \
-            ".[] | select(.title == \"$ISSUE_TITLE\") | .number" | head -1)
+          if [ "$label_ok" != true ]; then
+            BODY="${BODY}
+
+          _Note: the \`${ISSUE_LABEL}\` tracking label could not be verified
+          and was not attached to this issue; future runs may not find this
+          issue via the label-based dedup lookup and could file a
+          duplicate._"
+          fi
+
+          existing=""
+          if [ "$label_ok" = true ]; then
+            # Exact-match the title among open issues carrying the tracking
+            # label, rather than trusting `gh issue list --search`. The
+            # title is passed as a jq variable, not spliced into the jq
+            # program, so a future title containing a quote/backslash/$
+            # cannot break the jq parse.
+            existing=$(gh issue list --label "$ISSUE_LABEL" --state open \
+              --json number,title \
+              | jq -r --arg t "$ISSUE_TITLE" \
+                  '.[] | select(.title == $t) | .number' | head -1)
+          fi
 
           if [ -n "$existing" ]; then
             # Comment on the existing issue instead of creating a new one
             gh issue comment "$existing" --body "$BODY"
-          else
-            # Create a new issue
+          elif [ "$label_ok" = true ]; then
             gh issue create \
               --title "$ISSUE_TITLE" \
               --label "$ISSUE_LABEL" \
+              --body "$BODY"
+          else
+            # Label unusable: file unlabelled rather than fail the job.
+            gh issue create \
+              --title "$ISSUE_TITLE" \
               --body "$BODY"
           fi
