@@ -1,4 +1,4 @@
-# sync-sha: 0b0b355132b43de9c9342054d5f28c98301b5031c6dd7d07680d84c2543a3fac
+# sync-sha: f1bb9238907ffc216d4bd51107043df2934bf8938af50a935dfdfc91ecafd101
 name: Security scanners
 
 # Static / security scanners gate on every PR/push — flawfinder, clang-tidy
@@ -54,11 +54,13 @@ jobs:
           # semgrep: isolate via pipx (PEP 668 blocks a bare pip3 install into the
           # system Python on the Ubuntu 24.04 self-hosted runner). Fall back to a
           # user pip install with --break-system-packages if pipx is unavailable.
+          # Version pinned to match ci/linter/install-linters.sh — bump every
+          # site together; ci/linter/README.md lists them.
           if command -v pipx >/dev/null; then
-            pipx install --quiet semgrep
+            pipx install --quiet 'semgrep==1.169.0'
             echo "$HOME/.local/bin" >> "$GITHUB_PATH"
           else
-            pip3 install --quiet --user --break-system-packages semgrep
+            pip3 install --quiet --user --break-system-packages 'semgrep==1.169.0'
             echo "$HOME/.local/bin" >> "$GITHUB_PATH"
           fi
       - name: Configure nginx src tree (clang-tidy headers)
