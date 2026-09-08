@@ -932,12 +932,24 @@ ngx_autocert_win32_singleton_name(const char *path, char *out, size_t out_cap)
  * and Linux-unit-testable; the four named constants below are numerically
  * identical to the WinBase.h macros of the same name (0, 0x80, 0x102,
  * 0xFFFFFFFF), so a win32 caller passes WaitForSingleObject()'s return value
- * straight through with no translation.
+ * straight through with no translation — static-asserted below on win32
+ * builds.
  */
 #define NGX_AUTOCERT_WAIT_OBJECT_0    0x00000000u
 #define NGX_AUTOCERT_WAIT_ABANDONED   0x00000080u
 #define NGX_AUTOCERT_WAIT_TIMEOUT     0x00000102u
 #define NGX_AUTOCERT_WAIT_FAILED      0xFFFFFFFFu
+
+#if (NGX_WIN32)
+typedef char  ngx_autocert_wait_object_0_check_t[
+    (NGX_AUTOCERT_WAIT_OBJECT_0 == WAIT_OBJECT_0) ? 1 : -1];
+typedef char  ngx_autocert_wait_abandoned_check_t[
+    (NGX_AUTOCERT_WAIT_ABANDONED == WAIT_ABANDONED) ? 1 : -1];
+typedef char  ngx_autocert_wait_timeout_check_t[
+    (NGX_AUTOCERT_WAIT_TIMEOUT == WAIT_TIMEOUT) ? 1 : -1];
+typedef char  ngx_autocert_wait_failed_check_t[
+    (NGX_AUTOCERT_WAIT_FAILED == WAIT_FAILED) ? 1 : -1];
+#endif
 
 static ngx_inline ngx_int_t
 ngx_autocert_win32_mutex_wait_verdict(uint32_t wait_rc)
