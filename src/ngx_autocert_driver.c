@@ -2475,14 +2475,25 @@ typedef ngx_int_t (*ngx_autocert_seed_entry_pt)(void *ctx, ngx_str_t *host);
  * signal), and NGX_AGAIN when the budget was spent with entries still
  * pending (the caller must yield and resume from this cursor).
  *
- * POSIX readdir() (and the win32 shim, see ngx_autocert_win32.h) return NULL
- * for BOTH clean exhaustion and a genuine enumeration error; the only way to
- * tell them apart is errno, which readdir() leaves untouched on clean
- * exhaustion but sets on failure. errno is cleared immediately before each
- * call because a marker read (openat/fstat/read/close, all inside
- * ngx_autocert_seed_read_marker()) can set it on an unrelated, already
- * handled skip — without the clear, that stale value would be misread as
- * this readdir() call's own failure.
+ * ngx_autocert_readdir() returns NULL for BOTH clean exhaustion and a genuine
+ * enumeration error on both platform arms; the two are told apart by
+ * ngx_autocert_readdir_err(dh), the shim's EXPLICIT per-handle error channel
+ * (0 = clean end-of-directory, nonzero = genuine failure), read immediately
+ * after a NULL return.
+ *
+ * That channel exists instead of an ambient-global check because the ambient
+ * state cannot answer the question portably. On win32 ngx_errno is
+ * GetLastError(), and the shim's own entry loop skips malformed and
+ * unrepresentable names with `continue` after WideCharToMultiByte() has
+ * already set LastError — so a clean end-of-directory arrives with a nonzero
+ * global, and no amount of clearing at THIS call site can help, because the
+ * clobber happens inside ngx_autocert_readdir() after the clear. Each arm
+ * instead reports its own verdict: win32 latches it in dh->err on every
+ * NULL-returning path, POSIX clears errno inside the shim immediately before
+ * readdir(3) (whose "untouched at EOF, set on failure" contract is real) so
+ * the value can only have come from that call. Either way the marker read's
+ * openat/fstat/read/close can no longer be mistaken for this readdir()'s
+ * failure. See ngx_autocert_win32.h § ngx_autocert_readdir_err().
  *
  * `buf` is caller-owned scratch of NGX_AUTOCERT_REQUEST_NAME_MAX bytes that
  * backs the ngx_str_t handed to `handler`; it is not retained past the call.
@@ -2498,10 +2509,10 @@ ngx_autocert_seed_walk_chunk(ngx_autocert_dir_t *dh, int cfd,
 
     for (processed = 0; processed < budget; processed++) {
 
-        ngx_set_errno(0);
         de = ngx_autocert_readdir(dh);
         if (de == NULL) {
-            return (ngx_errno == 0) ? NGX_DONE : NGX_ERROR;
+            /* Explicit channel, never the ambient global: see above. */
+            return (ngx_autocert_readdir_err(dh) == 0) ? NGX_DONE : NGX_ERROR;
         }
 
         if (ngx_autocert_seed_read_marker(cfd, de->d_name, buf, &host)
@@ -2803,7 +2814,8 @@ ngx_autocert_runtime_seed_step(ngx_event_t *ev)
              * issuance -- but it must be operator-visible: a silent NGX_DONE
              * here would truncate the seed with no signal that anything went
              * wrong. */
-            ngx_log_error(NGX_LOG_ERR, cycle->log, ngx_errno,
+            ngx_log_error(NGX_LOG_ERR, cycle->log,
+                          ngx_autocert_readdir_err(ngx_autocert_seed_dh),
                           "autocert: A6 store enumeration failed mid-walk, "
                           "seed stopped early");
             ngx_autocert_runtime_seed_stop();
