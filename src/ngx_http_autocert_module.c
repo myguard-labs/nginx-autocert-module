@@ -70,6 +70,7 @@ static char *ngx_http_autocert_merge_srv_conf(ngx_conf_t *cf, void *parent,
     void *child);
 static ngx_int_t ngx_http_autocert_postconfig(ngx_conf_t *cf);
 static ngx_int_t ngx_http_autocert_challenge_handler(ngx_http_request_t *r);
+static ngx_int_t ngx_http_autocert_challenge_serve(ngx_http_request_t *r);
 #if (NGX_AUTOCERT_TEST)
 static char *ngx_http_autocert_test_challenge(ngx_conf_t *cf,
     ngx_command_t *cmd, void *conf);
@@ -1591,7 +1592,44 @@ ngx_http_autocert_postconfig(ngx_conf_t *cf)
         ngx_http_core_main_conf_t  *cmcf2;
 
         cmcf2 = ngx_http_conf_get_module_main_conf(cf, ngx_http_core_module);
-        h = ngx_array_push(&cmcf2->phases[NGX_HTTP_CONTENT_PHASE].handlers);
+        /*
+         * POST_READ, not CONTENT. Two distinct ways a vhost's own config
+         * shadows an HTTP-01 challenge served from a later phase:
+         *
+         *  - ngx_http_core_content_phase() short-circuits to
+         *    r->content_handler before running ANY content-phase handler, so a
+         *    matched location with proxy_pass / fastcgi_pass / autoindex never
+         *    reaches a content-phase challenge handler at all;
+         *  - `return 301 https://...;` (and `rewrite ... redirect`) is
+         *    ngx_http_rewrite_module running in the REWRITE phase, which
+         *    finalizes the request even earlier — before PRECONTENT.
+         *
+         * A catch-all `location / { return 301 https://...; }` is extremely
+         * common, so PRECONTENT is not early enough. POST_READ is the first
+         * phase of every request; the server (and therefore the autocert srv
+         * conf) is already chosen there, as ngx_http_realip_module relies on.
+         * The handler prefix-checks the URI and returns NGX_DECLINED for
+         * everything outside /.well-known/acme-challenge/, so no other request
+         * changes behaviour.
+         *
+         * Limitation of serving this early: at POST_READ no location has
+         * matched yet, so r->loc_conf is still the server's DEFAULT location
+         * config and ngx_http_update_location_config() never runs for a
+         * challenge request. Location-level directives therefore do not apply
+         * to challenge responses -- server_tokens, access_log off, error_page,
+         * and the keepalive_requests / keepalive_time counter checks that
+         * ngx_http_update_location_config() performs against r->connection
+         * are not evaluated for a challenge request at all (that function
+         * only ever CLEARS r->keepalive; skipping it fails open, so a
+         * challenge response can keep alive a connection a matched
+         * location's keepalive_timeout 0 would have closed). Calling
+         * ngx_http_update_location_config() here would not help: there is no
+         * matched location to update from. The challenge response is a fixed
+         * ~87-byte text/plain body on a well-known URI, so serving it from
+         * server-level config is the accepted trade for being ahead of every
+         * rewrite and content handler.
+         */
+        h = ngx_array_push(&cmcf2->phases[NGX_HTTP_POST_READ_PHASE].handlers);
         if (h == NULL) {
             return NGX_ERROR;
         }
@@ -1603,14 +1641,52 @@ ngx_http_autocert_postconfig(ngx_conf_t *cf)
 
 
 /*
- * Content-phase handler for HTTP-01 validation. If the request URI is
- * /.well-known/acme-challenge/<token>, look the token up in the challenge store
- * and return its key authorization as text/plain; otherwise decline so the
- * normal location handling proceeds. The token store is shared with the helper
- * which fills it during the order flow (M6); M5 proves the serve path.
+ * Phase-handler wrapper around ngx_http_autocert_challenge_serve().
+ *
+ * The post-read phase uses ngx_http_core_generic_phase(), whose return-code
+ * contract differs from the content phase: NGX_DECLINED falls through to the
+ * next handler (what we want for every non-challenge URI), but NGX_OK means
+ * "skip to the next phase" rather than "response complete". A handler that has
+ * already emitted a response must therefore finalize the request itself and
+ * return NGX_DONE, otherwise the later phases would run afterwards and
+ * respond a second time. ngx_http_autocert_challenge_serve() keeps the plain
+ * content-handler return convention and this wrapper translates it.
  */
 static ngx_int_t
 ngx_http_autocert_challenge_handler(ngx_http_request_t *r)
+{
+    ngx_int_t  rc;
+
+    rc = ngx_http_autocert_challenge_serve(r);
+
+    if (rc == NGX_DECLINED) {
+        /* not ours: let the remaining post-read handlers and every later
+         * phase proceed exactly as before this handler existed. */
+        return NGX_DECLINED;
+    }
+
+    if (rc == NGX_DONE) {
+        return rc;
+    }
+
+    /*
+     * NGX_OK (response fully sent), NGX_AGAIN (ngx_http_output_filter did not
+     * drain the whole body), NGX_ERROR or an NGX_HTTP_* status: the request is
+     * ours and terminates here. ngx_http_finalize_request() is what
+     * ngx_http_core_content_phase() does with exactly these values -- it sets
+     * the write event handler for NGX_AGAIN, whereas returning NGX_AGAIN to
+     * ngx_http_core_generic_phase() would stop the phase loop with neither a
+     * finalize nor a write handler and stall the response until the client
+     * times out.
+     */
+    ngx_http_finalize_request(r, rc);
+
+    return NGX_DONE;
+}
+
+
+static ngx_int_t
+ngx_http_autocert_challenge_serve(ngx_http_request_t *r)
 {
     ngx_http_autocert_main_conf_t  *amcf;
     ngx_http_autocert_srv_conf_t   *ascf;
@@ -1621,6 +1697,14 @@ ngx_http_autocert_challenge_handler(ngx_http_request_t *r)
     static const size_t             pfxlen =
                                         sizeof(NGX_HTTP_AUTOCERT_WK_PREFIX) - 1;
 
+    /*
+     * r->uri is already normalized here: ngx_http_process_request_uri() runs
+     * during request-line parsing, before ANY phase, and resolves %xx escapes,
+     * "." / ".." segments and duplicate slashes. So this literal prefix
+     * compare cannot be bypassed by encoding or traversal, and the token
+     * segment below is a real path segment. A future phase move must preserve
+     * that ordering or this argument no longer holds.
+     */
     if (r->uri.len < pfxlen
         || ngx_strncmp(r->uri.data, NGX_HTTP_AUTOCERT_WK_PREFIX, pfxlen) != 0)
     {
@@ -1657,11 +1741,19 @@ ngx_http_autocert_challenge_handler(ngx_http_request_t *r)
 
     /*
      * Drain any request body before producing our own response. A GET/HEAD may
-     * still carry a Content-Length / chunked body; a content-phase handler that
-     * emits output without discarding it leaves those bytes in the connection
-     * buffer, desyncing keepalive framing (the next pipelined request
-     * mis-parses the leftover as its start line). Mirrors
+     * still carry a Content-Length / chunked body; a post-read-phase handler
+     * that emits output without discarding it leaves those bytes in the
+     * connection buffer, desyncing keepalive framing (the next pipelined
+     * request mis-parses the leftover as its start line). Mirrors
      * ngx_http_stub_status_module.
+     *
+     * Note the body-size cap does not apply to challenge URIs: this handler
+     * finalizes the request in POST_READ, so ngx_http_core_find_config_phase()
+     * -- which is where client_max_body_size is enforced -- never runs. (For a
+     * body that does not drain synchronously the discard also sets
+     * r->discard_body, which that check honours, but the phase is unreached
+     * either way.) The discard is streaming, so an oversized body costs
+     * bandwidth, not memory.
      */
     rc = ngx_http_discard_request_body(r);
     if (rc != NGX_OK) {
