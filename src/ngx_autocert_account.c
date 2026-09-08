@@ -413,6 +413,11 @@ ngx_autocert_account_save_key(ngx_autocert_account_t *acct, int dfd,
     size_t       off;
 
     if (ngx_http_autocert_key_to_pem(acct->pool, acct->key, &pem) != NGX_OK) {
+        /* The only exit between the "generating account key" NOTICE and the
+         * terminal "generated + saved" one that logged nothing at all. */
+        ngx_log_error(NGX_LOG_ERR, acct->log, 0,
+                      "autocert: serialize account key \"%V\" to PEM failed",
+                      &acct->key_path);
         return NGX_ERROR;
     }
 
