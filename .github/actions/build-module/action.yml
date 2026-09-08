@@ -1,4 +1,4 @@
-# sync-sha: 4e8e825865c5bc59cd96de0dc5d8115a349f76507dadb6f093ca37f9edf6f14d
+# sync-sha: 021b255cedbf1d82fc7f4fa833aaab71640dcadbe6730d50f2ac7d4f0015e563
 name: Build module + load/serve tests
 description: >
   Fetch one flavor (nginx | angie), configure + build the autocert dynamic
