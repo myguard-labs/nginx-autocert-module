@@ -1209,8 +1209,8 @@ ngx_http_autocert_cache_reload(ngx_autocert_cert_t *c, ngx_uint_t slot,
     ngx_int_t           rc = NGX_ERROR;
     ngx_pool_t         *tmp;
 
-    /* Null so the cleanse at `done:` is safe on the early-error paths that
-     * jump there before read_file has filled it in. */
+    /* Null so the cleanse at `done:` is safe on the read_file-failure path,
+     * where chain_pem was filled in but key_pem was not. */
     ngx_str_null(&key_pem);
 
     /* Reject a host that could escape the store as a path segment. */

@@ -347,7 +347,21 @@ test_remove_wipes_key(ngx_shm_zone_t *zone)
 
     /* The block was freed, not reallocated -- nothing ran in between that
      * would touch this address, so reading it directly observes exactly what
-     * remove() left there. */
+     * remove() left there. Assert ALL-ZERO rather than merely "lacks the PEM
+     * marker": under NGX_DEBUG_MALLOC ngx_slab_junk() fills a freed block with
+     * 0xA5, which would satisfy a marker-absence check whether or not the
+     * cleanse ran, silently turning this detector into a tautology. */
+    {
+        size_t  i, nonzero = 0;
+
+        for (i = 0; i < key_len; i++) {
+            if (key_data[i] != 0) {
+                nonzero++;
+            }
+        }
+        CHECK(nonzero == 0,
+              "wipe: freed key block is all-zero after remove");
+    }
     CHECK(!buf_has(key_data, key_len, "BEGIN PRIVATE KEY"),
           "wipe: freed key block no longer contains the PEM after remove");
 }

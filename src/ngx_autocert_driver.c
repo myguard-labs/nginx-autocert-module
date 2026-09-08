@@ -427,7 +427,9 @@ ngx_autocert_kick_handler(ngx_event_t *ev)
         ngx_str_t    acert_pem, akey_pem;
 
         ngx_autocert_test_alpn_seeded = 1;
-        ngx_str_null(&akey_pem);        /* cleansed below on every path */
+        /* Cleansed below on every path that can have filled it: key_to_pem
+         * only runs when atmp != NULL, which is the branch holding the wipe. */
+        ngx_str_null(&akey_pem);
 
         atmp = ngx_create_pool(4096, cycle->log);
         /* Ephemeral tls-alpn-01 challenge cert: always EC, independent of the
