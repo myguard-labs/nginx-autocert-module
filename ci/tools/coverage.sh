@@ -188,9 +188,12 @@ report_ok=0
 
 if command -v gcovr >/dev/null 2>&1; then
   echo "-- using gcovr --"
+  mkdir -p "$unit_build/html"
   gcovr --root "$workspace" \
     --filter "$workspace/src/" \
     --print-summary \
+    --html-details "$unit_build/html/index.html" \
+    --json-summary "$unit_build/coverage-summary.json" \
     "$unit_build" "$module_build" \
     && report_ok=1
 elif command -v lcov >/dev/null 2>&1; then
@@ -225,6 +228,59 @@ fi
 if [ "$report_ok" -ne 1 ]; then
   echo "::error::no coverage tool (gcovr/lcov/gcov) produced a report" >&2
   exit 1
+fi
+
+# ---- self-detecting output check -------------------------------------------
+# The whole point of this gate: an empty upload must never pass silently
+# again.  Whichever branch above ran (gcovr's json-summary+html-details, or
+# lcov's coverage.info.src+html) must have left files in $unit_build for the
+# workflow to upload.
+report_files="$(find "$unit_build" -type f \( -name '*.json' -o -name '*.html' -o -name 'coverage.info*' \) 2>/dev/null)"
+if [ -z "$report_files" ]; then
+  echo "::warning::coverage report produced no files under $unit_build -- the uploaded artifact will be empty" >&2
+else
+  echo "== coverage report files =="
+  find "$unit_build" -maxdepth 3 -type f | sort
+fi
+
+# ---- plausibility floor: catch collapse-to-zero, not enforce a target ------
+# The inventory gate above only proves every src/*.c linked into the .so
+# emitted a .gcda; GCC emits a (near-empty, ~64 byte) .gcda for a linked TU
+# even when none of its functions ran, so that gate is satisfied on file
+# existence alone.  Only 6 of 12 src/*.c are compiled directly into the unit
+# suite (see ci/tests/unit/run.sh); the rest are exercised, if at all, only by
+# the bounded server workload's lifecycle/state-machine paths.  10% is below
+# what either surface alone should plausibly produce, so it flags a genuine
+# collapse (e.g. gcovr's --filter or --root drifting from src/, or the unit
+# suite silently no-op'ing) without nagging on every normal run.
+coverage_floor=10
+summary_json="$unit_build/coverage-summary.json"
+if [ -f "$summary_json" ] && command -v python3 >/dev/null 2>&1; then
+  line_percent="$(python3 -c '
+import json, sys
+try:
+    with open(sys.argv[1]) as f:
+        data = json.load(f)
+    print(data["line_percent"])
+except Exception:
+    print("")
+' "$summary_json")"
+  if [ -n "$line_percent" ]; then
+    echo "line coverage: ${line_percent}%"
+    if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+      {
+        echo "### Coverage (src/, gcov)"
+        echo ""
+        echo "Line coverage: **${line_percent}%**"
+      } >> "$GITHUB_STEP_SUMMARY"
+    fi
+    below_floor="$(python3 -c "print(1 if float(\"$line_percent\") < $coverage_floor else 0)" 2>/dev/null || echo 0)"
+    if [ "$below_floor" = "1" ]; then
+      echo "::warning::line coverage ${line_percent}% is below the ${coverage_floor}% floor -- possible collapse to near-zero" >&2
+    fi
+  else
+    echo "::warning::coverage-summary.json present but line_percent could not be parsed" >&2
+  fi
 fi
 
 echo "== coverage.sh done =="
