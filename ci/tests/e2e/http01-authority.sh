@@ -95,7 +95,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-rm -rf "$PREFIX"
+rm -rf "${PREFIX:?PREFIX must not be empty}"
 mkdir -p "$PREFIX/logs" "$PREFIX/conf" "$PREFIX/store"
 chmod 0700 "$PREFIX/store"
 
@@ -136,24 +136,37 @@ for _ in $(seq 1 30); do
     sleep 0.3
 done
 
+# The CI runners export http_proxy/https_proxy pointing at a caching proxy.
+# curl would then hand the whole URL to that proxy -- which resolves the
+# hostname itself and ignores --resolve -- so a request meant for the local
+# nginx comes back as the proxy's DNS-failure error page instead. Every curl
+# here must talk to 127.0.0.1 directly.
 fetch_h1() {
     local host="$1"
-    curl -s -H "Host: $host" \
+    curl -s --noproxy '*' -H "Host: $host" \
         "http://127.0.0.1:$PORT/.well-known/acme-challenge/$TOKEN"
 }
 fetch_h1_code() {
     local host="$1"
-    curl -s -o /dev/null -w '%{http_code}' -H "Host: $host" \
+    curl -s --noproxy '*' -o /dev/null -w '%{http_code}' -H "Host: $host" \
         "http://127.0.0.1:$PORT/.well-known/acme-challenge/$TOKEN"
 }
+# A no-leak assertion on the body alone passes vacuously whenever the request
+# never reached nginx at all (connection refused, a proxy error page, an empty
+# body). So every no-leak case also asserts the exact status code we expect
+# from the disabled vhost, which only nginx can produce.
 assert_no_leak() {
-    local label="$1" body="$2"
+    local label="$1" body="$2" code="$3"
     case "$body" in
         *"$KEYAUTH"*)
             echo "::error::($label) TOKEN LEAK: wrong authority returned the keyauth (body='$body')"
             exit 1
             ;;
     esac
+    if [ "$code" != "404" ]; then
+        echo "::error::($label) expected 404 from the disabled authority, got code=$code body='$body' (did the request reach nginx?)"
+        exit 1
+    fi
 }
 
 echo "== (a) h1 Host: a.example.com (enabled) -> keyauth =="
@@ -174,16 +187,13 @@ if [ "$CONTROL" = 1 ]; then
     fi
     echo "✓ (b) [CONTROL] with autocert enabled on b, it now serves the keyauth like a"
 else
-    assert_no_leak "b" "$got"
-    if [ "$code" != "404" ]; then
-        echo "::error::(b) disabled authority did not fall through to the expected 404: code=$code body='$got'"
-        exit 1
-    fi
+    assert_no_leak "b" "$got" "$code"
     echo "✓ (b) disabled authority falls through (404); keyauth never present"
 fi
 
 echo "== (c) h1 Host: unknown.example.com (falls to default server = b) =="
 got=$(fetch_h1 unknown.example.com)
+code=$(fetch_h1_code unknown.example.com)
 if [ "$CONTROL" = 1 ]; then
     # b is default_server and now has autocert on too, so an unknown Host
     # legitimately lands on an enabled server and gets the keyauth.
@@ -193,7 +203,7 @@ if [ "$CONTROL" = 1 ]; then
     fi
     echo "✓ (c) [CONTROL] unknown Host on now-enabled default server serves keyauth"
 else
-    assert_no_leak "c" "$got"
+    assert_no_leak "c" "$got" "$code"
     echo "✓ (c) unknown authority falls to disabled default server; keyauth never present"
 fi
 
@@ -205,6 +215,7 @@ echo "== (d) mismatched/A-vs-U-label authority (no IDNA in nginx) =="
 # the "unknown Host" case from (c): nginx does no Unicode/IDNA normalization
 # on Host, so it cannot match and falls through to default.
 got=$(fetch_h1 xn--fsq.example.net)
+code=$(fetch_h1_code xn--fsq.example.net)
 if [ "$CONTROL" = 1 ]; then
     # same default-server propagation as (c) under the control.
     if [ "$got" != "$KEYAUTH" ]; then
@@ -213,13 +224,13 @@ if [ "$CONTROL" = 1 ]; then
     fi
     echo "✓ (d) [CONTROL] mismatched authority falls to now-enabled default; serves keyauth"
 else
-    assert_no_leak "d" "$got"
+    assert_no_leak "d" "$got" "$code"
     echo "✓ (d) mismatched authority (no IDNA folding) never receives the keyauth"
 fi
 
 if [ "$HAS_HTTP2" = 1 ]; then
     echo "== (e) HTTP/2 h2c :authority parity =="
-    got=$(curl -s --http2-prior-knowledge --resolve a.example.com:"$PORT":127.0.0.1 \
+    got=$(curl -s --noproxy '*' --http2-prior-knowledge --resolve a.example.com:"$PORT":127.0.0.1 \
         "http://a.example.com:$PORT/.well-known/acme-challenge/$TOKEN")
     if [ "$got" != "$KEYAUTH" ]; then
         echo "::error::(e) h2 :authority a.example.com (enabled) wrong body: got '$got'"
@@ -227,7 +238,10 @@ if [ "$HAS_HTTP2" = 1 ]; then
     fi
     echo "✓ (e) h2 :authority enabled authority served exact key authorization"
 
-    got=$(curl -s --http2-prior-knowledge --resolve b.example.com:"$PORT":127.0.0.1 \
+    got=$(curl -s --noproxy '*' --http2-prior-knowledge --resolve b.example.com:"$PORT":127.0.0.1 \
+        "http://b.example.com:$PORT/.well-known/acme-challenge/$TOKEN")
+    code=$(curl -s --noproxy '*' --http2-prior-knowledge --resolve b.example.com:"$PORT":127.0.0.1 \
+        -o /dev/null -w '%{http_code}' \
         "http://b.example.com:$PORT/.well-known/acme-challenge/$TOKEN")
     if [ "$CONTROL" = 1 ]; then
         if [ "$got" != "$KEYAUTH" ]; then
@@ -236,7 +250,7 @@ if [ "$HAS_HTTP2" = 1 ]; then
         fi
         echo "✓ (e) [CONTROL] h2 :authority b now serves keyauth with autocert enabled"
     else
-        assert_no_leak "e" "$got"
+        assert_no_leak "e" "$got" "$code"
         echo "✓ (e) h2c :authority parity: disabled authority never leaks the keyauth"
     fi
 else
