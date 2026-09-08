@@ -1617,8 +1617,12 @@ ngx_http_autocert_postconfig(ngx_conf_t *cf)
          * config and ngx_http_update_location_config() never runs for a
          * challenge request. Location-level directives therefore do not apply
          * to challenge responses -- server_tokens, access_log off, error_page,
-         * and the keepalive decision (keepalive_timeout / keepalive_requests /
-         * keepalive_time) are all taken from server level. Calling
+         * and the keepalive_requests / keepalive_time counter checks that
+         * ngx_http_update_location_config() performs against r->connection
+         * are not evaluated for a challenge request at all (that function
+         * only ever CLEARS r->keepalive; skipping it fails open, so a
+         * challenge response can keep alive a connection a matched
+         * location's keepalive_timeout 0 would have closed). Calling
          * ngx_http_update_location_config() here would not help: there is no
          * matched location to update from. The challenge response is a fixed
          * ~87-byte text/plain body on a well-known URI, so serving it from
@@ -1743,12 +1747,13 @@ ngx_http_autocert_challenge_serve(ngx_http_request_t *r)
      * request mis-parses the leftover as its start line). Mirrors
      * ngx_http_stub_status_module.
      *
-     * Note this discard sets r->discard_body, and
-     * ngx_http_core_find_config_phase() skips its client_max_body_size check
-     * when that flag is set -- so for challenge URIs the configured body-size
-     * cap does not apply. The discard is streaming (bytes are read and thrown
-     * away, never buffered), so the cost of an oversized body is bandwidth,
-     * not memory.
+     * Note the body-size cap does not apply to challenge URIs: this handler
+     * finalizes the request in POST_READ, so ngx_http_core_find_config_phase()
+     * -- which is where client_max_body_size is enforced -- never runs. (For a
+     * body that does not drain synchronously the discard also sets
+     * r->discard_body, which that check honours, but the phase is unreached
+     * either way.) The discard is streaming, so an oversized body costs
+     * bandwidth, not memory.
      */
     rc = ngx_http_discard_request_body(r);
     if (rc != NGX_OK) {
