@@ -1,4 +1,4 @@
-# sync-sha: 41224f8205aedae49a611f6060ecd87ed747ab9706073c8ab0f462dd41a2e97b
+# sync-sha: bbffed3f723e578b3a3fc0f6325bc9d3832060b328c2051ce93a19c8dd5904ef
 name: Build & Test
 
 # Third-party actions pinned to commit SHAs for supply-chain safety.
@@ -86,7 +86,12 @@ jobs:
       - name: Validate scripts and source
         run: |
           bash -n ci/tests/e2e/*.sh ci/fuzz/*.sh ci/tests/unit/*.sh
-          shellcheck ci/tests/e2e/*.sh ci/fuzz/*.sh ci/tests/unit/*.sh \
+          # -x so shellcheck follows `# shellcheck source=` directives into
+          # sourced libraries (ci/tests/unit/lib/slice.sh). Without it every
+          # `source "$VAR"` is an SC1091, which is INFO -- and this invocation
+          # has no -S floor, so INFO is fatal here. ci/linter/lint-sh.sh already
+          # runs `shellcheck -S warning -x`; this keeps the two gates agreeing.
+          shellcheck -x ci/tests/e2e/*.sh ci/fuzz/*.sh ci/tests/unit/*.sh \
             ci/tools/sync-stamp.sh
           # Each stamped .github/ file carries a `# sync-sha:` of its own
           # content, so a `--list` diff against nginx-skeleton-module names

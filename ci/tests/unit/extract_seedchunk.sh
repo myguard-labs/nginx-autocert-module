@@ -34,6 +34,8 @@
 set -euo pipefail
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=ci/tests/unit/lib/slice.sh
+source "$DIR/lib/slice.sh"
 SRC="$DIR/../../../src/ngx_autocert_driver.c"
 OUT="$DIR/generated_seedchunk.inc"
 
@@ -48,13 +50,10 @@ if [ -z "${chunk:-}" ]; then
 	exit 1
 fi
 
-start=$(grep -nE '^ngx_autocert_seed_read_marker\(' "$SRC" | head -1 | cut -d: -f1 || true)
-if [ -z "${start:-}" ]; then
+if ! start=$(slice_find_start "$SRC" "ngx_autocert_seed_read_marker"); then
 	echo "✗ could not locate ngx_autocert_seed_read_marker in $SRC" >&2
 	exit 1
 fi
-# back up over the `static ngx_int_t` return-type line
-start=$((start - 1))
 
 # The slice runs from ngx_autocert_seed_read_marker through the end of
 # ngx_autocert_seed_walk_chunk. They are adjacent in driver.c on purpose: the
@@ -69,10 +68,23 @@ if [ "$loop" -lt "$start" ]; then
 	echo "  (source layout changed; the slice is no longer contiguous)" >&2
 	exit 1
 fi
-# first column-0 closing brace at or after the loop function: its end
-end=$(awk -v s="$loop" 'NR >= s && $0 == "}" { print NR; exit }' "$SRC")
-if [ -z "${end:-}" ]; then
-	echo "✗ could not find the end of ngx_autocert_seed_walk_chunk" >&2
+# first column-0 closing brace at or after the loop function: its end. Use
+# brace-depth counting to find the true function end, not just the first
+# lone } which could be followed by a trailing comment on a reformatted
+# function, and reject a slice whose depth ever goes negative (an unmatched
+# "}" inside a string/char literal or comment truncating the slice silently
+# otherwise) -- see lib/slice.sh for the extraction rule and its documented
+# literal/comment limitation.
+rc=0
+end=$(slice_end_line "$SRC" "$loop" "ngx_autocert_seed_walk_chunk") || rc=$?
+if [ "$rc" -ne 0 ]; then
+	if [ "$rc" -eq 2 ]; then
+		echo "✗ ngx_autocert_seed_walk_chunk(): brace depth went negative in $SRC (unmatched '}' in a string/char literal or comment?)" >&2
+	elif [ "$rc" -eq 4 ]; then
+		echo "✗ ngx_autocert_seed_walk_chunk(): $SRC is missing or unreadable" >&2
+	else
+		echo "✗ could not find the end of ngx_autocert_seed_walk_chunk" >&2
+	fi
 	exit 1
 fi
 
