@@ -1,4 +1,4 @@
-# sync-sha: cdf80e32aa0ea42ac8a8741876bae08a6ab917845d07754c7c39ac94ebd71e55
+# sync-sha: 5e17ff3b295bd5071a6df77df560bac0d9eb15645828b7cbf52a5a8d5c515438
 name: CI Deep
 
 # Exhaustive dynamic analysis — monthly cron, release, and on-demand only,
@@ -253,11 +253,12 @@ jobs:
           # semgrep: isolate via pipx (PEP 668 blocks a bare pip3 install into the
           # system Python on the Ubuntu 24.04 self-hosted runner). Fall back to a
           # user pip install with --break-system-packages if pipx is unavailable.
+          # Version pinned to match ci/linter/install-linters.sh — bump both together.
           if command -v pipx >/dev/null; then
-            pipx install --quiet semgrep
+            pipx install --quiet 'semgrep==1.169.0'
             echo "$HOME/.local/bin" >> "$GITHUB_PATH"
           else
-            pip3 install --quiet --user --break-system-packages semgrep
+            pip3 install --quiet --user --break-system-packages 'semgrep==1.169.0'
             echo "$HOME/.local/bin" >> "$GITHUB_PATH"
           fi
       - name: Configure nginx src tree (clang-tidy headers)
