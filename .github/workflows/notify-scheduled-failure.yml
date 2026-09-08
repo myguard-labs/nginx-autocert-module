@@ -1,0 +1,112 @@
+# sync-sha: 727f3a8072d31ee5ca0ced661362327bdd83db88974dbebb2260fc99f140d1b1
+name: Notify scheduled job failure
+
+# Split out of build-test.yml (PR #285): a job inside a workflow_call member
+# can never hold MORE permission than the caller grants it (ci.yml calls
+# build-test.yml with `permissions: contents: read` only), so `issues: write`
+# on a job living inside build-test.yml made every ci.yml run fail at
+# startup — actionlint does not check this, and it passed locally both
+# times. Moving the notifier to its own workflow_run-triggered workflow keeps
+# build-test.yml's token untouched (still just `contents: read`, for every PR
+# and push job in it) and gives this one job its own `issues: write` with no
+# blast radius on the build workflow.
+#
+# workflow_run instead of a duplicate schedule: trigger: firing on
+# build-test.yml's OWN schedule tick would need this workflow to re-derive
+# build-test.yml's cron and would drift the moment that cron changes: this
+# fires off the actual completion of the run that mattered, whatever
+# triggered it, and the `if:` below narrows to schedule-only.
+#
+# needs.*.result is NOT available under workflow_run (there is no `needs:`
+# graph — this workflow doesn't run those jobs), so per-job results are
+# queried from the Actions API instead, which needs only `actions: read`.
+
+# workflow_run is flagged by zizmor's dangerous-triggers audit because it is
+# commonly paired with checking out and executing the triggering ref's code
+# under elevated permissions (pwn-request). This workflow never checks out
+# any ref and never runs code from the triggering commit -- it only reads
+# github.event.workflow_run.* metadata (id, name, head_sha, event,
+# conclusion) and queries the run's job list over the read-only Actions API.
+on: # zizmor: ignore[dangerous-triggers] no checkout, no execution of triggering-ref code -- see comment above
+  workflow_run:
+    workflows: ["Build & Test"]
+    types: [completed]
+
+concurrency:
+  group: notify-scheduled-failure-${{ github.event.workflow_run.id }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  notify-scheduled-failure:
+    name: Notify scheduled job failure
+    # Only act on a scheduled Build & Test run, and only on genuine failure —
+    # a cancelled run (e.g. superseded by a newer push via build-test.yml's
+    # own concurrency group) is not a rot signal and must not open a tracking
+    # issue. `success`/`skipped`/`cancelled` all fall through here.
+    if: github.event.workflow_run.event == 'schedule' && github.event.workflow_run.conclusion == 'failure'
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read # read the triggering run's per-job results
+      issues: write # open/comment on tracking issue for scheduled failure notification
+    steps:
+      - name: Create or update tracking issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          GH_SERVER: ${{ github.server_url }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+          WORKFLOW_NAME: ${{ github.event.workflow_run.name }}
+          RUN_SHA: ${{ github.event.workflow_run.head_sha }}
+          ISSUE_LABEL: ci-scheduled-failure
+        run: |
+          set -euo pipefail
+
+          ISSUE_TITLE="Scheduled CI job failure"
+          WORKFLOW_RUN_URL="${GH_SERVER}/${GH_REPO}/actions/runs/${RUN_ID}"
+
+          # Per-job results: needs.*.result does not exist under workflow_run
+          # (this workflow never runs validation/resolve-stable/
+          # build-nginx-stable itself), so query the triggering run's jobs
+          # directly. actions: read is sufficient for this endpoint.
+          JOB_RESULTS=$(gh api "repos/${GH_REPO}/actions/runs/${RUN_ID}/jobs" \
+            --jq '[.jobs[] | "\(.name)=\(.conclusion)"] | join(", ")')
+
+          # Ensure the tracking label exists (idempotent; ignore "already
+          # exists" failure) so lookup below is exact-match on a label rather
+          # than GitHub's eventually-consistent, substring-matching search
+          # index -- fuzzy title search can miss a just-created issue
+          # (opening duplicates) or match an unrelated issue that happens to
+          # share words with the title.
+          gh label create "$ISSUE_LABEL" \
+            --description "Auto-filed by the scheduled CI failure notifier" \
+            --color ededed 2>/dev/null || true
+
+          BODY=$(cat <<EOF
+          Scheduled workflow **${WORKFLOW_NAME}** failed.
+
+          - Trigger: schedule
+          - Commit: ${RUN_SHA}
+          - Job results: ${JOB_RESULTS}
+          - Run: ${WORKFLOW_RUN_URL}
+          EOF
+          )
+
+          # Exact-match the title among open issues carrying the tracking
+          # label, rather than trusting `gh issue list --search`.
+          existing=$(gh issue list --label "$ISSUE_LABEL" --state open \
+            --json number,title --jq \
+            ".[] | select(.title == \"$ISSUE_TITLE\") | .number" | head -1)
+
+          if [ -n "$existing" ]; then
+            # Comment on the existing issue instead of creating a new one
+            gh issue comment "$existing" --body "$BODY"
+          else
+            # Create a new issue
+            gh issue create \
+              --title "$ISSUE_TITLE" \
+              --label "$ISSUE_LABEL" \
+              --body "$BODY"
+          fi
