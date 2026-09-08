@@ -1,4 +1,4 @@
-# sync-sha: bbb3230efdbb93143b1a459cca09ae46818c99f3cd183c7a607c202b88314cba
+# sync-sha: af240fd307deb4e60fc3ac30e9e4403c07118b05842ca82af2cb791306d6f288
 name: CI Deep
 
 # Exhaustive dynamic analysis — monthly cron, release, and on-demand only,
@@ -346,6 +346,13 @@ jobs:
     runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || fromJSON('["self-hosted","builder02","lxc"]') }}
     timeout-minutes: 30
     continue-on-error: true
+    env:
+      # coverage.sh's bounded server workload binds a UNIX socket
+      # (unix:$prefix/coverage.sock), never a TCP port, so it cannot collide
+      # with another job's port band -- but lint-ci-ports.sh still treats
+      # coverage.sh as a BINDER and requires every binder to name a band, so
+      # this job claims one exclusively for the record.
+      TEST_BASE_PORT: "19900"
     steps:
       - name: Checkout module
         uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
