@@ -184,6 +184,11 @@ policy_ 1 action-inline-port-env-prefix ports
 # A single-line `run:` scalar, and two assignments sharing one line. Both were
 # invisible while this check scraped the re-serialized node body.
 policy_ 1 action-inline-port-single-line-run ports
+
+# A quoted value claims the same band; a longer name that merely starts with
+# the token (AC_TEST_PORTABLE) is a different variable and claims nothing.
+policy_msg_ action-inline-port-quoted-value ports \
+    'both claim AC_TEST_PORT 18501'
 policy_ 0 action-inline-port-keyword-lead ports
 
 # Direct master `push:` and `schedule:` are deliberate member entry points;

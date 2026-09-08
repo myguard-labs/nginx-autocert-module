@@ -406,6 +406,7 @@ def _order_finding(where: str, node: dict) -> str | None:
 # rather than approximate.
 _PREFIX_WORD_RE = re.compile(r"(?:export|env|sudo|time|command|nice)[ \t]+")
 _ASSIGN_RE = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)=(\S*)[ \t]*")
+_PORT_NAME_RE = re.compile(r"AC_TEST_PORT[0-9]*")
 
 
 def _inline_ports(run: str) -> list[str]:
@@ -430,7 +431,13 @@ def _inline_ports(run: str) -> list[str]:
             if not assign:
                 break
             name, value = assign.group(1), assign.group(2)
-            if name.startswith("AC_TEST_PORT") and value.isdigit():
+            # Quotes around the value are idiomatic and mean the same band.
+            # A non-literal value ($PORT) has nothing to register, and a name
+            # that merely starts with the token (AC_TEST_PORTABLE) is a
+            # different variable, so the name match is exact plus an optional
+            # numeric suffix.
+            value = value.strip("\"'")
+            if _PORT_NAME_RE.fullmatch(name) and value.isdigit():
                 out.append(value)
             pos = assign.end()
     return out
