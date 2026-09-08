@@ -11,22 +11,35 @@
 # `} /* foo */`) or the anchor drifts. See prior extract_*.sh history for the
 # measured failures this replaced.
 #
-# LIMITATION (documented, not solved here): brace counting is lexical, not a
-# real C tokenizer. A `{` or `}` inside a string literal, a character
-# constant, or a comment is counted like real code. This is a known,
-# accepted gap -- do NOT attempt full lexing in this helper.
+# Brace counting is lexical, not a real C tokenizer, but braces inside a
+# /* comment */, a "string literal" or a character constant are stripped
+# from a per-line copy before counting, so those three shapes no longer
+# skew depth. What remains unhandled, because the strip is per-line:
 #
-# The depth<0 guard below converts ONE shape of stray-`}` silent truncation
-# into a loud, non-zero-exit error: any point where cumulative closers
-# outnumber cumulative openers so far. It does NOT catch every stray `}`:
-# an odd number of extra closers that lands the running depth exactly back
-# on zero (e.g. a literal containing exactly one unmatched `}`, such as
-# `"\"}"`) still reads as "the function just closed" and truncates silently
-# at exit 0 -- full lexing would be required to catch that shape, and this
-# helper deliberately does not attempt it. An extra unmatched `{` in a
-# literal or comment overruns into the next function instead; that is
-# usually caught by the "expected symbol missing" / structural checks
-# callers layer on top, not by this helper.
+#   - a MULTI-LINE comment body. Only a /* ... */ that closes on the same
+#     line is removed, so an apostrophe in a continuation line ("the
+#     caller's frame") is not stripped and can open a bogus character
+#     constant that swallows to the next apostrophe. This bites only when
+#     such a line ALSO carries an unbalanced brace. Measured on this tree:
+#     661 continuation lines carry an odd apostrophe count, 2 of those
+#     carry a brace, and both are the balanced "http{}" so they net zero.
+#     Every one of the 339 function definitions in src/ slices correctly.
+#     Re-run the sweep in test_h's spirit if that ever changes.
+#   - a // comment and a multi-line string continuation (this tree has
+#     neither), and any construct needing real parsing.
+#
+# Do NOT attempt full lexing in this helper.
+#
+# Strip the three together or not at all. Stripping only comments is worse
+# than stripping nothing: in src/ngx_autocert_json.c a spurious `{` from a
+# character constant was cancelled by one inside a comment, and removing
+# just the comment half truncated the slice by 42 lines at exit 0.
+#
+# The depth<0 guard below remains, as a backstop for a stray `}` that the
+# strip cannot reach: any point where cumulative closers outnumber
+# cumulative openers so far exits non-zero rather than truncating. It does
+# not catch a stray closer that lands depth exactly back on zero; that
+# would need real parsing, which this helper deliberately does not do.
 #
 # slice_function SRC START_LINE ENTER_NAME
 #   Prints the sliced function body (from START_LINE through its closing
@@ -51,10 +64,60 @@ slice_function() {
             print
             if ($0 ~ ("^" name "\\(")) { entered = 1 }
             if (entered) {
-                n = gsub(/{/, "{"); depth += n
-                n = gsub(/}/, "}"); depth -= n
+                # Braces that are not code must not be counted: a comment
+                # ("target_fn(void) /* {} */") would otherwise open and
+                # close on the signature line and read as a one-line body,
+                # and a character constant (case OPEN_BRACE_CHAR:) or a
+                # string literal skews depth outright. Strip all three from
+                # a copy and count on that, never on $0 itself.
+                #
+                # Stripping only comments is WORSE than stripping nothing:
+                # in src/ngx_autocert_json.c the spurious "{" from a
+                # character constant was cancelled by a spurious "{" inside
+                # a comment, and removing just the comment half exposed the
+                # imbalance and truncated the slice by 42 lines at exit 0.
+                # Strip the set together or not at all.
+                q = sprintf("%c", 39)
+                code = $0
+                gsub(/\/\*[^*]*\*+([^\/*][^*]*\*+)*\//, " ", code)
+                # Character constants BEFORE string literals: a line may
+                # hold a character constant whose value is a double quote
+                # (case DQUOTE_CHAR:), and stripping strings first would
+                # consume from that quote onward and mangle the line.
+                gsub(q "(\\\\.|[^" q "\\\\])*" q, " ", code)
+                gsub(/"(\\.|[^"\\])*"/, " ", code)
+                # Track the parameter list. A brace can only open the BODY
+                # once the closing ")" of the signature; before that, any
+                # balanced "{...}" is a default argument or an initialiser,
+                # not a one-line body. Without this, a wrapped parameter
+                # list such as "struct s v = { 0 })" ends the slice at the
+                # signature and returns a truncated stub at exit 0.
+                n_lp = gsub(/\(/, "(", code)
+                n_rp = gsub(/\)/, ")", code)
+                # sig_was_closed is the state BEFORE this line. A line that
+                # both closes the parameter list and carries balanced braces
+                # ("struct s v = { 0 })") must not have those braces read as
+                # a body, so the same-line-body test below uses the prior
+                # state, not the state this line just produced.
+                sig_was_closed = sig_closed
+                if (n_lp > 0) { saw_lp = 1 }
+                paren += n_lp - n_rp
+                if (saw_lp && paren <= 0) { sig_closed = 1 }
+                pre_depth = depth
+                n_open = gsub(/{/, "{", code); depth += n_open
+                n = gsub(/}/, "}", code); depth -= n
                 if (depth < 0) { negative = 1; exit 2 }
-                if (opened && depth == 0) { closed = 1; exit }
+                # A one-line body ("{ return 0; }") opens and closes on the
+                # same line: depth is already back down to 0 by the time we
+                # reach this check, so a lone (opened && depth == 0) test
+                # (which only sees opened from a PRIOR line) never fires for
+                # it. (pre_depth == 0 && n_open > 0) catches "this line
+                # itself went positive", so the same-line close is not
+                # missed.
+                same_line = (sig_was_closed && pre_depth == 0 && n_open > 0)
+                if ((opened || same_line) && depth == 0) {
+                    closed = 1; exit
+                }
                 if (depth > 0) { opened = 1 }
             }
         }
@@ -85,10 +148,57 @@ slice_end_line() {
         NR >= s {
             if ($0 ~ ("^" name "\\(")) { entered = 1 }
             if (entered) {
-                n = gsub(/{/, "{"); depth += n
-                n = gsub(/}/, "}"); depth -= n
+                # Braces that are not code must not be counted: a comment
+                # ("target_fn(void) /* {} */") would otherwise open and
+                # close on the signature line and read as a one-line body,
+                # and a character constant (case OPEN_BRACE_CHAR:) or a
+                # string literal skews depth outright. Strip all three from
+                # a copy and count on that, never on $0 itself.
+                #
+                # Stripping only comments is WORSE than stripping nothing:
+                # in src/ngx_autocert_json.c the spurious "{" from a
+                # character constant was cancelled by a spurious "{" inside
+                # a comment, and removing just the comment half exposed the
+                # imbalance and truncated the slice by 42 lines at exit 0.
+                # Strip the set together or not at all.
+                q = sprintf("%c", 39)
+                code = $0
+                gsub(/\/\*[^*]*\*+([^\/*][^*]*\*+)*\//, " ", code)
+                # Character constants BEFORE string literals: a line may
+                # hold a character constant whose value is a double quote
+                # (case DQUOTE_CHAR:), and stripping strings first would
+                # consume from that quote onward and mangle the line.
+                gsub(q "(\\\\.|[^" q "\\\\])*" q, " ", code)
+                gsub(/"(\\.|[^"\\])*"/, " ", code)
+                # Track the parameter list. A brace can only open the BODY
+                # once the closing ")" of the signature; before that, any
+                # balanced "{...}" is a default argument or an initialiser,
+                # not a one-line body. Without this, a wrapped parameter
+                # list such as "struct s v = { 0 })" ends the slice at the
+                # signature and returns a truncated stub at exit 0.
+                n_lp = gsub(/\(/, "(", code)
+                n_rp = gsub(/\)/, ")", code)
+                # sig_was_closed is the state BEFORE this line. A line that
+                # both closes the parameter list and carries balanced braces
+                # ("struct s v = { 0 })") must not have those braces read as
+                # a body, so the same-line-body test below uses the prior
+                # state, not the state this line just produced.
+                sig_was_closed = sig_closed
+                if (n_lp > 0) { saw_lp = 1 }
+                paren += n_lp - n_rp
+                if (saw_lp && paren <= 0) { sig_closed = 1 }
+                pre_depth = depth
+                n_open = gsub(/{/, "{", code); depth += n_open
+                n = gsub(/}/, "}", code); depth -= n
                 if (depth < 0) { negative = 1; exit 2 }
-                if (opened && depth == 0) { print NR; closed = 1; exit }
+                # See slice_function matching comment above: a one-line body
+                # opens and closes on the same line, so opened (only ever
+                # set on a PRIOR line) misses it -- pre_depth==0 && n_open>0
+                # detects "this line itself went positive".
+                same_line = (sig_was_closed && pre_depth == 0 && n_open > 0)
+                if ((opened || same_line) && depth == 0) {
+                    print NR; closed = 1; exit
+                }
                 if (depth > 0) { opened = 1 }
             }
         }

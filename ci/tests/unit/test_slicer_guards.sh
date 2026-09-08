@@ -24,10 +24,15 @@
 #       slice_function itself).
 #   (f) slice_end_line on the same no-anchor source exits 1 via its own
 #       `if (!closed) exit 1` guard.
+#   (g) a one-line function body ("{ return 0; }" on the signature's next
+#       line) slices correctly instead of running to EOF: `{` and `}` both
+#       land on the same line as the *first* positive depth, so an `opened`
+#       flag set only AFTER the depth==0 check never sees depth==0 while
+#       opened is true on that line -- MINOR from PR #263 round 3.
 #
 # Each assertion is proven to be a REAL negative control, not a vacuous one:
 # this file also runs itself with the corresponding guard commented out via
-# sed, and requires that variant to fail. See run_with_guard_removed().
+# sed, and requires that variant to fail. See run_variant().
 
 set -euo pipefail
 
@@ -84,9 +89,51 @@ target_fn(void)
 }
 EOF
 
+	# A stray closer in real CODE, reached before the body opens, must
+	# still drive depth negative and exit 2 -- that backstop is unchanged
+	# and is the one stray-brace shape the literal strip cannot mask.
+	cat >"$dir/fixture_stray_code.c" <<'EOF'
+static ngx_int_t
+target_fn(void)
+}
+{
+    return 0;
+}
+EOF
+
 	cat >"$dir/fixture_no_anchor.c" <<'EOF'
 static ngx_int_t
 some_other_function(void)
+{
+    return 0;
+}
+EOF
+
+	cat >"$dir/fixture_one_line_body.c" <<'EOF'
+static ngx_int_t
+target_fn(void)
+{ return 0; }
+EOF
+
+	# A wrapped parameter list carrying a balanced initialiser closes the
+	# signature and the braces on the SAME line. Those braces are not a
+	# body either -- reading them as one truncates the slice at exit 0.
+	# Braces in a comment on its OWN line, after the signature has closed:
+	# only the comment strip defends this one (the parameter-list gate has
+	# already opened by then).
+	cat >"$dir/fixture_comment_own_line.c" <<'EOF'
+static ngx_int_t
+target_fn(void)
+    /* comment with { } braces */
+{
+    return 0;
+}
+EOF
+
+	cat >"$dir/fixture_param_braces.c" <<'EOF'
+static ngx_int_t
+target_fn(ngx_int_t a,
+    struct s v = { 0 })
 {
     return 0;
 }
@@ -128,8 +175,17 @@ test_c() {
 	source "$SRC_LIB"
 	rc=0
 	body=$(slice_function "$TMP/fixture_stray_close.c" 1 target_fn) || rc=$?
-	[ "$rc" -eq 2 ] || fail "(c) expected rc=2 for a stray '}' driving depth negative, got rc=$rc"
-	pass "(c) stray '}' in a literal: rc=2 as expected"
+	# Braces inside a string literal are stripped before counting, so this
+	# no longer drives depth negative -- the slice is simply CORRECT.
+	[ "$rc" -eq 0 ] || fail "(c) expected rc=0 for braces inside a string literal, got rc=$rc"
+	got=$(printf '%s\n' "$body" | wc -l)
+	[ "$got" -eq 9 ] \
+		|| fail "(c) expected 9 sliced lines through the real closer, got $got"
+	rc=0
+	slice_function "$TMP/fixture_stray_code.c" 1 target_fn >/dev/null || rc=$?
+	[ "$rc" -eq 2 ] \
+		|| fail "(c) stray '}' in real code must exit 2 (depth<0 guard), got rc=$rc"
+	pass "(c) braces in a literal ignored; a stray closer in code still exits 2"
 }
 
 # --- (d) anchor never matches: exit 1 (slice_find_start) ----------------
@@ -169,6 +225,73 @@ test_f() {
 	pass "(f) slice_end_line on a no-anchor source: rc=1 as expected"
 }
 
+# --- (g) one-line function body: `{ ... }` on one line slices correctly -
+
+test_g() {
+	# shellcheck source=ci/tests/unit/lib/slice.sh
+	source "$SRC_LIB"
+	rc=0
+	body=$(slice_function "$TMP/fixture_one_line_body.c" 1 target_fn) || rc=$?
+	[ "$rc" -eq 0 ] || fail "(g) slice_function rc=$rc, expected 0 for a one-line body"
+	got=$(printf '%s\n' "$body" | wc -l)
+	[ "$got" -eq 3 ] || fail "(g) expected 3 sliced lines (through the one-line body), got $got"
+	printf '%s\n' "$body" | grep -qE '^\{ return 0; \}$' \
+		|| fail "(g) sliced body does not include the one-line open+close brace line"
+	end=0
+	got_end=$(slice_end_line "$TMP/fixture_one_line_body.c" 1 target_fn) || end=$?
+	[ "$end" -eq 0 ] || fail "(g) slice_end_line rc=$end, expected 0 for a one-line body"
+	[ "$got_end" -eq 3 ] || fail "(g) slice_end_line returned $got_end, expected 3"
+
+	rc=0
+	body=$(slice_function "$TMP/fixture_param_braces.c" 1 target_fn) || rc=$?
+	[ "$rc" -eq 0 ] || fail "(g) param-brace fixture: slice_function rc=$rc, expected 0"
+	got=$(printf '%s\n' "$body" | wc -l)
+	[ "$got" -eq 6 ] \
+		|| fail "(g) param-brace fixture: expected 6 sliced lines through the real body, got $got (slice truncated at the parameter list)"
+	rc=0
+	body=$(slice_function "$TMP/fixture_comment_own_line.c" 1 target_fn) || rc=$?
+	[ "$rc" -eq 0 ] || fail "(g) own-line-comment fixture: slice_function rc=$rc, expected 0"
+	got=$(printf '%s\n' "$body" | wc -l)
+	[ "$got" -eq 6 ] \
+		|| fail "(g) own-line-comment fixture: expected 6 sliced lines through the real body, got $got (slice truncated at the comment)"
+	pass "(g) one-line body + comment and parameter braces: correct slices"
+}
+
+# --- (h) the in-tree proof: real source, not a synthetic fixture --------
+#
+# src/ngx_autocert_json.c is where the literal/comment miscount actually
+# bit. json_value holds `case DQUOTE:` and `case OPEN_BRACE:` character
+# constants; json_object holds a `/* consume { */` comment. Counting any
+# of those as code moves the end line, so pin both against the real file.
+
+test_h() {
+	# shellcheck source=ci/tests/unit/lib/slice.sh
+	source "$SRC_LIB"
+	local src="$DIR/../../../src/ngx_autocert_json.c"
+	[ -r "$src" ] || fail "(h) $src is not readable"
+
+	# Derive the expected end from the file rather than hardcoding a line
+	# number: the first column-0 "}" at or after the signature IS the
+	# closer for these two (neither has a nested column-0 brace). That
+	# keeps the test honest when json.c is edited, while still being an
+	# independent oracle -- it does not use the slicer to check itself.
+	local fn sig want got
+	for fn in ngx_autocert_json_value ngx_autocert_json_object; do
+		sig=$(grep -n "^$fn(" "$src" | head -1 | cut -d: -f1)
+		[ -n "$sig" ] || fail "(h) no signature found for $fn in $src"
+		want=$(awk -v st="$sig" 'NR > st && /^}/ { print NR; exit }' "$src")
+		[ -n "$want" ] || fail "(h) no column-0 closer found after $fn"
+
+		rc=0
+		got=$(slice_end_line "$src" 1 "$fn") || rc=$?
+		[ "$rc" -eq 0 ] || fail "(h) slice_end_line($fn) rc=$rc, expected 0"
+		[ "$got" -eq "$want" ] \
+			|| fail "(h) $fn ends at $want (first column-0 closer after line $sig), slicer said $got"
+	done
+
+	pass "(h) real src/ngx_autocert_json.c: both function ends exact"
+}
+
 # --- prove each control is real: remove the guard, require red ----------
 #
 # A control that was never observed red proves nothing (test-evidence.md).
@@ -177,23 +300,47 @@ test_f() {
 # copy to fail its own assertion.
 
 run_variant() {
-	local label="$1" sed_expr="$2" test_fn="$3"
+	local label="$1" sed_expr="$2" test_fn="$3" rc=0
 	local variant_lib="$TMP/slice_${label}.sh"
 	sed "$sed_expr" "$SRC_LIB" >"$variant_lib"
 
+	# A sed expression that no longer matches anything in the real lib
+	# (e.g. a guard line got reworded) silently yields an unmutated copy,
+	# and the "expecting failure" check below would then pass for the
+	# wrong reason -- the assertion never actually ran against a mutant.
+	# Require the variant to differ from the real lib before trusting it.
+	if cmp -s "$SRC_LIB" "$variant_lib"; then
+		fail "MUTATION CONTROL FAILED: $label — sed expression matched nothing; variant is byte-identical to $SRC_LIB"
+	fi
+
 	# Run test_fn in a FRESH bash process against the MUTATED lib (exported
 	# via env, not sourced by re-parsing this file), expecting failure.
-	if MUTATED_SRC_LIB="$variant_lib" bash "$0" __run_single__ "$test_fn"; then
+	# Require exit 1 specifically -- the status `fail` produces. Any other
+	# non-zero (127 from a typo'd $test_fn, 2 from a broken __run_single__)
+	# means the harness broke, NOT that the assertion went red, and must not
+	# be credited as a passing control.
+	rc=0
+	MUTATED_SRC_LIB="$variant_lib" bash "$0" __run_single__ "$test_fn" || rc=$?
+	if [ "$rc" -eq 0 ]; then
 		fail "MUTATION CONTROL FAILED: $label — removing the guard did NOT turn $test_fn() red (still exit 0)"
-	else
-		pass "mutation control: removing '$label' guard turns $test_fn() red, as required"
+	elif [ "$rc" -ne 1 ]; then
+		fail "MUTATION CONTROL FAILED: $label — $test_fn() child exited $rc, expected 1 (assertion red); the harness is broken"
 	fi
+	pass "mutation control: removing '$label' guard turns $test_fn() red, as required"
 }
 
 if [ "${1:-}" = "__run_single__" ]; then
 	# Re-invoked by run_variant: point SRC_LIB at the mutated copy before
 	# running the single named assertion function.
+	# Exit 2, NOT the 1 that `:?` would produce -- run_variant credits a
+	# child exit of 1 as "the assertion went red", so harness breakage must
+	# use a distinct status or it re-opens the false-pass hole this file
+	# exists to close.
+	[ -n "${MUTATED_SRC_LIB:-}" ] \
+		|| { echo "__run_single__ requires MUTATED_SRC_LIB set by run_variant" >&2; exit 2; }
 	SRC_LIB="$MUTATED_SRC_LIB"
+	declare -F "$2" >/dev/null \
+		|| { echo "__run_single__: no such test function: $2" >&2; exit 2; }
 	TMP="$(mktemp -d)"
 	trap 'rm -rf "$TMP"' EXIT
 	make_fixtures "$TMP"
@@ -209,6 +356,8 @@ test_c
 test_d
 test_e
 test_f
+test_g
+test_h
 
 # (c)'s guard is the `if (depth < 0) { exit 2 }` line -- remove it and rerun
 # test_c, which must now fail (rc will be 0 instead of 2: the stray '}'
@@ -233,5 +382,21 @@ run_variant "major1_end_anchor_guard" \
 	's/if (!closed) exit 1/if (opened \&\& depth != 0) exit 1/' test_e
 run_variant "major1_end_anchor_guard" \
 	's/if (!closed) exit 1/if (opened \&\& depth != 0) exit 1/' test_f
+# (g)'s guard is the `pre_depth == 0 && n_open > 0` disjunct that lets a line
+# which both opens and closes the body terminate the slice. Remove it and the
+# one-line body is never recognised as closed, so test_g must go red.
+run_variant "one_line_body_disjunct" \
+	's/same_line = (sig_was_closed \&\& pre_depth == 0 \&\& n_open > 0)/same_line = 0/g' test_g
+# The comment strip and the parameter-list gate each defend one truncation
+# shape in test_g's fixtures; remove either and test_g must go red.
+run_variant "comment_strip" \
+	'/, " ", code)$/d' test_g
+run_variant "param_list_gate" \
+	's/sig_was_closed = sig_closed/sig_was_closed = 1/g' test_g
+# The char-constant strip is what the real src/ngx_autocert_json.c needs:
+# remove it and json_value's end moves 156 -> 227 (the cancelling-error
+# shape that made a comment-only strip worse than none).
+run_variant "char_constant_strip" \
+	'/gsub(q "/d' test_h
 
 echo "✓ all slicer guard assertions passed, including mutation controls"
