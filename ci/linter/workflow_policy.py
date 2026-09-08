@@ -378,62 +378,67 @@ def _order_finding(where: str, node: dict) -> str | None:
 # Inline shell-assigned bands: `AC_TEST_PORT=18185 \` / `AC_TEST_PORT2=18191 \`
 # ahead of a script invocation. These never go through a YAML `env:` mapping,
 # so TEST_BASE_PORT's regex cannot see them -- but they claim a port exactly
-# like a declared band does, and the one action that actually binds ports
-# this way (build-module's e2e steps) must enter the uniqueness set or the
-# whole check is vacuous for it.
+# like a declared band does, and the one action that actually binds ports this
+# way (build-module's e2e steps) must enter the uniqueness set or the whole
+# check is vacuous for it.
 #
-# NOT anchored to line-start or to a preceding newline: `_body()` re-dumps the
-# node with `yaml.safe_dump`, and the scalar style that dump picks depends on
-# the `run:` text's content, which also decides whether the assignment even
-# lands at the start of a text line.
+# Matched against each step's RAW `run:` text from `_steps()`, never against
+# `_body()`. `_body()` re-serializes the node with `yaml.safe_dump`, which
+# picks among four scalar styles depending on the text's content: a bare
+# single-line scalar, a single-quoted block, an escaped double-quoted block
+# with newlines flattened to literal backslash-n, and a literal block. The
+# shell text therefore lands at column 0, after `run: `, after `run: '`, or
+# mid-string with no real newline anywhere -- so no line anchor can hold, and
+# an unanchored match silently absorbs comments, diagnostics and longer
+# identifiers as phantom claimants. The raw text has none of that ambiguity:
+# `(?m)^` genuinely means start of line.
 #
-# A block containing a shell comment, `${{ }}` expression, backslash
-# continuation, or other special YAML character forces an escaped
-# DOUBLE-quoted scalar, with the original newlines flattened to literal
-# backslash-n text -- that shape needs the `\\n` branch, since there is no
-# real newline to anchor `^` on.
-#
-# A PLAIN multi-line block with none of those (the common case, e.g. a bare
-# `run: |` block) dumps as a SINGLE-quoted scalar, and PyYAML opens it as
-# `run: 'export AC_TEST_PORT=...`  -- the assignment sits right after the
-# opening quote, MID-LINE, not at column 0, so neither `(?m)^` nor a
-# preceding real `\n` would match it either. No LINE anchor works across
-# every scalar style safe_dump can choose.
-#
-# A STATEMENT boundary does, and one rule covers every over-match shape. A
-# shell assignment is only an assignment at the start of a statement, so
-# requiring one rejects all of these, each of which occurs in ordinary
-# authoring and each of which an unanchored match folds into the uniqueness
-# set as a phantom second claimant -- a false collision that reddens a correct
-# tree:
-#
-#   SAVED_AC_TEST_PORT=18500          <- longer identifier ending in the name
-#   # AC_TEST_PORT=18500              <- commented-out old band
-#   echo "AC_TEST_PORT=18500 in use"  <- diagnostic, claims nothing
-#   msg="AC_TEST_PORT=18500 in use"   <- ditto, no filler word to hide behind
-#
-# A commented-out band sitting above the live one is the likeliest in practice:
-# exactly what a developer leaves behind when changing a port.
-#
-# The openers are the real ones a `run:` block uses -- `;`, `&&`/`||` (via the
-# bare `&`/`|`), a subshell or group `(`/`{`, a backtick, a real or escaped
-# newline -- plus the keywords `then`/`do`/`else`, and `env` alongside `export`
-# as a permitted prefix word. `env VAR=val cmd` is idiomatic for setting a port
-# for one invocation and MUST be seen; missing it hands back the false negative
-# this check exists to prevent.
-#
-# The single quote is admitted only as the DUMP PREFIX `run: '`, not as a bare
-# quote character. That is the one quote form `_body()` actually emits (a plain
-# block dumps single-quoted, opening as `run: 'export AC_TEST_PORT=...`), and
-# scoping it this way is what keeps `msg="AC_TEST_PORT=..."` out: a bare quote
-# in the class would admit any string whose first word is the token.
-_STMT_OPEN = r"(?:^|run:[ \t]*'|[;&|({`]|\\n|\n|(?:^|[ \t;])(?:then|do|else)[ \t])"
-_STMT_LEAD = _STMT_OPEN + r"[ \t]*(?:(?:export|env)[ \t]+)*"
-INLINE_PORT_RE = re.compile(_STMT_LEAD + r"(AC_TEST_PORT[0-9]*)=(\d+)\b")
+# What this deliberately does NOT do is tokenize the shell. A port mentioned
+# inside a string that begins its own line (`msg="AC_TEST_PORT=1 in use"` is
+# rejected by the leading-word rule, but a contrived line could still slip
+# through) is an accepted limitation, not a defect to chase with a wider
+# pattern -- correctness here needs a real parser, and the check is a
+# uniqueness guard, not a shell linter.
+# One line may set several bands: `VAR=1 VAR2=2 cmd` claims both. A single
+# `findall` cannot report them, because matches may not overlap and the first
+# one consumes the prefix the second needs -- so the prefix is walked
+# iteratively instead, which is also what makes the leading-word rule exact
+# rather than approximate.
+_PREFIX_WORD_RE = re.compile(r"(?:export|env|sudo|time|command|nice)[ \t]+")
+_ASSIGN_RE = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)=(\S*)[ \t]*")
+
+
+def _inline_ports(run: str) -> list[str]:
+    """Ports claimed by a shell assignment at the head of a line in `run`.
+
+    Only the assignment prefix of each line is walked: leading whitespace,
+    any command prefix words, then a run of `NAME=VALUE` pairs. The walk stops
+    at the first token that is neither, so a port named anywhere else on the
+    line -- inside a diagnostic string, a comment, or an argument -- is not a
+    claim and is not counted. That is the whole rule; it needs no anchoring
+    heuristics because `run` is the RAW step text, not a re-serialized dump.
+    """
+    out: list[str] = []
+    for line in run.splitlines():
+        pos = len(line) - len(line.lstrip(" \t"))
+        while True:
+            word = _PREFIX_WORD_RE.match(line, pos)
+            if word:
+                pos = word.end()
+                continue
+            assign = _ASSIGN_RE.match(line, pos)
+            if not assign:
+                break
+            name, value = assign.group(1), assign.group(2)
+            if name.startswith("AC_TEST_PORT") and value.isdigit():
+                out.append(value)
+            pos = assign.end()
+    return out
 
 
 def _check_port_node(
     where: str,
+    node: dict,
     body: str,
     bands: dict[str, str],
     errors: list[str],
@@ -450,7 +455,9 @@ def _check_port_node(
     starts_runtime = RUNTIME_DRIVER in body
     binds_band = BINDER_RE.search(body) is not None
 
-    inline_ports = [m[1] for m in INLINE_PORT_RE.findall(body)]
+    # Per raw step text, so a port on ANY line of ANY step is seen, including
+    # a single-line `run:` and a second assignment sharing one line.
+    inline_ports = [port for run in _steps(node) for port in _inline_ports(run)]
     # Two steps in the SAME node (job or action) can independently claim the
     # same port -- likelier now that one action can carry several inline
     # ports across sibling steps. `where` names the whole node, so a
@@ -536,7 +543,7 @@ def check_ports() -> int:
             if order:
                 errors.append(order)
 
-            _check_port_node(where, _body(node), bands, errors, "ALL workflows")
+            _check_port_node(where, node, _body(node), bands, errors, "ALL workflows")
 
     for path in actions():
         doc = load(path)
@@ -565,7 +572,9 @@ def check_ports() -> int:
         if order:
             errors.append(order)
 
-        _check_port_node(where, _body(doc), bands, errors, "ALL workflows and actions")
+        _check_port_node(
+            where, runs, _body(doc), bands, errors, "ALL workflows and actions"
+        )
 
     return report(
         "lint-ci-ports",

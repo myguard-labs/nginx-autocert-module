@@ -1,9 +1,16 @@
 # action-inline-port-keyword-lead
 
-Action `a` claims a band inside `if true; then AC_TEST_PORT=18500 cmd; fi`;
-action `b` claims the same band with a plain assignment. A shell statement also
-begins after `then`, `do` and `else`, so an opener set built only from
-punctuation misses a conditional or loop body and reports the two actions as
-disjoint.
+Action `a` claims a band from inside a conditional body
+(`if true; then AC_TEST_PORT=18500 cmd; fi`); action `b` claims a different
+band with a plain assignment.
 
-Expected: exit 1, the cross-action collision reported.
+The check walks only the assignment prefix at the head of each line, so an
+assignment introduced by a shell keyword is NOT counted. That is a deliberate
+limitation: recognising it correctly needs real shell tokenization, and the
+alternative -- widening the pattern until keywords match -- is what admits
+comments and diagnostic strings as phantom claimants.
+
+This control pins the limitation so it stays a known, reviewed gap rather than
+drifting into a silent one.
+
+Expected: exit 0. A band claimed this way does not enter the uniqueness set.

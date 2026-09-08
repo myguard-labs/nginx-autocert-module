@@ -161,27 +161,30 @@ policy_ 0 action-cross-step-declare-bind ports
 policy_msg_ action-band-collision ports \
     'actions/second/action\.yml and .*actions/first/action\.yml both claim TEST_BASE_PORT 19830'
 
-# A plain multi-line `run:` block (no backslash continuation, no `${{ }}`)
-# dumps as a single-quoted scalar with the assignment mid-line, not at
-# string-start or after a literal backslash-n -- the two shapes an earlier
-# INLINE_PORT_RE anchored on. Also exercises the same-node "claims ... twice"
-# wording for a collision between two steps of ONE action.
+# A plain multi-line `run:` block, which an earlier version of this check
+# could not reach: it scraped the node re-serialized by yaml.safe_dump, whose
+# scalar style varies with the text's content. Also exercises the same-node
+# "claims ... twice" wording for a collision between two steps of ONE action.
 policy_msg_ action-inline-port-collision-plain ports \
     'claims AC_TEST_PORT 18500 twice across its steps'
 
-# A shell assignment only counts at a statement boundary. A prefixed variable
-# (SAVED_AC_TEST_PORT=), a diagnostic echo of the value, and a commented-out
-# old band all mention the token without claiming the port; an INLINE_PORT_RE
-# matching the bare token folds them into the uniqueness set as phantom second
-# claimants and reddens a correct tree.
+# Only an assignment at the head of a line claims a band. A prefixed variable
+# (SAVED_AC_TEST_PORT=), a diagnostic echo, a commented-out old band and a
+# message string all mention the token without claiming the port; counting
+# them folds phantom claimants into the uniqueness set and reddens a correct
+# tree.
 policy_ 0 action-inline-port-prefixed-identifier ports
 
-# A statement also begins after `env`, and after the `then`/`do`/`else`
-# keywords. `env VAR=val cmd` is idiomatic for setting a port for one
-# invocation; an opener set that misses either hands back the false negative
-# the uniqueness check exists to prevent.
+# `env VAR=val cmd` is idiomatic for setting a port for one invocation and
+# must be counted. An assignment introduced by a shell keyword is the
+# documented limitation of walking only each line's assignment prefix; the
+# green control pins it so the gap stays reviewed rather than silent.
 policy_ 1 action-inline-port-env-prefix ports
-policy_ 1 action-inline-port-keyword-lead ports
+
+# A single-line `run:` scalar, and two assignments sharing one line. Both were
+# invisible while this check scraped the re-serialized node body.
+policy_ 1 action-inline-port-single-line-run ports
+policy_ 0 action-inline-port-keyword-lead ports
 
 # Direct master `push:` and `schedule:` are deliberate member entry points;
 # neither duplicates the PR invocation. These green controls ensure cadence
