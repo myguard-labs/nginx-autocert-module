@@ -11,30 +11,14 @@
 # surface: it gates whether the handler runs at all, not which token it looks
 # up.
 #
-# IMPORTANT established fact (verified by hand while writing this script,
-# reading nginx's ngx_http_core_content_phase()): the module registers itself
-# as a plain NGX_HTTP_CONTENT_PHASE array handler, and nginx's content phase
-# dispatcher skips the whole array whenever the matched location already set
-# r->content_handler (e.g. `return`, `proxy_pass`, or any other handler
-# directive):
-#
-#     if (r->content_handler) {
-#         ngx_http_finalize_request(r, r->content_handler(r));
-#         return NGX_OK;
-#     }
-#
-# So a vhost whose matched location has its own content handler NEVER reaches
-# ngx_http_autocert_challenge_handler at all, regardless of `autocert on/off`
-# on that server -- confirmed by hand: with `location / { return 200
-# "b-plain"; }` on server b, flipping `autocert on` on b did NOT change its
-# response (still "b-plain", never the keyauth). That is a real fall-through
-# gap orthogonal to the authority question this item covers (it means an
-# operator with a catch-all `return`/`proxy_pass` on `/` unintentionally
-# shadows ACME HTTP-01 solving on that vhost); it is ledgered in TODO.md as
-# its own item rather than fixed here. This script therefore avoids a
-# location content handler on the comparison vhost, so `autocert on/off` is
-# the only thing distinguishing the two servers, and asserts against the
-# actual content-phase dispatch this item's acceptance criterion is about.
+# Caveat: the module registers as a plain NGX_HTTP_CONTENT_PHASE array
+# handler, and nginx's content-phase dispatcher skips the whole array whenever
+# the matched location already set r->content_handler (`return`, `proxy_pass`,
+# ...). Such a vhost never reaches the challenge handler at all, regardless of
+# `autocert on/off`. That is a separate fall-through gap, ledgered in
+# issues.md, not fixed here. This script therefore gives the comparison vhosts
+# no location content handler, so `autocert on/off` is the only difference
+# between them.
 #
 # This script pins the following established behavior:
 #
@@ -46,20 +30,22 @@
 #   (c) Unknown/absent Host falling to the default server
 #       (also autocert-disabled)                                -> same 404;
 #       no keyauth leak.
-#   (d) U-label vs A-label: the module rejects a raw U-label `server_name` at
-#       config time ("not a valid DNS name or IP address"), so the only
-#       reachable config declares the A-label. Requesting that A-label server
-#       with a mismatched/U-label-shaped Host does NOT match (nginx does no
-#       IDNA) and falls through to the default server, same as (c).
+#   (d) U-label vs canonical A-label of the SAME name. The module rejects a
+#       raw U-label `server_name` at config time ("not a valid DNS name or IP
+#       address"), so an IDN vhost can only be declared as its A-label; here
+#       `xn--fsq.example.com` with `autocert on`. The canonical A-label Host
+#       MUST get the keyauth (200); the raw U-label Host must NOT -- nginx
+#       performs no IDNA folding and rejects the non-ASCII header outright
+#       (400), before vhost selection runs at all. Measured, not assumed.
 #   (e) HTTP/2 h2c :authority reproduces (a) and (b) exactly -- the gate is on
 #       server selection, not on the h1-specific Host header parsing.
 #
-# Negative control (AC_AUTHORITY_AUTOCERT_ON=1, not run by CI): flips
+# Negative control (AC_AUTHORITY_AUTOCERT_ON=1, RUN BY CI as its own step so
+# it is a gate rather than a claim): flips
 # `autocert on` onto the comparison vhost too, so it is no longer a
 # different/disabled authority -- (b)/(e)'s "must not leak" assertions must
 # then flip to "must equal the keyauth", proving they are wired to something
-# real rather than vacuously true. See PR description for the exact command
-# and the specific assertion that goes red without the flip's own branch.
+# real rather than vacuously true.
 #
 # Inputs (env):
 #   SERVER_BIN    - built nginx/angie binary (required)
@@ -78,10 +64,16 @@ HTTP_SO="$NGX_BUILD_DIR/objs/ngx_http_autocert_module.so"
 HAS_HTTP2=0
 "$SERVER_BIN" -V 2>&1 | grep -q -- '--with-http_v2_module' && HAS_HTTP2=1
 
-PREFIX="${PREFIX:-/tmp/ac-http01-authority}"
+# Qualify by flavor: the nginx and angie jobs run this concurrently on a shared
+# self-hosted runner, and each one starts by rm -rf'ing its prefix. An
+# unqualified default lets the second job delete the first job's pidfile out
+# from under its running master process.
+PREFIX="${PREFIX:-${AC_E2E_PREFIX:-/tmp/ac-http01-authority-${FLAVOR:-nginx}}}"
 PORT="${AC_TEST_PORT:-${AC_PORT_18396:-18396}}"
 TOKEN="autHtok0123456789ABCDEFGHIJKLMNOPQ"
 KEYAUTH="$TOKEN.authorityParityThumbprintXYZ"
+# U-label (raw UTF-8) form of xn--fsq.example.com.
+U_LABEL=$(printf '\344\276\213.example.com')
 
 B_AUTOCERT_LINE="# autocert intentionally OFF on this server"
 CONTROL=0
@@ -113,6 +105,15 @@ http {
         server_name a.example.com;
         autocert on;
     }
+    # xn--fsq.example.com is the A-label (punycode) form of the IDN
+    # 例.example.com. It is autocert-ENABLED, so it is the case (d) probe for
+    # whether nginx folds a U-label Host onto its A-label server_name.
+    server {
+        listen $PORT;
+        http2 on;
+        server_name xn--fsq.example.com;
+        autocert on;
+    }
     server {
         listen $PORT default_server;
         http2 on;
@@ -131,10 +132,23 @@ echo "== config test =="
 echo "== start =="
 "$SERVER_BIN" -p "$PREFIX" -c "$PREFIX/conf/nginx.conf"
 
+# This wait MUST be fatal. If the seed line never appears the token was never
+# planted, and every no-leak case below would then pass for the wrong reason:
+# a missing token produces exactly the same 404 they assert. A silent
+# fall-through here makes the whole no-leak half of the suite vacuous.
+seeded=0
 for _ in $(seq 1 30); do
-    grep -q 'seeded test challenge token' "$PREFIX/logs/error.log" && break
+    if grep -q 'seeded test challenge token' "$PREFIX/logs/error.log"; then
+        seeded=1
+        break
+    fi
     sleep 0.3
 done
+if [ "$seeded" != 1 ]; then
+    echo "::error::challenge token was never seeded after 9s; error.log follows"
+    sed -n '1,50p' "$PREFIX/logs/error.log" >&2 || true
+    exit 1
+fi
 
 # The CI runners export http_proxy/https_proxy pointing at a caching proxy.
 # curl would then hand the whole URL to that proxy -- which resolves the
@@ -146,25 +160,36 @@ fetch_h1() {
     curl -s --noproxy '*' -H "Host: $host" \
         "http://127.0.0.1:$PORT/.well-known/acme-challenge/$TOKEN"
 }
-fetch_h1_code() {
-    local host="$1"
-    curl -s --noproxy '*' -o /dev/null -w '%{http_code}' -H "Host: $host" \
-        "http://127.0.0.1:$PORT/.well-known/acme-challenge/$TOKEN"
+# One request, body and status from the SAME exchange -- fetching them
+# separately characterises two different responses as though they were one.
+# Sets the globals `got` and `code`.
+fetch_h1_both() {
+    local host="$1" resp
+    resp=$(curl -s --noproxy '*' -w '\n%{http_code}' -H "Host: $host" \
+        "http://127.0.0.1:$PORT/.well-known/acme-challenge/$TOKEN")
+    code=${resp##*$'\n'}
+    got=${resp%$'\n'*}
 }
 # A no-leak assertion on the body alone passes vacuously whenever the request
 # never reached nginx at all (connection refused, a proxy error page, an empty
-# body). So every no-leak case also asserts the exact status code we expect
-# from the disabled vhost, which only nginx can produce.
+# body). The status check below is a LIVENESS guard against exactly that: only
+# nginx answers 404 here, whereas a proxy page or a refused connection gives
+# 000. It is deliberately NOT a discriminator for the enable gate -- autocert
+# itself also returns 404 for an unknown token, byte-identically, so the code
+# alone cannot say which path declined.
+# $4 = the status the case expects (default 404, the disabled-vhost
+# fall-through). Case (d) passes 400 instead: nginx rejects a raw U-label Host
+# as a malformed header before vhost selection ever runs.
 assert_no_leak() {
-    local label="$1" body="$2" code="$3"
+    local label="$1" body="$2" code="$3" want="${4:-404}"
     case "$body" in
         *"$KEYAUTH"*)
             echo "::error::($label) TOKEN LEAK: wrong authority returned the keyauth (body='$body')"
             exit 1
             ;;
     esac
-    if [ "$code" != "404" ]; then
-        echo "::error::($label) expected 404 from the disabled authority, got code=$code body='$body' (did the request reach nginx?)"
+    if [ "$code" != "$want" ]; then
+        echo "::error::($label) expected $want, got code=$code body='$body' -- the request did not reach nginx, or the rejection path changed"
         exit 1
     fi
 }
@@ -178,8 +203,7 @@ fi
 echo "✓ (a) enabled authority served exact key authorization"
 
 echo "== (b) h1 Host: b.example.com (different vhost, same port) =="
-got=$(fetch_h1 b.example.com)
-code=$(fetch_h1_code b.example.com)
+fetch_h1_both b.example.com
 if [ "$CONTROL" = 1 ]; then
     if [ "$got" != "$KEYAUTH" ]; then
         echo "::error::(b) [CONTROL] did not flip to keyauth with autocert enabled on b: got '$got'"
@@ -192,8 +216,7 @@ else
 fi
 
 echo "== (c) h1 Host: unknown.example.com (falls to default server = b) =="
-got=$(fetch_h1 unknown.example.com)
-code=$(fetch_h1_code unknown.example.com)
+fetch_h1_both unknown.example.com
 if [ "$CONTROL" = 1 ]; then
     # b is default_server and now has autocert on too, so an unknown Host
     # legitimately lands on an enabled server and gets the keyauth.
@@ -207,26 +230,30 @@ else
     echo "✓ (c) unknown authority falls to disabled default server; keyauth never present"
 fi
 
-echo "== (d) mismatched/A-vs-U-label authority (no IDNA in nginx) =="
-# The module rejects a raw U-label server_name at config time (verified by
-# hand: "autocert: \"...\" is not a valid DNS name or IP address"), so only
-# the A-label form is a reachable config. Requesting the A-label server with a
-# non-matching authority shaped like a U-label/punycode mismatch is exactly
-# the "unknown Host" case from (c): nginx does no Unicode/IDNA normalization
-# on Host, so it cannot match and falls through to default.
-got=$(fetch_h1 xn--fsq.example.net)
-code=$(fetch_h1_code xn--fsq.example.net)
-if [ "$CONTROL" = 1 ]; then
-    # same default-server propagation as (c) under the control.
-    if [ "$got" != "$KEYAUTH" ]; then
-        echo "::error::(d) [CONTROL] mismatched-authority fallback to now-enabled default did not get keyauth: got '$got'"
-        exit 1
-    fi
-    echo "✓ (d) [CONTROL] mismatched authority falls to now-enabled default; serves keyauth"
-else
-    assert_no_leak "d" "$got" "$code"
-    echo "✓ (d) mismatched authority (no IDNA folding) never receives the keyauth"
+echo "== (d) U-label vs canonical A-label authority (no IDNA folding) =="
+# Both forms of the SAME name, against a server declaring only the A-label
+# xn--fsq.example.com with autocert on. nginx performs no IDNA/Unicode
+# normalization on Host. Measured against nginx 1.31.4: the raw U-label is
+# rejected as a malformed header with 400, before vhost selection runs, while
+# the canonical A-label gets 200 + the keyauth. (The module rejects a raw
+# U-label server_name at config time, so the A-label is the only reachable
+# spelling of an IDN vhost; that is what makes this a real pair rather than
+# two spellings of "unknown host".)
+fetch_h1_both "$U_LABEL"
+# The 400 is independent of CONTROL: a malformed Host is rejected before vhost
+# selection, so flipping `autocert on` onto the default server cannot reach it.
+assert_no_leak "d" "$got" "$code" 400
+echo "✓ (d) raw U-label authority is rejected (400), never folded onto the A-label vhost"
+
+# The canonical A-label form of the same name MUST work, in both modes --
+# otherwise (d) would pass merely because the vhost is unreachable, which is
+# the exact way a U-label test can be vacuous.
+got=$(fetch_h1 xn--fsq.example.com)
+if [ "$got" != "$KEYAUTH" ]; then
+    echo "::error::(d) canonical A-label authority did not receive the keyauth: got '$got'"
+    exit 1
 fi
+echo "✓ (d) canonical A-label authority served exact key authorization"
 
 if [ "$HAS_HTTP2" = 1 ]; then
     echo "== (e) HTTP/2 h2c :authority parity =="
