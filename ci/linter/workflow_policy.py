@@ -409,8 +409,9 @@ _ASSIGN_RE = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)=(\S*)[ \t]*")
 _PORT_NAME_RE = re.compile(r"AC_TEST_PORT[0-9]*")
 
 
-def _inline_ports(run: str) -> list[str]:
-    """Ports claimed by a shell assignment at the head of a line in `run`.
+def _inline_ports(run: str) -> list[tuple[str, str]]:
+    """(name, value) pairs claimed by a shell assignment at the head of a
+    line in `run`.
 
     Only the assignment prefix of each line is walked: leading whitespace,
     any command prefix words, then a run of `NAME=VALUE` pairs. The walk stops
@@ -418,8 +419,12 @@ def _inline_ports(run: str) -> list[str]:
     line -- inside a diagnostic string, a comment, or an argument -- is not a
     claim and is not counted. That is the whole rule; it needs no anchoring
     heuristics because `run` is the RAW step text, not a re-serialized dump.
+
+    The name travels with the value so a collision message can report the
+    ACTUAL variable each side used, rather than assuming every inline
+    claimant is spelled AC_TEST_PORT.
     """
-    out: list[str] = []
+    out: list[tuple[str, str]] = []
     for line in run.splitlines():
         pos = len(line) - len(line.lstrip(" \t"))
         while True:
@@ -438,7 +443,7 @@ def _inline_ports(run: str) -> list[str]:
             # numeric suffix.
             value = value.strip("\"'")
             if _PORT_NAME_RE.fullmatch(name) and value.isdigit():
-                out.append(value)
+                out.append((name, value))
             pos = assign.end()
     return out
 
@@ -447,7 +452,7 @@ def _check_port_node(
     where: str,
     node: dict,
     body: str,
-    bands: dict[str, str],
+    bands: dict[str, tuple[str, str]],
     errors: list[str],
     collision_scope: str,
 ) -> None:
@@ -457,6 +462,20 @@ def _check_port_node(
     `where` identifies the node in error text; `collision_scope` is the tail
     of the uniqueness-collision message ("ALL workflows" vs "ALL workflows and
     actions") so the two call sites keep their existing wording.
+
+    `bands` maps a port value to the (where, varname) that claimed it.
+    AC_TEST_PORT and TEST_BASE_PORT deliberately share one keyspace -- port
+    18500 collides no matter which variable named it -- but each claimant's
+    OWN variable name is kept alongside it so a collision message reports what
+    each side actually wrote, instead of hardcoding the reporting branch's
+    variable name onto both sides.
+
+    A job inheriting a WORKFLOW-level `env:` (see check_ports()) is
+    pre-registered in `bands` under the FILE, not the job -- `where` for a
+    job is always "<file>:<job>", so a match whose claimant is exactly that
+    file prefix with varname TEST_BASE_PORT is this job's own inherited
+    declaration, not a second claimant: every job in the file shares that one
+    line and must neither re-register it nor collide with it.
     """
     declared = re.search(r"(?m)^\s*TEST_BASE_PORT:\s*[\"']?(\d+)", body)
     starts_runtime = RUNTIME_DRIVER in body
@@ -464,7 +483,7 @@ def _check_port_node(
 
     # Per raw step text, so a port on ANY line of ANY step is seen, including
     # a single-line `run:` and a second assignment sharing one line.
-    inline_ports = [port for run in _steps(node) for port in _inline_ports(run)]
+    inline_ports = [pair for run in _steps(node) for pair in _inline_ports(run)]
     # Two steps in the SAME node (job or action) can independently claim the
     # same port -- likelier now that one action can carry several inline
     # ports across sibling steps. `where` names the whole node, so a
@@ -472,21 +491,23 @@ def _check_port_node(
     # the same file/job on both sides and identify neither step. De-dupe
     # first and report that shape distinctly.
     seen_here: set[str] = set()
-    for port in inline_ports:
+    for name, port in inline_ports:
         if port in seen_here:
             errors.append(
-                f"{where} claims AC_TEST_PORT {port} twice across its steps "
+                f"{where} claims {name} {port} twice across its steps "
                 "-- bands must be disjoint within a node too"
             )
             continue
         seen_here.add(port)
         if port in bands:
+            other_where, other_name = bands[port]
             errors.append(
-                f"{where} and {bands[port]} both claim AC_TEST_PORT "
-                f"{port} -- bands must be disjoint across {collision_scope}"
+                f"{where} claims {name} {port} and {other_where} claims "
+                f"{other_name} {port} -- bands must be disjoint across "
+                f"{collision_scope}"
             )
         else:
-            bands[port] = where
+            bands[port] = (where, name)
 
     # THE CHECK THAT MATTERS MOST. A new runtime-bearing job added later
     # with no band is invisible to the uniqueness check below (it
@@ -514,13 +535,27 @@ def _check_port_node(
         return
 
     port = declared.group(1)
-    if port in bands:
-        errors.append(
-            f"{where} and {bands[port]} both claim TEST_BASE_PORT "
-            f"{port} -- bands must be disjoint across {collision_scope}"
-        )
+    if bands.get(port) == (where.split(":", 1)[0], "TEST_BASE_PORT"):
+        pass  # already registered once for the whole file; see check_ports()
+    elif port in bands:
+        other_where, other_name = bands[port]
+        if other_where == where:
+            # Same node: it declared TEST_BASE_PORT and also claims the same
+            # port inline. That is the useless "X and X both claim" shape the
+            # inline de-dup above exists to avoid -- name it plainly instead.
+            errors.append(
+                f"{where} declares TEST_BASE_PORT {port} and also claims "
+                f"{other_name} {port} inline on the same node -- bands must "
+                "be disjoint within a node too"
+            )
+        else:
+            errors.append(
+                f"{where} claims TEST_BASE_PORT {port} and {other_where} "
+                f"claims {other_name} {port} -- bands must be disjoint "
+                f"across {collision_scope}"
+            )
     else:
-        bands[port] = where
+        bands[port] = (where, "TEST_BASE_PORT")
 
     # A declared band that is not passed through is decoration: the
     # driver still binds its default.
@@ -537,12 +572,48 @@ def _check_port_node(
         )
 
 
+def _register_workflow_env_band(
+    path: pathlib.Path, doc: dict, bands: dict[str, tuple[str, str]], errors: list[str]
+) -> str:
+    """Register a WORKFLOW-level `env:` band ONCE under the file, and return
+    its dumped text so callers can append it to each job's own body.
+
+    A workflow-level `env:` sits on `doc`, one level above every job node
+    `jobs()` hands out, so a job's own `_body(node)` dump never contains it --
+    the same false-positive shape an action-level `env:` has one level up
+    over `runs.steps`. Registering it here, once per FILE rather than once
+    per JOB, is what keeps N jobs sharing one declaration from colliding with
+    each other; `_check_port_node` recognizes a job's own match on an
+    already-file-registered port as its inherited declaration (see its
+    docstring) and neither re-registers nor collides on it.
+    """
+    wf_env = doc.get("env")
+    if not isinstance(wf_env, dict):
+        return ""
+    wf_env_body = yaml.safe_dump(
+        {"env": wf_env}, default_flow_style=False, sort_keys=False
+    )
+    for port in re.findall(r"(?m)^\s*TEST_BASE_PORT:\s*[\"']?(\d+)", wf_env_body):
+        if port in bands:
+            other_where, other_name = bands[port]
+            errors.append(
+                f"{path.name} claims TEST_BASE_PORT {port} and {other_where} "
+                f"claims {other_name} {port} -- bands must be disjoint "
+                "across ALL workflows"
+            )
+        else:
+            bands[port] = (path.name, "TEST_BASE_PORT")
+    return wf_env_body
+
+
 def check_ports() -> int:
     errors: list[str] = []
-    bands: dict[str, str] = {}  # port value -> "file:job" that claimed it
+    bands: dict[str, tuple[str, str]] = {}  # port value -> (where, varname)
 
     for path in workflows():
         doc = load(path)
+        wf_env_body = _register_workflow_env_band(path, doc, bands, errors)
+
         for job, node in jobs(doc):
             where = f"{path.name}:{job}"
 
@@ -550,7 +621,9 @@ def check_ports() -> int:
             if order:
                 errors.append(order)
 
-            _check_port_node(where, node, _body(node), bands, errors, "ALL workflows")
+            _check_port_node(
+                where, node, _body(node) + wf_env_body, bands, errors, "ALL workflows"
+            )
 
     for path in actions():
         doc = load(path)
