@@ -1216,6 +1216,26 @@ ngx_autocert_dns_hook_spawn(ngx_autocert_order_t *order, ngx_str_t *hook,
         (void) setpgid(0, 0);
 
         /*
+         * nginx's master ignores SIGPIPE and SIGSYS (ngx_init_signals()),
+         * and both a SIG_IGN disposition and a blocked signal survive
+         * fork() and execve() unchanged (POSIX only resets a *handler*,
+         * never SIG_IGN, and only for signals not also being caught by the
+         * new image). Left alone, the hook program would run with SIGPIPE
+         * ignored, silently diverging from the default shell/process
+         * expectation that writing to a closed pipe kills the process
+         * (e.g. a hook piping into "head"). Restore SIG_DFL here, in the
+         * child only, before exec.
+         */
+        {
+            struct sigaction  sa;
+
+            ngx_memzero(&sa, sizeof(struct sigaction));
+            sa.sa_handler = SIG_DFL;
+            (void) sigaction(SIGPIPE, &sa, NULL);
+            (void) sigaction(SIGSYS, &sa, NULL);
+        }
+
+        /*
          * Redirect stdin and stdout to /dev/null before the close-everything
          * loop below: without this the hook inherits this worker's real
          * stdin/stdout (whatever nginx was started against — a log pipe, a
