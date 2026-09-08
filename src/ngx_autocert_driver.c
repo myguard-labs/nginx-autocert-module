@@ -2618,6 +2618,15 @@ ngx_autocert_runtime_seed_stop(void)
  * idempotent (ensure()+set_state() only fill or confirm gaps), so re-walking
  * from the top is always safe and never double-counts. Ignoring would risk an
  * incomplete zone; queueing would buy nothing a restart does not.
+ *
+ * ARM ORDERING POLICY. Callers seed then immediately arm, and MUST NOT chain
+ * the arm behind the seed's completion. The seed is a best-effort warm start,
+ * never a hard boot dependency, so delaying the driver's arm until a large
+ * store finishes enumerating would convert a performance fix into a behaviour
+ * regression — converting the stall from the event loop to the driver's start
+ * time (which this change exists to remove). The seed continues in the
+ * background across ticks; the driver's arm and kick timer work independent
+ * of it.
  */
 static void
 ngx_autocert_runtime_seed(ngx_cycle_t *cycle)
@@ -3199,14 +3208,7 @@ ngx_autocert_relock_handler(ngx_event_t *ev)
          * taken here, so this worker's shm view may still be missing markers
          * a prior generation never got to (or a fresh restart never had). */
         ngx_autocert_runtime_seed(cycle);
-        /* ARM ORDERING: arm immediately, do NOT chain arm behind the seed's
-         * completion. The seed is documented above as a best-effort warm
-         * start, never a hard boot dependency, so delaying the driver's arm
-         * until a large store finishes enumerating would convert a
-         * performance fix into a behaviour regression — the exact stall this
-         * change exists to remove, just moved from the event loop to the
-         * driver's start time. The seed continues in the background across
-         * ticks; the kick timer's own work is independent of it. */
+        /* ARM ORDERING POLICY — see ngx_autocert_runtime_seed() docblock. */
         ngx_autocert_driver_arm(cycle);
         return;                             /* acquired; stop retrying */
 
@@ -3242,14 +3244,7 @@ ngx_autocert_driver_init_process(ngx_cycle_t *cycle)
          * ngx_autocert_name_is_config/name_due for anything already settled).
          */
         ngx_autocert_runtime_seed(cycle);
-        /* ARM ORDERING: arm immediately, do NOT chain arm behind the seed's
-         * completion. The seed is documented above as a best-effort warm
-         * start, never a hard boot dependency, so delaying the driver's arm
-         * until a large store finishes enumerating would convert a
-         * performance fix into a behaviour regression — the exact stall this
-         * change exists to remove, just moved from the event loop to the
-         * driver's start time. The seed continues in the background across
-         * ticks; the kick timer's own work is independent of it. */
+        /* ARM ORDERING POLICY — see ngx_autocert_runtime_seed() docblock. */
         ngx_autocert_driver_arm(cycle);
         break;
 

@@ -345,6 +345,26 @@ argv[2] = "<txt-value>"               # 43-char base64url(SHA-256(keyauth))
 argv[3] = NULL
 ```
 
+**argv layout:** The positional arguments start immediately after argv[0] with no `--`
+separator. This is deliberate: inserting `--` would change argv[1] for every
+existing hook and is a breaking change to this contract, so it is not done here.
+`argv[1]` always starts with `_` (`_acme-challenge.<name>`), so it can never be
+mistaken for an option. **`argv[2]` cannot make the same guarantee** — it is
+`base64url(SHA-256(keyauth))`, a uniformly-distributed 43-character string over
+the alphabet `[A-Za-z0-9_-]` (RFC 8555 §8.4), and that alphabet includes `-`.
+Roughly **1 in 64** DNS-01 challenges will therefore produce a value whose first
+character is `-`, which a `getopt`-based hook can misparse as an option flag.
+
+Hook authors MUST NOT feed `argv[1]`/`argv[2]` to `getopt` or to any command
+that treats a leading `-` as an option. Instead:
+
+- Read the positionals directly — `name="$1"; value="$2"` — never via `getopt`
+  or `getopts`.
+- Before forwarding either value to another command (`dig`, `curl`, a DNS
+  provider's CLI), place `--` yourself immediately before the positional
+  arguments, e.g. `provider-cli set-txt -- "$name" "$value"`, so the command
+  being invoked cannot reinterpret a leading `-` as one of its own flags.
+
 **No environment variables are added by the module** — the hook inherits the
 worker's environment verbatim. This is the certbot-manual convention: pass your
 DNS-provider credentials in the worker's environment; the domain and value arrive

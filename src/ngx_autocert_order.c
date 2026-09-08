@@ -1559,6 +1559,16 @@ ngx_autocert_order_dns_hook(ngx_autocert_order_t *order, ngx_str_t *hook,
     ngx_memcpy(txt_cstr, order->dns_txt_value.data, order->dns_txt_value.len);
     txt_cstr[order->dns_txt_value.len] = '\0';
 
+    /* argv layout: { hook, "_acme-challenge.<name>", <txt>, NULL }. No `--`
+     * separator. argv[1] always starts with '_' and is never option-like.
+     * argv[2] is base64url(SHA-256(keyauth)): a uniform 43-char string over
+     * [A-Za-z0-9_-], so it CAN start with '-' (~1/64 of challenges) and a
+     * getopt-based hook can misparse it as a flag. Inserting `--` here was
+     * considered and rejected: it would change argv[1] for every existing
+     * hook, a breaking change to this documented contract. The mitigation
+     * is the README "DNS-01 hook contract" guidance: read argv[1]/argv[2]
+     * positionally (no getopt), and place `--` before forwarding them to
+     * any other command. */
     argv[0] = (char *) hook_cstr;
     argv[1] = (char *) name_cstr;
     argv[2] = (char *) txt_cstr;
