@@ -55,7 +55,13 @@
  *
  * Retries draw from `general` FIRST and only fall back to the reserve, so on
  * an idle or lightly loaded worker the split is invisible: the full `limit` is
- * still available to whoever asks, and the reserve is simply never reached.
+ * still available to whoever asks, and the reserve is normally never reached.
+ * The invariant that keeps this honest is: on an idle worker (nothing spent
+ * this window) any request with n <= limit is ADMITTED, retry or not. The
+ * reserve only ever redistributes budget under contention; it must never make
+ * an idle worker refuse work it has the budget for. See WEDGE CASE below for
+ * the one path that enforces this when n does not fit in `general`, and for
+ * the configurations where it costs the ceil(D / R) bound.
  * The reserve costs the flood nothing it was entitled to either — those units
  * were always going to be spent on somebody.
  */
@@ -115,16 +121,26 @@ ngx_autocert_loadcap_reserve(ngx_uint_t limit)
  * The caller owns the per-name "was deferred" bit — the cap is stateless per
  * name by design (one struct per worker, not per entry).
  *
- * WEDGE CASE: `n > limit` (limit != 0) can never be admitted by definition --
- * an all-or-nothing rule that kept saying no would wedge certificate loading
- * permanently, which is worse than the bug this cap fixes. Instead, whenever
- * the request cannot ever fit under the configured limit, treat the limit as
- * `n` for this call (i.e. admit once nothing has been spent yet) so the batch
- * still goes through exactly once per second rather than never. This only
- * engages when the operator has configured a limit smaller than the unit count
- * of a single request (e.g. `autocert_handshake_load_limit 1` with two enabled
- * slots); ordinary configurations (limit >= n) are unaffected and get the
- * strict bound.
+ * WEDGE CASE: a request that cannot fit in the pool it is allowed to draw from
+ * would be denied in every window forever, on an idle worker, which is worse
+ * than the bug this cap fixes. The effective ceiling for a request that may
+ * only touch the general pool is `general`, NOT `limit`, so the guard tests
+ * `n > general` -- testing `n > limit` would leave every `n` in
+ * `general < n <= limit` denied permanently (e.g. limit 2 with two enabled
+ * slots: reserve 1, general 1, n 2 -- denied as a first attempt AND as a
+ * retry, since n also exceeds the reserve). Whenever the request cannot fit in
+ * `general`, treat the whole limit as `n` for this call (i.e. admit once
+ * nothing has been spent yet, charging BOTH pools) so the batch still goes
+ * through exactly once per second rather than never.
+ *
+ * DOCUMENTED LIMIT of the reserve's fairness bound: this fallback lets a FIRST
+ * attempt reach the reserve, so the ceil(D / R) bound above holds only while
+ * `general >= n`, i.e. `limit >= n + reserve`. With the module's slot count of
+ * 1 or 2 that means limit >= 2 for one slot and limit >= 3 for two (RSA + EC).
+ * Below that threshold the window admits at most ONE batch in total, so there
+ * is no budget left to allocate fairly and the pre-reserve first-come
+ * behaviour is the only non-wedging option. Ordinary configurations
+ * (limit >= n + reserve) are unaffected and keep the strict bound.
  */
 static ngx_inline ngx_uint_t
 ngx_autocert_loadcap_admit_retry_n(ngx_autocert_loadcap_t *cap, time_t now,
@@ -149,11 +165,12 @@ ngx_autocert_loadcap_admit_retry_n(ngx_autocert_loadcap_t *cap, time_t now,
     reserve = ngx_autocert_loadcap_reserve(limit);
     general = limit - reserve;
 
-    /* Wedge guard: a request that can never fit under `limit` (n > limit) is
-     * admitted once per window instead of denied forever -- see comment
-     * above the function. Charging both pools closes the window for every
-     * later request, retry or not, exactly as the pre-reserve code did. */
-    if (n > limit) {
+    /* Wedge guard: a request that can never fit in the pool it may draw from
+     * (n > general) is admitted once per window instead of denied forever --
+     * see comment above the function. Charging both pools closes the window
+     * for every later request, retry or not, exactly as the pre-reserve code
+     * did. */
+    if (n > general) {
         if (cap->spent != 0 || cap->spent_res != 0) {
             return 0;
         }

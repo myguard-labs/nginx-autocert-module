@@ -384,6 +384,91 @@ main(void)
     CHECK(ngx_autocert_loadcap_admit_retry_n(&cap, 24000, 1, 1, 1) == 0,
           "limit 1: a retry gets no reserve either, the budget is spent");
 
+    /* --- EXHAUSTIVE IDLE-WORKER INVARIANT SWEEP ---
+     *
+     * The invariant: on an idle worker (nothing spent this window) any request
+     * with n <= limit MUST be admitted, retry or not. The reserve may only
+     * redistribute budget under contention; it must never make an idle worker
+     * refuse work it has the budget for.
+     *
+     * This class of bug -- a guard whose condition no longer matches the
+     * effective ceiling after a refactor -- is invisible to hand-picked cases:
+     * the reserve made the first-attempt ceiling `general`, while the wedge
+     * guard still tested `n > limit`, so every n in `general < n <= limit`
+     * (e.g. limit 2, n 2, the dual RSA+EC default) was denied permanently in
+     * every window. Only a sweep over every real combination catches that.
+     *
+     * Also asserts the unsigned-arithmetic safety net: `limit - reserve` and
+     * `reserve - spent_res` are ngx_uint_t subtractions, so an invariant slip
+     * underflows to a huge value rather than going negative. reserve < limit
+     * and spent_res <= reserve are checked for every swept limit.
+     */
+    {
+        static const ngx_uint_t  big[] = { 100, 255, 256, 1000, 65535,
+                                           1000000 };
+        ngx_uint_t               lim, nn, rr, k, res, gen, ok;
+        ngx_uint_t               bad_admit = 0, bad_res = 0, bad_charge = 0;
+
+        for (k = 0; k < 64 + 1 + sizeof(big) / sizeof(big[0]); k++) {
+
+            lim = (k <= 64) ? k : big[k - 65];
+
+            res = ngx_autocert_loadcap_reserve(lim);
+
+            /* reserve must never reach the limit, or `limit - reserve`
+             * underflows / the general pool vanishes. */
+            if (lim > 0 && res >= lim) {
+                bad_res++;
+            }
+            if (lim == 0 && res != 0) {
+                bad_res++;
+            }
+
+            gen = lim - res;
+
+            for (nn = 0; nn <= 4; nn++) {
+                for (rr = 0; rr <= 1; rr++) {
+
+                    ngx_memzero(&cap, sizeof(cap));
+
+                    ok = ngx_autocert_loadcap_admit_retry_n(&cap, 30000, lim,
+                                                            nn, rr);
+
+                    /* limit 0 disables the cap; n 0 charges nothing. Every
+                     * other request with n <= limit must be admitted on an
+                     * idle worker. */
+                    if (lim == 0 || nn == 0 || nn <= lim) {
+                        if (ok != 1) {
+                            bad_admit++;
+                        }
+                    }
+
+                    /* n > limit is the operator-misconfiguration path: still
+                     * admitted once per window, never denied forever. */
+                    if (lim > 0 && nn > lim && ok != 1) {
+                        bad_admit++;
+                    }
+
+                    /* Charging must stay inside both pools -- a slip here is
+                     * what makes `reserve - spent_res` underflow later. */
+                    if (cap.spent > gen || cap.spent_res > res) {
+                        bad_charge++;
+                    }
+                }
+            }
+        }
+
+        CHECK(bad_res == 0,
+              "sweep: reserve is < limit for every limit (no underflow of "
+              "limit - reserve)");
+        CHECK(bad_admit == 0,
+              "sweep: an idle worker admits every request with n <= limit, "
+              "retry or not (no permanent wedge)");
+        CHECK(bad_charge == 0,
+              "sweep: neither pool is ever overcharged (no underflow of "
+              "reserve - spent_res)");
+    }
+
     if (failures) {
         fprintf(stderr, "\n%d FAILURE(S)\n", failures);
         return 1;
