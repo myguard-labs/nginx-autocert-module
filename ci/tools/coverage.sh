@@ -240,7 +240,7 @@ if [ -z "$report_files" ]; then
   echo "::warning::coverage report produced no files under $unit_build -- the uploaded artifact will be empty" >&2
 else
   echo "== coverage report files =="
-  find "$unit_build" -maxdepth 3 -type f | sort
+  echo "$report_files" | sort
 fi
 
 # ---- plausibility floor: catch collapse-to-zero, not enforce a target ------
@@ -256,16 +256,20 @@ fi
 coverage_floor=10
 summary_json="$unit_build/coverage-summary.json"
 if [ -f "$summary_json" ] && command -v python3 >/dev/null 2>&1; then
-  line_percent="$(python3 -c '
+  result="$(python3 -c '
 import json, sys
 try:
     with open(sys.argv[1]) as f:
         data = json.load(f)
-    print(data["line_percent"])
+    pct = float(data["line_percent"])
+    floor = float(sys.argv[2])
+    print(f"{pct}|{1 if pct < floor else 0}")
 except Exception:
     print("")
-' "$summary_json")"
-  if [ -n "$line_percent" ]; then
+' "$summary_json" "$coverage_floor")"
+  if [ -n "$result" ]; then
+    line_percent="${result%%|*}"
+    below_floor="${result##*|}"
     echo "line coverage: ${line_percent}%"
     if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
       {
@@ -274,7 +278,6 @@ except Exception:
         echo "Line coverage: **${line_percent}%**"
       } >> "$GITHUB_STEP_SUMMARY"
     fi
-    below_floor="$(python3 -c "print(1 if float(\"$line_percent\") < $coverage_floor else 0)" 2>/dev/null || echo 0)"
     if [ "$below_floor" = "1" ]; then
       echo "::warning::line coverage ${line_percent}% is below the ${coverage_floor}% floor -- possible collapse to near-zero" >&2
     fi

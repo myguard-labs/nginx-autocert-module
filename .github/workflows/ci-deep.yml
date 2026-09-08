@@ -1,4 +1,4 @@
-# sync-sha: cbc5489260e07e688881459b77b7574e645c39a4c301204d5ec37eceaf661d59
+# sync-sha: ed5f099fda478186aac40379721070b0854ce18edf1e3a8103bd8f00a58cc09d
 name: CI Deep
 
 # Exhaustive dynamic analysis — monthly cron, release, and on-demand only,
@@ -367,13 +367,6 @@ jobs:
           ccache-key: ci-deep-coverage
       - name: Run coverage.sh (instrumented build + unit suite + report)
         run: bash ci/tools/coverage.sh
-      - name: Verify coverage report was written
-        if: always()
-        run: |
-          if ! find "${{ github.workspace }}/.build/unit" -maxdepth 1 -type f \
-              \( -name '*.json' -o -name 'coverage.info*' \) 2>/dev/null | grep -q .; then
-            echo "::warning::no coverage report file found under .build/unit -- the uploaded artifact will be empty"
-          fi
       - name: Upload coverage report
         if: always()
         uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
