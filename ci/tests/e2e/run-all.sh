@@ -58,7 +58,7 @@ PORT_BASES=(
     14066 14071 14072 14081 14443 14444
     15000 15001 15353 15354 15355 15356 15357 15358
     15453 15455 15463 15465 15466 15473 15475 15483 15487 15489
-    15493 15571 15581 18089 18090 18185 18190
+    15493 15571 15581 18089 18090 18185 18190 18191
     # http01-authority.sh runs from action.yml, not from SCRIPTS below; its
     # ports are listed here only so max-port.sh's budget ceiling covers them.
     18396 18397
@@ -284,7 +284,7 @@ fi
 # AC_E2E_PREFIX and the $$-named containers/networks (acip4-pebble-$$,
 # ac-wc-net-$$) really are per-task. Ports are NOT:
 #
-#   - set_ports strides 100 per slot, but PORT_BASES spans 5001..18190 = 13189
+#   - set_ports strides 100 per slot, but PORT_BASES spans 5001..18191 = 13190
 #     ports, so slot N's high bases land on slot N+1's low bases. AC_PORT_15353
 #     at slot 1 IS AC_PORT_15453 at slot 0.
 #   - AC_PORT_15456 (ipv4-issue.sh) is not in PORT_BASES at all, so it is never

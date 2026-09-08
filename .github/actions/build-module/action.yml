@@ -245,6 +245,7 @@ runs:
         SERVER_BIN="$SERVER_BIN" \
           NGX_BUILD_DIR="$GITHUB_WORKSPACE/${{ inputs.dir }}" \
           AC_TEST_PORT=18178 \
+          AC_TEST_PORT2=18191 \
           bash "$GITHUB_WORKSPACE/ci/tests/e2e/http01-challenge.sh"
 
     - name: HTTP-01 authority parity (h1 Host / h2 :authority)

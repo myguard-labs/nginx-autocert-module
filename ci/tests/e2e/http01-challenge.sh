@@ -22,7 +22,7 @@ HTTP_SO="$NGX_BUILD_DIR/objs/ngx_http_autocert_module.so"
 
 PREFIX="${PREFIX:-/tmp/ac-http01}"
 PORT="${AC_TEST_PORT:-${AC_PORT_8088:-8088}}"
-PORT2="${AC_TEST_PORT2:-$((PORT + 1))}"
+PORT2="${AC_TEST_PORT2:-${AC_PORT_18191:-18191}}"
 TOKEN="evaGxfADs6pSRb2LMJ7rzMrXXX0123456789abcdefg"
 KEYAUTH="$TOKEN.9jg46WB3rR_AHD-EBXdN7cBkH1WOu0tA3M9fm21mqTI"
 
@@ -47,7 +47,7 @@ http {
     autocert_test_challenge $TOKEN "$KEYAUTH";
     # Regression guards: the challenge handler must run in the POST_READ phase.
     # Two DIFFERENT shadowing mechanisms are covered, one per server below --
-    # a handler registered any later than POST_READ loses to at least one of
+    # a handler registered in PRECONTENT or CONTENT loses to at least one of
     # them, so both vhosts must serve the keyauth for the fix to be proven.
     server {
         # Mechanism 1: rewrite-phase finalization. "return 301" is
