@@ -46,9 +46,10 @@ if [ -z "${start:-}" ]; then
 fi
 rtype=$((start - 1)) # the return-type line precedes the name
 
-# Extract the function
-{
-	awk -v s="$rtype" -v name="$FN" '
+# Extract the function. Captured into a variable rather than redirected into
+# $OUT inside a block: shellcheck's SC2094 fires (info, and CI gates on info)
+# whenever a block that writes $OUT also mentions it, even in an error branch.
+if ! body=$(awk -v s="$rtype" -v name="$FN" '
         NR >= s {
             print
             if ($0 ~ ("^" name "\\(")) { entered = 1 }
@@ -66,14 +67,13 @@ rtype=$((start - 1)) # the return-type line precedes the name
             }
         }
         END { if (!closed) exit 1 }
-    ' "$SRC" || {
-		echo "✗ ${FN}() body never closed at brace depth 0 in $SRC (reformatted?)" >&2
-		rm -f "$OUT"
-		exit 1
-	}
+    ' "$SRC"); then
+	echo "✗ ${FN}() body never closed at brace depth 0 in $SRC (reformatted?)" >&2
+	rm -f "$OUT"
+	exit 1
+fi
 
-	echo ""
-} >>"$OUT"
+printf '%s\n\n' "$body" >>"$OUT"
 
 if ! grep -qE "^ngx_autocert_acme_log_safe\\(" "$OUT"; then
 	echo "✗ ${FN} missing from generated output (source layout changed?)" >&2
