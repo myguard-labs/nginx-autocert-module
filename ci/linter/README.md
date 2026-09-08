@@ -81,9 +81,11 @@ pipx install 'semgrep==1.169.0'     # pinned to the CI version on purpose
 ```
 
 `ruff` and `semgrep` are pinned because an unpinned upgrade changes findings
-under you and local stops matching CI. Bump each here and in its CI consumer
-together -- `ruff` in `install-linters.sh`, `semgrep` in
-`security-scanners.yml` too.
+under you and local stops matching CI. Bump each here and in EVERY CI consumer
+together -- `ruff` in `install-linters.sh`; `semgrep` in `install-linters.sh`,
+`lint-c.sh`, and BOTH `.github/workflows/security-scanners.yml` and
+`.github/workflows/ci-deep.yml`. `install-linters.sh` is the canonical pin;
+`grep -rn 'semgrep==' ci/ .github/` lists every site that must move together.
 
 **cpan (Perl modules apt does not carry on every target release)**
 
