@@ -3757,14 +3757,27 @@ ngx_autocert_order_publish_files_at(ngx_autocert_order_t *order, int cfd,
     /*
      * Publish ONLY this order's own key_type: priv, chain, leaf, rest (see
      * ORDERING above). The other keytype's files are hardlink-seeded and
-     * deliberately left alone. A file absent from staging (leaf/rest under
-     * the secure store layout) is simply not published.
+     * deliberately left alone. Priv and chain are MANDATORY for this keytype;
+     * missing or non-regular errors terminate the loop and trigger PARTIAL
+     * publish error handling. Leaf and rest are legitimately absent under
+     * the secure store layout: a missing one is skipped silently, and a
+     * non-regular one is logged at ERROR but still skipped, never fatal.
      */
     for (i = 0; (name = publish_order[i]) != NULL; i++) {
         ngx_autocert_stat_t  st;
+        int                  is_mandatory = (name == priv_name ||
+                                             name == chain_name);
 
         if (ngx_autocert_fstatat(sfd, name, &st, AT_SYMLINK_NOFOLLOW) == -1) {
             if (ngx_errno == NGX_ENOENT) {
+                if (is_mandatory) {
+                    ngx_log_error(NGX_LOG_ERR, order->log, ngx_errno,
+                                  "autocert: publish \"%s\" missing from "
+                                  "staging", name);
+                    failed = name;
+                    rc = NGX_ERROR;
+                    break;
+                }
                 continue;
             }
             ngx_log_error(NGX_LOG_ERR, order->log, ngx_errno,
@@ -3774,6 +3787,17 @@ ngx_autocert_order_publish_files_at(ngx_autocert_order_t *order, int cfd,
             break;
         }
         if (!S_ISREG(st.st_mode)) {
+            if (is_mandatory) {
+                ngx_log_error(NGX_LOG_ERR, order->log, 0,
+                              "autocert: publish \"%s\" not a regular file",
+                              name);
+                failed = name;
+                rc = NGX_ERROR;
+                break;
+            }
+            ngx_log_error(NGX_LOG_ERR, order->log, 0,
+                          "autocert: publish \"%s\" not a regular file; "
+                          "skipping", name);
             continue;
         }
 
