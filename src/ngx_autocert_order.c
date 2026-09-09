@@ -3760,7 +3760,8 @@ ngx_autocert_order_publish_files_at(ngx_autocert_order_t *order, int cfd,
      * deliberately left alone. Priv and chain are MANDATORY for this keytype;
      * missing or non-regular errors terminate the loop and trigger PARTIAL
      * publish error handling. Leaf and rest are legitimately absent under
-     * the secure store layout and may be missing or non-regular without error.
+     * the secure store layout: a missing one is skipped silently, and a
+     * non-regular one is logged at ERROR but still skipped, never fatal.
      */
     for (i = 0; (name = publish_order[i]) != NULL; i++) {
         ngx_autocert_stat_t  st;
