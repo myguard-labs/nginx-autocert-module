@@ -205,6 +205,8 @@ static ngx_thread_pool_t  *pool_get_result;      /* NULL models "no pool" */
 static ngx_int_t           task_post_result = NGX_OK;
 static int                 task_post_calls;
 static ngx_thread_task_t  *task_posted;
+/* When post fails, set event.active? (models cond_signal vs overflow) */
+static int                 task_post_fail_sets_active = 1;
 
 ngx_thread_pool_t *
 ngx_thread_pool_get(ngx_cycle_t *cycle, ngx_str_t *name)
@@ -222,14 +224,15 @@ ngx_thread_task_post(ngx_thread_pool_t *tp, ngx_thread_task_t *task)
 
     if (task_post_result != NGX_OK) {
         /*
-         * Model the REAL failure mode this fix exists for: nginx's
-         * ngx_thread_task_post() sets event.active = 1 before the
-         * ngx_thread_cond_signal() that can fail, and that failure path
-         * returns without clearing it and without enqueueing the task
-         * (nginx 1.31.4 src/core/ngx_thread_pool.c:251-258). A task left
-         * active is refused by every later post.
+         * Model the two failure modes: nginx's ngx_thread_task_post() can fail
+         * before OR after setting event.active = 1. The cond_signal failure
+         * (rare, line 257 of ngx_thread_pool.c) leaves active=1 in place. The
+         * overflow failure (common, line 243) returns before active is set to 1
+         * (it stays at 0). This test control distinguishes them.
          */
-        task->event.active = 1;
+        if (task_post_fail_sets_active) {
+            task->event.active = 1;
+        }
     }
 
     return task_post_result;
@@ -291,6 +294,7 @@ reset_state(void)
     csr_rc = NGX_OK;
     pool_get_result = &fake_pool;
     task_post_result = NGX_OK;
+    task_post_fail_sets_active = 1;
     task_post_calls = 0;
     task_posted = NULL;
     freed_n = 0;
@@ -551,8 +555,55 @@ main(void)
     ngx_http_autocert_key_free(order.cert_key);
     order.cert_key = NULL;
 
+    /* (b2) post fails with event.active=0 (queue overflow) -> task is REUSED.
+     * The overflow exit (ngx_thread_pool.c:243-249) returns before setting
+     * active, so the task is perfectly reusable. This test ensures we do NOT
+     * discard it unconditionally. Run from a FRESH state. */
+    reset_state();
+    {
+        ngx_thread_task_t  *reusable_task;
+
+        ngx_memzero(&order, sizeof(order));
+        order.log = &test_log;
+        task_post_result = NGX_ERROR;
+        task_post_fail_sets_active = 0;  /* Model overflow: no active=1 set */
+
+        OK(ngx_autocert_keygen_post(&order, NGX_HTTP_AUTOCERT_CRYPTO_RSA2048)
+           == NGX_OK,
+           "overflow: _post() falls back inline instead of failing the order");
+        OK(task_post_calls == 1, "overflow: a post was attempted");
+        reusable_task = ngx_autocert_keygen.task;
+        OK(reusable_task != NULL,
+           "overflow: the REUSABLE task is KEPT (not discarded)");
+        OK(task_posted != NULL && task_posted->event.active == 0,
+           "overflow: the returned task has active=0, so it was reusable");
+        ngx_http_autocert_key_free(order.cert_key);
+        order.cert_key = NULL;
+
+        /* Next call must reuse the same cached task, not allocate fresh. */
+        ngx_memzero(&order, sizeof(order));
+        order.log = &test_log;
+        csr_calls = 0;
+        task_post_calls = 0;
+        task_post_result = NGX_OK;
+        task_post_fail_sets_active = 1;  /* Restore default */
+
+        OK(ngx_autocert_keygen_post(&order, NGX_HTTP_AUTOCERT_CRYPTO_RSA2048)
+           == NGX_AGAIN,
+           "overflow recovery: the next order posts normally (NGX_AGAIN)");
+        OK(task_post_calls == 1, "overflow recovery: a post was attempted");
+        OK(task_posted == reusable_task,
+           "overflow recovery: the SAME cached task pointer is reused, no "
+           "fresh allocation");
+        OK(ngx_autocert_keygen.task == reusable_task,
+           "overflow recovery: the slot still holds the reused task");
+        OK(ngx_autocert_keygen.busy == 1 && ngx_autocert_keygen.order == &order,
+           "overflow recovery: the slot is properly armed");
+    }
+
     /* (c) the very next attempt must succeed -- proof the wedge is gone. A
      * cached poisoned task would be refused here by the real pool. */
+    reset_state();
     {
         ngx_thread_task_t  *first = task_posted;
 
