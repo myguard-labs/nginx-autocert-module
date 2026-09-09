@@ -1,4 +1,4 @@
-# sync-sha: 4d6b7b48a99d7e3f85ecef50479e9738b485d297df6000221906b8e3f4559784
+# sync-sha: c39a8539c28372a2f98b886b771e66ea519a794568eb99b0477cf9d5fbcb50a8
 name: Windows build
 
 # Native Windows port gate (W17). Proves the module compiles and links on
@@ -1697,13 +1697,44 @@ jobs:
               }
               Get-Process -Name nginx -ErrorAction SilentlyContinue |
                 Stop-Process -Force -ErrorAction SilentlyContinue
+
+              # Wait for all nginx processes to exit: both the main $proc handle
+              # and any stragglers found by name. Bounded timeout with polling.
+              $stopTimeout = 30000  # 30 seconds total
+              $pollInterval = 250   # 250ms between checks
+              $stopStart = [System.Diagnostics.Stopwatch]::StartNew()
+              $allExited = $false
+              while ($stopStart.ElapsedMilliseconds -lt $stopTimeout) {
+                $procStillRunning = $false
+                if ($proc -and -not $proc.HasExited) {
+                  $procStillRunning = $true
+                } else {
+                  # Check the main process handle exit
+                  try { $proc.Refresh() } catch { }
+                  if ($proc -and -not $proc.HasExited) { $procStillRunning = $true }
+                }
+
+                $strayNginx = Get-Process -Name nginx -ErrorAction SilentlyContinue
+                if ($strayNginx) { $procStillRunning = $true }
+
+                if (-not $procStillRunning) {
+                  $allExited = $true
+                  break
+                }
+                Start-Sleep -Milliseconds $pollInterval
+              }
+
+              if (-not $allExited) {
+                throw "nginx process(es) did not exit after 30-second force-stop timeout"
+              }
+
               $ErrorActionPreference = $prev
             }
 
-            # Re-read both serials AFTER nginx is stopped and cannot mutate the
-            # store. These are the baselines for pass 2: once the process is
-            # confirmed stopped, the store is immutable so no renewal can drift
-            # the baseline while pass 2 waits for a different serial.
+            # Re-read both serials AFTER nginx is stopped and confirmed exited.
+            # Every nginx process observed to exit, else the step above throws.
+            # The store is immutable so no renewal can drift the baseline while
+            # pass 2 waits for a different serial.
             $serial1Ec = Get-Serial $chain
             if (-not $serial1Ec) {
               throw "pass 1: EC certificate missing or unreadable after nginx stop"
@@ -1804,6 +1835,37 @@ jobs:
               }
               Get-Process -Name nginx -ErrorAction SilentlyContinue |
                 Stop-Process -Force -ErrorAction SilentlyContinue
+
+              # Wait for all nginx processes to exit: both the main $proc2 handle
+              # and any stragglers found by name. Bounded timeout with polling.
+              $stopTimeout = 30000  # 30 seconds total
+              $pollInterval = 250   # 250ms between checks
+              $stopStart = [System.Diagnostics.Stopwatch]::StartNew()
+              $allExited = $false
+              while ($stopStart.ElapsedMilliseconds -lt $stopTimeout) {
+                $procStillRunning = $false
+                if ($proc2 -and -not $proc2.HasExited) {
+                  $procStillRunning = $true
+                } else {
+                  # Check the main process handle exit
+                  try { $proc2.Refresh() } catch { }
+                  if ($proc2 -and -not $proc2.HasExited) { $procStillRunning = $true }
+                }
+
+                $strayNginx = Get-Process -Name nginx -ErrorAction SilentlyContinue
+                if ($strayNginx) { $procStillRunning = $true }
+
+                if (-not $procStillRunning) {
+                  $allExited = $true
+                  break
+                }
+                Start-Sleep -Milliseconds $pollInterval
+              }
+
+              if (-not $allExited) {
+                throw "nginx process(es) did not exit after 30-second force-stop timeout"
+              }
+
               $ErrorActionPreference = $prev
             }
           }
