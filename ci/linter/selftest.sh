@@ -409,6 +409,11 @@ calog_case 0 "lint-ca-log-safety: wrapped call still passes" \
     'ngx_log_error(NGX_LOG_ERR, r->log, 0, "%V", ngx_autocert_acme_log_safe(&r->url));'
 calog_case 0 "lint-ca-log-safety: debug level stays exempt" \
     'ngx_log_debug1(NGX_LOG_DEBUG_HTTP, r->connection->log, 0, "%V", &r->url);'
+calog_case 1 "lint-ca-log-safety: 'not ngx_log_debug' comment does not exempt an ERROR call" \
+    'ngx_log_error(NGX_LOG_ERR, r->log, 0, /* not ngx_log_debug */
+                  "%V", &r->url);'
+calog_case 0 "lint-ca-log-safety: helper call with space before its paren is still stripped" \
+    'ngx_log_error(NGX_LOG_ERR, r->log, 0, "%V", ngx_autocert_acme_log_safe (r->pool, &r->url));'
 
 if [ "$rc" -eq 0 ]; then
     echo "== lint gate selftest: all controls held =="

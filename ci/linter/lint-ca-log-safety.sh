@@ -33,7 +33,20 @@ rc=0
 # (e.g. missing `;`) cannot make a single match run away and scan the rest of
 # the file as one "statement".
 awk '
-/ngx_log_/ && !/ngx_log_debug/ {
+function is_debug_call(line,    n, name) {
+    # True only when the CALL SITE itself is an ngx_log_debug*(...) invocation
+    # -- i.e. the matched function name immediately preceding "(" starts with
+    # "ngx_log_debug". This must not be satisfied by the substring
+    # "ngx_log_debug" occurring anywhere else on the line (e.g. inside a
+    # comment), or a genuine ERROR/WARN/NOTICE call could be exempted by an
+    # unrelated word.
+    n = match(line, /ngx_log_[A-Za-z0-9_]*[ \t]*\(/)
+    if (n == 0) return 0
+    name = substr(line, n, RLENGTH)
+    sub(/[ \t]*\($/, "", name)
+    return (name ~ /^ngx_log_debug/)
+}
+/ngx_log_[A-Za-z0-9_]*[ \t]*\(/ && !is_debug_call($0) {
     # This is an ERROR/WARN/NOTICE level log (non-debug).
     # Accumulate the statement until a line ends with `;`, optionally followed
     # by trailing whitespace and/or a trailing comment.
@@ -65,8 +78,15 @@ awk '
     while (pos > 0) {
         before = substr(stmt_stripped, 1, pos - 1)
         after_prefix = substr(stmt_stripped, pos + length("ngx_autocert_acme_log_safe"))
+        # Tolerate whitespace between the helper name and its opening paren.
+        # The earlier generic run-collapse (line ~50) already reduces any
+        # run of spaces/tabs -- including a joined-statement newline -- to a
+        # single space, so at most one space can appear here.
+        skip = 0
+        if (substr(after_prefix, 1, 1) == " ") skip = 1
         # Find the opening paren
-        if (substr(after_prefix, 1, 1) == "(") {
+        if (substr(after_prefix, skip + 1, 1) == "(") {
+            after_prefix = substr(after_prefix, skip + 1)
             # Find matching closing paren
             paren_count = 1
             i = 2
