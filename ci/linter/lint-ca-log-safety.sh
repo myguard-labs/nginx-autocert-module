@@ -49,13 +49,38 @@ awk '
     # Normalize whitespace (POSIX-portable; no GNU-awk \s)
     gsub(/[ \t]+/, " ", stmt)
 
-    # Check for unwrapped &r->url (the unvalidated raw CA field)
-    if (stmt ~ /&r->url/) {
-        if (stmt !~ /ngx_autocert_acme_log_safe/) {
-            print FILENAME ":" stmt_start ": unwrapped &r->url in ngx_log_* (ERROR level)" \
-                  " (must wrap with ngx_autocert_acme_log_safe)"
-            found = 1
+    # Strip out ngx_autocert_acme_log_safe(...) calls before checking.
+    # This prevents bypassing the check by having the helper name in a comment
+    # while the raw &r->url is passed as an unwrapped argument.
+    stmt_stripped = stmt
+    pos = index(stmt_stripped, "ngx_autocert_acme_log_safe")
+    while (pos > 0) {
+        before = substr(stmt_stripped, 1, pos - 1)
+        after_prefix = substr(stmt_stripped, pos + length("ngx_autocert_acme_log_safe"))
+        # Find the opening paren
+        if (substr(after_prefix, 1, 1) == "(") {
+            # Find matching closing paren
+            paren_count = 1
+            i = 2
+            while (i <= length(after_prefix) && paren_count > 0) {
+                ch = substr(after_prefix, i, 1)
+                if (ch == "(") paren_count++
+                else if (ch == ")") paren_count--
+                i++
+            }
+            after = substr(after_prefix, i)
+            stmt_stripped = before after
+        } else {
+            break
         }
+        pos = index(stmt_stripped, "ngx_autocert_acme_log_safe")
+    }
+
+    # Check for unwrapped &r->url (the unvalidated raw CA field)
+    if (stmt_stripped ~ /&r->url/) {
+        print FILENAME ":" stmt_start ": unwrapped &r->url in ngx_log_* (ERROR level)" \
+              " (must wrap with ngx_autocert_acme_log_safe)"
+        found = 1
     }
 }
 END {
