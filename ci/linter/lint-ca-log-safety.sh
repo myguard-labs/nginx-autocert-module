@@ -29,33 +29,44 @@ rc=0
 # CA-controlled fields without wrapping. Join multi-line statements before
 # checking so continuation-line arguments are visible.
 
+# Statement accumulation is bounded so a pathological/unterminated statement
+# (e.g. missing `;`) cannot make a single match run away and scan the rest of
+# the file as one "statement".
 awk '
 /ngx_log_/ && !/ngx_log_debug/ {
     # This is an ERROR/WARN/NOTICE level log (non-debug).
-    # Accumulate the statement until it ends with `;`
+    # Accumulate the statement until a line ends with `;`, optionally followed
+    # by trailing whitespace and/or a trailing comment.
     stmt_start = NR
     stmt = $0
+    lines = 1
 
-    while (stmt !~ /;$/ && getline > 0) {
+    while (stmt !~ /;[ \t]*(\/\*.*)?$/ && lines < 50 && getline > 0) {
         stmt = stmt " " $0
+        lines++
     }
 
-    # Normalize whitespace
-    gsub(/\s+/, " ", stmt)
+    # Normalize whitespace (POSIX-portable; no GNU-awk \s)
+    gsub(/[ \t]+/, " ", stmt)
 
     # Check for unwrapped &r->url (the unvalidated raw CA field)
     if (stmt ~ /&r->url/) {
         if (stmt !~ /ngx_autocert_acme_log_safe/) {
             print FILENAME ":" stmt_start ": unwrapped &r->url in ngx_log_* (ERROR level)" \
                   " (must wrap with ngx_autocert_acme_log_safe)"
-            exit 1
+            found = 1
         }
+    }
+}
+END {
+    if (found) {
+        exit 1
     }
 }
 ' "${FILES[@]}" || rc=1
 
 if [ "$rc" -eq 0 ]; then
-	echo "lint-ca-log-safety: CA-controlled fields are safe at ERROR+ levels"
+	echo "lint-ca-log-safety: no unwrapped &r->url in ngx_log_* at ERROR+ levels"
 fi
 
 exit "$rc"
