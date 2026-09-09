@@ -16,11 +16,11 @@
 . "$(git rev-parse --show-toplevel)/ci/linter/lib.sh"
 
 FILES_LIST="$(lint_files '^src/.*\.[ch]$' "$@")" || exit 2
-mapfile -t FILES <<<"$FILES_LIST"
-[ "${#FILES[@]}" -gt 0 ] || {
+[ -n "$FILES_LIST" ] || {
 	echo "lint-ca-log-safety: no C files to check"
 	exit 0
 }
+mapfile -t FILES <<<"$FILES_LIST"
 
 echo "lint-ca-log-safety: ${#FILES[@]}" file\(s\)
 rc=0
