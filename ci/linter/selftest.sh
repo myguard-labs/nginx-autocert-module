@@ -371,6 +371,56 @@ printf 'a: 1\na: 2\n' > "$yamlroot/err.yml"
 case_ 1 "lint-yaml: error-level YAML fails the gate" \
     bash -c "cd '$PWD' && ci/linter/lint-yaml.sh '$yamlroot/err.yml'"
 
+# lint-ca-log-safety: whitespace-tolerant &r->url detection.
+#
+# lint_files() matches only '^src/.*\.[ch]$' and, given explicit args, filters
+# on the string alone without consulting git -- so a fixture rooted under a
+# throwaway '<tmp>/src/...' satisfies the selector as long as the linter's
+# cwd resolves that tmp dir as its git toplevel (it sources lib.sh via
+# `git rev-parse --show-toplevel`). Build a scratch git repo with its own
+# src/ and a copied lib.sh so nothing here touches the real tree or git index.
+calogroot="$(mktemp -d)"
+trap 'rm -rf "$badroot" "$yamlroot" "$calogroot"' EXIT
+mkdir -p "$calogroot/src" "$calogroot/ci/linter"
+cp "$ROOT/ci/linter/lib.sh" "$calogroot/ci/linter/lib.sh"
+git -C "$calogroot" init -q .
+
+calog_case() {
+    # calog_case <expected-exit> <description> <statement-body>
+    local expect="$1" desc="$2" body="$3"
+    cat > "$calogroot/src/fixture.c" <<EOF
+void f(ngx_http_request_t *r) {
+    $body
+}
+EOF
+    case_ "$expect" "$desc" \
+        bash -c "cd '$calogroot' && bash '$ROOT/ci/linter/lint-ca-log-safety.sh' src/fixture.c"
+}
+
+calog_case 1 "lint-ca-log-safety: literal &r->url is caught" \
+    'ngx_log_error(NGX_LOG_ERR, r->log, 0, "%V", &r->url);'
+calog_case 1 "lint-ca-log-safety: '& r->url' spacing is caught" \
+    'ngx_log_error(NGX_LOG_ERR, r->log, 0, "%V", & r->url);'
+calog_case 1 "lint-ca-log-safety: '&r -> url' spacing is caught" \
+    'ngx_log_error(NGX_LOG_ERR, r->log, 0, "%V", &r -> url);'
+calog_case 1 "lint-ca-log-safety: '&r->    url' spacing is caught" \
+    'ngx_log_error(NGX_LOG_ERR, r->log, 0, "%V", &r->    url);'
+calog_case 0 "lint-ca-log-safety: wrapped call still passes" \
+    'ngx_log_error(NGX_LOG_ERR, r->log, 0, "%V", ngx_autocert_acme_log_safe(&r->url));'
+calog_case 0 "lint-ca-log-safety: debug level stays exempt" \
+    'ngx_log_debug1(NGX_LOG_DEBUG_HTTP, r->connection->log, 0, "%V", &r->url);'
+calog_case 1 "lint-ca-log-safety: 'not ngx_log_debug' comment does not exempt an ERROR call" \
+    'ngx_log_error(NGX_LOG_ERR, r->log, 0, /* not ngx_log_debug */
+                  "%V", &r->url);'
+calog_case 0 "lint-ca-log-safety: helper call with space before its paren is still stripped" \
+    'ngx_log_error(NGX_LOG_ERR, r->log, 0, "%V", ngx_autocert_acme_log_safe (r->pool, &r->url));'
+calog_case 1 "lint-ca-log-safety: commented-out helper call does not mask a raw &r->url" \
+    'ngx_log_error(NGX_LOG_ERR, r->log, 0,
+                  "%V", /* ngx_autocert_acme_log_safe(r->pool, */ &r->url /* ) */);'
+calog_case 1 "lint-ca-log-safety: legitimate trailing comment after ; still terminates the statement" \
+    'ngx_log_error(NGX_LOG_ERR, r->log, 0, "%V", &r->url); /* trailing comment */
+    ngx_log_error(NGX_LOG_ERR, r->log, 0, "%V", ngx_autocert_acme_log_safe(&r->url));'
+
 if [ "$rc" -eq 0 ]; then
     echo "== lint gate selftest: all controls held =="
 else

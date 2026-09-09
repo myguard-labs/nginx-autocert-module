@@ -257,6 +257,9 @@ ngx_autocert_acme_request(ngx_autocert_acme_request_t *r)
         ngx_str_set(&r->method, "GET");
     }
 
+    /* Debug log: runtime-gated (normally OFF), low-integrity stream. &r->url
+     * is unvalidated but safe here since ngx_log_debug* is not emitted unless
+     * explicitly enabled. Wrapping would add per-request allocation cost. */
     ngx_log_debug2(NGX_LOG_DEBUG_CORE, r->log, 0,
                    "autocert: request %V \"%V\"", &r->method, &r->url);
 
@@ -365,9 +368,9 @@ ngx_autocert_acme_request(ngx_autocert_acme_request_t *r)
 
 
 /*
- * Parse an absolute https:// URL into host/port/uri. Only https is accepted —
- * ACME is TLS-only. IPv6 literals in [..] are supported. Defaults: port 443,
- * uri "/".
+ * Reject any byte outside the printable-ASCII range (control chars < 0x21,
+ * or DEL 0x7f). Used to sanity-check CA-controlled URL parts before they are
+ * trusted elsewhere (e.g. before logging or further parsing).
  */
 static ngx_int_t
 ngx_autocert_acme_url_part_safe(ngx_str_t *s)
@@ -386,6 +389,11 @@ ngx_autocert_acme_url_part_safe(ngx_str_t *s)
 }
 
 
+/*
+ * Parse an absolute https:// URL into host/port/uri. Only https is accepted —
+ * ACME is TLS-only. IPv6 literals in [..] are supported. Defaults: port 443,
+ * uri "/".
+ */
 static ngx_int_t
 ngx_autocert_acme_parse_url(ngx_autocert_acme_request_t *r)
 {
