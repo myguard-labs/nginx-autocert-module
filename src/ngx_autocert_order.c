@@ -2141,12 +2141,14 @@ ngx_autocert_keygen_post(ngx_autocert_order_t *order, ngx_uint_t curve)
 
     if (ngx_thread_task_post(tp, ngx_autocert_keygen.task) != NGX_OK) {
         /*
-         * ngx_thread_task_post() sets task->event.active = 1 BEFORE the
-         * ngx_thread_cond_signal() that can rarely fail. The overflow exit
-         * (line 249 of ngx_thread_pool.c) is the common case — it returns
-         * before setting active and the task is reusable. The cond_signal
-         * failure at line 257-259 is extremely rare, and it returns with
-         * active=1 still set, so nothing will ever clear it (only
+         * ngx_thread_task_post() sets task->event.active = 1 (line 252 of
+         * ngx_thread_pool.c) only after every pre-active exit has already
+         * returned: the already-active guard at line 233, the mutex-lock
+         * failure at line 239, and the queue-overflow exit at lines 243-249.
+         * All three leave active=0 and the task is reusable. Exactly one exit
+         * comes AFTER active is set: the cond_signal failure at lines
+         * 257-259, which is extremely rare, and it returns with active=1
+         * still set, so nothing will ever clear it (only
          * ngx_thread_pool_handler() does that). Every other nginx consumer
          * allocates a fresh task per request; this slot reuses ONE task for
          * the worker's lifetime. If we kept a poisoned task, every later
@@ -2154,10 +2156,17 @@ ngx_autocert_keygen_post(ngx_autocert_order_t *order, ngx_uint_t curve)
          * issuance would stop until worker restart.
          *
          * Test the observable (event.active) to distinguish the cases: if
-         * active is set, the task is stuck and must be discarded (leaked,
-         * because it may still be in flight); if clear, it is reusable. The
-         * discard is deliberate: a leaked ngx_thread_task_t is bounded to a
-         * genuinely broken thread pool, and far better than wedging renewals.
+         * active is set, the cond_signal failure happened and the task must
+         * be discarded; if clear, it is one of the pre-active exits and is
+         * reusable. On the cond_signal path the task was never linked into
+         * the pool's queue (that happens at lines 262-263, after the failing
+         * call) and tp->waiting was never incremented (line 265), so no pool
+         * thread can ever see or run it — it is unreachable, not in flight.
+         * It is still permanently stuck with active=1, a flag only
+         * ngx_thread_pool_handler() clears; rather than hand-clear another
+         * subsystem's state, we drop the reference and allocate fresh, at the
+         * cost of one bounded ngx_thread_task_t leaked on a path that
+         * requires a broken thread pool.
          */
         ngx_autocert_keygen.order = NULL;
 

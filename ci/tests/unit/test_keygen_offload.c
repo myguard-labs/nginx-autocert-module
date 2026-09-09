@@ -224,11 +224,15 @@ ngx_thread_task_post(ngx_thread_pool_t *tp, ngx_thread_task_t *task)
 
     if (task_post_result != NGX_OK) {
         /*
-         * Model the two failure modes: nginx's ngx_thread_task_post() can fail
-         * before OR after setting event.active = 1. The cond_signal failure
-         * (rare, line 257 of ngx_thread_pool.c) leaves active=1 in place. The
-         * overflow failure (common, line 243) returns before active is set to 1
-         * (it stays at 0). This test control distinguishes them.
+         * Model the class of pre-active exits versus the one post-active
+         * exit: nginx's ngx_thread_task_post() can fail before OR after
+         * setting event.active = 1 (line 252 of ngx_thread_pool.c). The
+         * pre-active class returns with active still 0 -- the already-active
+         * guard at line 233, the mutex-lock failure at line 239, and the
+         * common queue-overflow exit at lines 243-249. Exactly one exit comes
+         * after active is set: the cond_signal failure (rare, lines 257-259
+         * of ngx_thread_pool.c), which leaves active=1 in place. This test
+         * control distinguishes the two classes.
          */
         if (task_post_fail_sets_active) {
             task->event.active = 1;
@@ -555,6 +559,45 @@ main(void)
     ngx_http_autocert_key_free(order.cert_key);
     order.cert_key = NULL;
 
+    /* (c) the very next attempt must succeed -- proof the wedge from (b) is
+     * gone. Deliberately NOT preceded by reset_state(): `first` must be the
+     * real poisoned task pointer (b) left in task_posted, or this proves
+     * nothing (a NULL `first` would make "task_posted != first" pass under
+     * both the old and the new implementation). A cached poisoned task would
+     * be refused here by the real pool. */
+    {
+        ngx_thread_task_t  *first = task_posted;
+
+        ngx_memzero(&order, sizeof(order));
+        order.log = &test_log;
+        csr_calls = 0;
+        task_post_calls = 0;
+        task_post_result = NGX_OK;
+
+        OK(first != NULL, "after a failed post: the poisoned task pointer "
+           "from (b) was captured, not lost to a reset");
+        OK(ngx_autocert_keygen_post(&order, NGX_HTTP_AUTOCERT_CRYPTO_RSA2048)
+           == NGX_AGAIN,
+           "after a failed post the NEXT order posts normally (NGX_AGAIN)");
+        OK(task_post_calls == 1, "after a failed post: a post was attempted");
+        OK(task_posted != first,
+           "after a failed post: a FRESH task was allocated, not the poisoned "
+           "one");
+        OK(task_posted != NULL && task_posted->event.active == 0,
+           "after a failed post: the fresh task is not already active");
+        OK(ngx_autocert_keygen.busy == 1 && ngx_autocert_keygen.order == &order,
+           "after a failed post: the slot is properly armed");
+
+        /* Production deliberately leaks the poisoned task; free it here so the
+         * suite stays clean under LeakSanitizer. Guarded: if a regression left
+         * it cached in the slot, `first` is still the slot's task and freeing
+         * it would double-free at the next reset_state() -- an abort that would
+         * hide which assertion above went red. */
+        if (first != ngx_autocert_keygen.task) {
+            ngx_free(first);
+        }
+    }
+
     /* (b2) post fails with event.active=0 (queue overflow) -> task is REUSED.
      * The overflow exit (ngx_thread_pool.c:243-249) returns before setting
      * active, so the task is perfectly reusable. This test ensures we do NOT
@@ -599,40 +642,6 @@ main(void)
            "overflow recovery: the slot still holds the reused task");
         OK(ngx_autocert_keygen.busy == 1 && ngx_autocert_keygen.order == &order,
            "overflow recovery: the slot is properly armed");
-    }
-
-    /* (c) the very next attempt must succeed -- proof the wedge is gone. A
-     * cached poisoned task would be refused here by the real pool. */
-    reset_state();
-    {
-        ngx_thread_task_t  *first = task_posted;
-
-        ngx_memzero(&order, sizeof(order));
-        order.log = &test_log;
-        csr_calls = 0;
-        task_post_calls = 0;
-        task_post_result = NGX_OK;
-
-        OK(ngx_autocert_keygen_post(&order, NGX_HTTP_AUTOCERT_CRYPTO_RSA2048)
-           == NGX_AGAIN,
-           "after a failed post the NEXT order posts normally (NGX_AGAIN)");
-        OK(task_post_calls == 1, "after a failed post: a post was attempted");
-        OK(task_posted != first,
-           "after a failed post: a FRESH task was allocated, not the poisoned "
-           "one");
-        OK(task_posted != NULL && task_posted->event.active == 0,
-           "after a failed post: the fresh task is not already active");
-        OK(ngx_autocert_keygen.busy == 1 && ngx_autocert_keygen.order == &order,
-           "after a failed post: the slot is properly armed");
-
-        /* Production deliberately leaks the poisoned task; free it here so the
-         * suite stays clean under LeakSanitizer. Guarded: if a regression left
-         * it cached in the slot, `first` is still the slot's task and freeing
-         * it would double-free at the next reset_state() -- an abort that would
-         * hide which assertion above went red. */
-        if (first != ngx_autocert_keygen.task) {
-            ngx_free(first);
-        }
     }
 
     /* (d) happy path: a successful post arms the slot and returns NGX_AGAIN,
