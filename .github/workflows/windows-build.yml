@@ -1,4 +1,4 @@
-# sync-sha: a6e49f5b8a020b85efbb004b7325d96c4a4d1b6a0a1a89d0a5d77e9edcadf62c
+# sync-sha: 4d6b7b48a99d7e3f85ecef50479e9738b485d297df6000221906b8e3f4559784
 name: Windows build
 
 # Native Windows port gate (W17). Proves the module compiles and links on
@@ -1671,21 +1671,23 @@ jobs:
                 Get-Content "$root/logs/error.log" -ErrorAction SilentlyContinue | Write-Host
                 throw "nginx.exe exited immediately with $($proc.ExitCode)"
               }
-              $serial1Ec = Wait-Serial $chain $null
-              if (-not $serial1Ec) {
+              # Wait for BOTH certs to exist as an existence check (proves both
+              # slots got issued; keeps distinct EC/RSA error messages).
+              $existEc = Wait-Serial $chain $null
+              if (-not $existEc) {
                 Get-Content "$root/logs/error.log" -Tail 60 -ErrorAction SilentlyContinue | Write-Host
                 Get-Content $pebbleOut, $pebbleErr -ErrorAction SilentlyContinue |
                   Select-Object -Last 40 | Write-Host
                 throw "pass 1: no EC certificate was issued"
               }
-              $serial1Rsa = Wait-Serial $chainRsa $null
-              if (-not $serial1Rsa) {
+              $existRsa = Wait-Serial $chainRsa $null
+              if (-not $existRsa) {
                 Get-Content "$root/logs/error.log" -Tail 60 -ErrorAction SilentlyContinue | Write-Host
                 Get-Content $pebbleOut, $pebbleErr -ErrorAction SilentlyContinue |
                   Select-Object -Last 40 | Write-Host
                 throw "pass 1: no RSA certificate was issued"
               }
-              Write-Host "OK pass 1 issued EC: $serial1Ec RSA: $serial1Rsa"
+              Write-Host "OK pass 1 issued EC and RSA certificates (existence verified)"
             }
             finally {
               $ErrorActionPreference = 'Continue'
@@ -1697,6 +1699,20 @@ jobs:
                 Stop-Process -Force -ErrorAction SilentlyContinue
               $ErrorActionPreference = $prev
             }
+
+            # Re-read both serials AFTER nginx is stopped and cannot mutate the
+            # store. These are the baselines for pass 2: once the process is
+            # confirmed stopped, the store is immutable so no renewal can drift
+            # the baseline while pass 2 waits for a different serial.
+            $serial1Ec = Get-Serial $chain
+            if (-not $serial1Ec) {
+              throw "pass 1: EC certificate missing or unreadable after nginx stop"
+            }
+            $serial1Rsa = Get-Serial $chainRsa
+            if (-not $serial1Rsa) {
+              throw "pass 1: RSA certificate missing or unreadable after nginx stop"
+            }
+            Write-Host "OK pass 1 baselines re-read after stop: EC: $serial1Ec RSA: $serial1Rsa"
 
             # ---------- pass 2: renewal over the EXISTING live dir ----------
             # A fresh nginx rescans the store, finds the 1h cert inside the 2h
