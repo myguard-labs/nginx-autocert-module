@@ -1,4 +1,4 @@
-# sync-sha: 1b21088a9e5dae9858ebe185a29750a60de774e5957efdf0e525dde1b4597e7f
+# sync-sha: a6e49f5b8a020b85efbb004b7325d96c4a4d1b6a0a1a89d0a5d77e9edcadf62c
 name: Windows build
 
 # Native Windows port gate (W17). Proves the module compiles and links on
@@ -1637,7 +1637,11 @@ jobs:
               '    autocert_challenge http-01;',
               # 2h > the 1h Pebble lifetime => always inside the renew window.
               '    autocert_renew_before 2h;',
-              '    autocert_key_type ec rsa;',
+              # One EC + one RSA => the dual-cert store path, which is what
+              # exercises the hardlink-seeded other-keytype interaction.
+              # "ec" is NOT a valid spelling; the EC types are p384/p256 and
+              # their OpenSSL aliases. "rsa" aliases rsa3072.
+              '    autocert_key_type p384 rsa;',
               '    server {',
               "        listen $httpPort;",
               "        server_name ${hostIp};",
