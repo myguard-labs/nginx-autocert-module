@@ -37,7 +37,7 @@ awk '
     # This is an ERROR/WARN/NOTICE level log (non-debug).
     # Accumulate the statement until a line ends with `;`, optionally followed
     # by trailing whitespace and/or a trailing comment.
-    stmt_start = NR
+    stmt_start = FNR
     stmt = $0
     lines = 1
 
