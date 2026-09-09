@@ -257,6 +257,9 @@ ngx_autocert_acme_request(ngx_autocert_acme_request_t *r)
         ngx_str_set(&r->method, "GET");
     }
 
+    /* Debug log: runtime-gated (normally OFF), low-integrity stream. &r->url
+     * is unvalidated but safe here since ngx_log_debug* is not emitted unless
+     * explicitly enabled. Wrapping would add per-request allocation cost. */
     ngx_log_debug2(NGX_LOG_DEBUG_CORE, r->log, 0,
                    "autocert: request %V \"%V\"", &r->method, &r->url);
 
