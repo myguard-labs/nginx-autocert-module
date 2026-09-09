@@ -3764,13 +3764,15 @@ ngx_autocert_order_publish_files_at(ngx_autocert_order_t *order, int cfd,
      */
     for (i = 0; (name = publish_order[i]) != NULL; i++) {
         ngx_autocert_stat_t  st;
-        int                  is_mandatory = (i < 2);
+        int                  is_mandatory = (name == priv_name ||
+                                             name == chain_name);
 
         if (ngx_autocert_fstatat(sfd, name, &st, AT_SYMLINK_NOFOLLOW) == -1) {
             if (ngx_errno == NGX_ENOENT) {
                 if (is_mandatory) {
-                    ngx_log_error(NGX_LOG_ERR, order->log, NGX_ENOENT,
-                                  "autocert: publish \"%s\" missing", name);
+                    ngx_log_error(NGX_LOG_ERR, order->log, ngx_errno,
+                                  "autocert: publish \"%s\" missing from "
+                                  "staging", name);
                     failed = name;
                     rc = NGX_ERROR;
                     break;
@@ -3792,6 +3794,9 @@ ngx_autocert_order_publish_files_at(ngx_autocert_order_t *order, int cfd,
                 rc = NGX_ERROR;
                 break;
             }
+            ngx_log_error(NGX_LOG_ERR, order->log, 0,
+                          "autocert: publish \"%s\" not a regular file; "
+                          "skipping", name);
             continue;
         }
 
