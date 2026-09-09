@@ -49,6 +49,14 @@ awk '
     # Normalize whitespace (POSIX-portable; no GNU-awk \s)
     gsub(/[ \t]+/, " ", stmt)
 
+    # Collapse whitespace around `&` and `->` so `& r->url`, `&r -> url`,
+    # `&r->  url` etc. normalize to the same spelling as `&r->url`. Applied
+    # after the generic run-collapse above so only single spaces remain to
+    # strip here.
+    gsub(/& /, "\\&", stmt)
+    gsub(/ ->/, "->", stmt)
+    gsub(/-> /, "->", stmt)
+
     # Strip out ngx_autocert_acme_log_safe(...) calls before checking.
     # This prevents bypassing the check by having the helper name in a comment
     # while the raw &r->url is passed as an unwrapped argument.
