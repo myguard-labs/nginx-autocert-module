@@ -414,6 +414,12 @@ calog_case 1 "lint-ca-log-safety: 'not ngx_log_debug' comment does not exempt an
                   "%V", &r->url);'
 calog_case 0 "lint-ca-log-safety: helper call with space before its paren is still stripped" \
     'ngx_log_error(NGX_LOG_ERR, r->log, 0, "%V", ngx_autocert_acme_log_safe (r->pool, &r->url));'
+calog_case 1 "lint-ca-log-safety: commented-out helper call does not mask a raw &r->url" \
+    'ngx_log_error(NGX_LOG_ERR, r->log, 0,
+                  "%V", /* ngx_autocert_acme_log_safe(r->pool, */ &r->url /* ) */);'
+calog_case 1 "lint-ca-log-safety: legitimate trailing comment after ; still terminates the statement" \
+    'ngx_log_error(NGX_LOG_ERR, r->log, 0, "%V", &r->url); /* trailing comment */
+    ngx_log_error(NGX_LOG_ERR, r->log, 0, "%V", ngx_autocert_acme_log_safe(&r->url));'
 
 if [ "$rc" -eq 0 ]; then
     echo "== lint gate selftest: all controls held =="

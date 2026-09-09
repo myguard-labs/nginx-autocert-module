@@ -33,6 +33,43 @@ rc=0
 # (e.g. missing `;`) cannot make a single match run away and scan the rest of
 # the file as one "statement".
 awk '
+function strip_c_comments(s,    out, start, end) {
+    # Remove /* ... */ comments from an already-joined, whitespace-collapsed
+    # single-line statement. Must run AFTER the statement is fully
+    # accumulated and normalized, and BEFORE helper-call recognition and the
+    # raw &r->url test -- otherwise a commented-out
+    # "ngx_autocert_acme_log_safe(" can impersonate a real wrapper call and
+    # its paren-balanced removal will delete a live, unwrapped argument along
+    # with the comment (the very bypass this function exists to close).
+    #
+    # This statement was joined from possibly-multiple source lines into one
+    # line before this point, so a multi-line /* ... */ comment now appears
+    # as a single run within that line -- a plain non-greedy scan is enough;
+    # no line-oriented state machine is needed. POSIX-portable index()/substr()
+    # only, no GNU awk extensions.
+    out = ""
+    while (1) {
+        start = index(s, "/*")
+        if (start == 0) {
+            out = out s
+            break
+        }
+        out = out substr(s, 1, start - 1)
+        rest = substr(s, start + 2)
+        end = index(rest, "*/")
+        if (end == 0) {
+            # Unterminated comment: drop the remainder: it cannot hide a
+            # real call site that awk would still need to see.
+            s = ""
+            break
+        }
+        # Replace the whole comment with a single space so tokens that were
+        # separated only by the comment do not fuse together.
+        out = out " "
+        s = substr(rest, end + 2)
+    }
+    return out
+}
 function is_debug_call(line,    n, name) {
     # True only when the CALL SITE itself is an ngx_log_debug*(...) invocation
     # -- i.e. the matched function name immediately preceding "(" starts with
@@ -69,6 +106,21 @@ function is_debug_call(line,    n, name) {
     gsub(/& /, "\\&", stmt)
     gsub(/ ->/, "->", stmt)
     gsub(/-> /, "->", stmt)
+
+    # Strip C comments from the fully-joined, normalized statement BEFORE
+    # recognizing helper calls and before the raw-&r->url test. Ordering
+    # this after termination/normalization (above) but before helper
+    # recognition (below) means: (1) the termination regex on line ~44 that
+    # deliberately allows a trailing "; /* comment */" still sees the
+    # unmodified stmt while accumulating, so a legitimate trailing comment
+    # keeps terminating the statement normally; (2) is_debug_call() keys off
+    # the ORIGINAL per-line text at the call site and is unaffected, since
+    # comment-stripping only touches this fully-accumulated `stmt` used for
+    # the helper/raw-argument checks below; (3) a helper name appearing only
+    # inside a comment can no longer impersonate a real wrapper call, so its
+    # paren-balanced removal can no longer delete a live, unwrapped argument
+    # along with the commented-out text.
+    stmt = strip_c_comments(stmt)
 
     # Strip out ngx_autocert_acme_log_safe(...) calls before checking.
     # This prevents bypassing the check by having the helper name in a comment
