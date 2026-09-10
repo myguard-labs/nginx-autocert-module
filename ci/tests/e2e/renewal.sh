@@ -9,13 +9,13 @@
 #
 # We drive both:
 #   - Two server{} blocks (two domains) -> assert BOTH get a cert on first run.
-#   - Pebble issues 1h certs (certificateValidityPeriod: 3600) and
-#     autocert_renew_before is 2h (> lifetime, under the 89d config clamp) so
-#     every stored cert is permanently "inside" its renew window.
-#     A reload spawns a fresh helper whose initial scan therefore reissues both
-#     domains. We capture each leaf's serial before the reload and assert it
-#     changes after — i.e. a genuine reissue landed atomically in the store and
-#     the per-SNI serve path would hot-reload it (M7).
+#   - Pebble issues 1h certs (certificateValidityPeriod: 3600). At provisioning,
+#     autocert_renew_before is 60s (< lifetime) so stored certs are NOT
+#     immediately due; later we switch renew_before higher for renewal. A
+#     reload spawns a fresh helper whose initial scan then reissues both
+#     domains. We capture each leaf's serial before the switch and assert it
+#     changes after the reload — i.e. a genuine reissue landed atomically in
+#     the store and the per-SNI serve path would hot-reload it (M7).
 #
 # Inputs (env):
 #   SERVER_BIN   - path to the built nginx/angie binary (required)
@@ -123,9 +123,9 @@ done
 
 docker cp "$PEBBLE_NAME:/test/certs/pebble.minica.pem" "$PREFIX/ca.pem"
 
-# Pebble issues 1h certs here (certificateValidityPeriod: 3600); renew_before 2h
-# exceeds that lifetime => every cert is always inside its renew window, so a
-# fresh helper scan reissues it. 2h stays under the 89d config clamp.
+# Pebble issues 1h certs here (certificateValidityPeriod: 3600). We provision with
+# a small renew_before (60s) so pass-1 certs are NOT inside their renew window and
+# the background scheduler cannot renew them during baseline capture.
 cat > "$PREFIX/conf/nginx.conf" <<EOF
 load_module $HTTP_SO;
 user root;   # worker-0 ACME driver writes the store; keep worker uid able to
@@ -138,7 +138,7 @@ http {
     autocert_resolver 127.0.0.1:${DNS_PORT};
     autocert_ca_trusted_certificate $PREFIX/ca.pem;
     autocert_store_path $PREFIX/store;
-    autocert_renew_before 2h;
+    autocert_renew_before 60s;
     server { listen ${AC_PORT_5002:-5002}; server_name ${DOMAIN_A}; }
     server { listen ${AC_PORT_5002:-5002}; server_name ${DOMAIN_B}; }
 }
@@ -166,6 +166,20 @@ SERIAL_A1=$(wait_for_cert "$CHAIN_A") || { echo "::error::${DOMAIN_A} not provis
 SERIAL_B1=$(wait_for_cert "$CHAIN_B") || { echo "::error::${DOMAIN_B} not provisioned"; grep autocert "$PREFIX/logs/error.log" || true; docker logs "$PEBBLE_NAME" 2>&1 | tail -40; exit 1; }
 echo "✓ both domains provisioned (multi-name): A=$SERIAL_A1 B=$SERIAL_B1"
 
+# Now switch the config file to renew_before 2h (> the 1h cert lifetime,
+# under the 89d config clamp). The running instance keeps renew_before 60s
+# until the reload below, so the first moment either cert can read as due is
+# the fresh helper's initial scan — any serial change after the reload is
+# attributable to it and not to a background scheduler race.
+echo "== updating config: autocert_renew_before 60s -> 2h =="
+grep -q 'autocert_renew_before 60s;' "$PREFIX/conf/nginx.conf" \
+    || { echo "::error::nginx.conf does not contain autocert_renew_before 60s before rewrite"; exit 1; }
+sed -i 's/autocert_renew_before 60s;/autocert_renew_before 2h;/' \
+    "$PREFIX/conf/nginx.conf"
+grep -q 'autocert_renew_before 2h;' "$PREFIX/conf/nginx.conf" \
+    || { echo "::error::nginx.conf does not contain autocert_renew_before 2h after rewrite"; exit 1; }
+"$SERVER_BIN" -t -p "$PREFIX" -c "$PREFIX/conf/nginx.conf"
+
 # Reload -> fresh helper -> initial scan finds both inside the renew window
 # (renew_before 2h > 1h cert lifetime) -> reissues both. New serials prove it.
 echo "== reload: force renewal scan =="
@@ -185,9 +199,27 @@ SERIAL_A2=$(renewed "$CHAIN_A" "$SERIAL_A1") || { echo "::error::${DOMAIN_A} not
 SERIAL_B2=$(renewed "$CHAIN_B" "$SERIAL_B1") || { echo "::error::${DOMAIN_B} not renewed (serial unchanged)"; grep autocert "$PREFIX/logs/error.log" | tail -30; exit 1; }
 echo "✓ both domains reissued inside renew window: A=$SERIAL_A2 B=$SERIAL_B2"
 
+# The running instance still holds renew_before 2h against 1h Pebble certs, so
+# every stored cert reads as permanently due and the scheduler (NGX_AUTOCERT_TEST
+# floor: ~5s) will keep reissuing. Bring the store back to a not-due, quiescent
+# state before reading it, or the consistency checks below can sample across a
+# live reissue's atomic swap.
+echo "== restart with small renew_before (quiesce store before verification) =="
+"$SERVER_BIN" -p "$PREFIX" -c "$PREFIX/conf/nginx.conf" -s stop
+sleep 1
+grep -q 'autocert_renew_before 2h;' "$PREFIX/conf/nginx.conf" \
+    || { echo "::error::nginx.conf does not contain autocert_renew_before 2h before rewrite"; exit 1; }
+sed -i 's/autocert_renew_before 2h;/autocert_renew_before 60s;/' \
+    "$PREFIX/conf/nginx.conf"
+grep -q 'autocert_renew_before 60s;' "$PREFIX/conf/nginx.conf" \
+    || { echo "::error::nginx.conf does not contain autocert_renew_before 60s after rewrite"; exit 1; }
+"$SERVER_BIN" -t -p "$PREFIX" -c "$PREFIX/conf/nginx.conf"
+"$SERVER_BIN" -p "$PREFIX" -c "$PREFIX/conf/nginx.conf"
+
 # Renewed cert must still be a valid leaf that certifies its domain and whose
 # pubkey matches the (freshly issued) stored key — i.e. the atomic swap kept the
-# key/chain pair consistent.
+# key/chain pair consistent. The store is quiescent now (60s, not due), so these
+# reads cannot race a live reissue.
 for d in "$DOMAIN_A" "$DOMAIN_B"; do
     key="$PREFIX/store/$d/privkey.pem"
     chain="$PREFIX/store/$d/fullchain.pem"
@@ -202,18 +234,14 @@ done
 echo "✓ renewed key/chain pairs are consistent, no staging leftover (atomic swap)"
 
 # --- Negative cases (M9): staleness detection -------------------------------
-# Switch to a SMALL renew_before so a healthy stored cert is NOT due — that lets
-# us prove the scheduler reissues ONLY when the stored fullchain is unusable
-# (corrupt / missing / a symlink), and leaves a healthy cert untouched.
-echo "== restart with small renew_before (healthy certs not due) =="
-"$SERVER_BIN" -p "$PREFIX" -c "$PREFIX/conf/nginx.conf" -s stop
-sleep 1
-sed -i 's/autocert_renew_before 2h;/autocert_renew_before 60s;/' \
-    "$PREFIX/conf/nginx.conf"
-"$SERVER_BIN" -t -p "$PREFIX" -c "$PREFIX/conf/nginx.conf"
-"$SERVER_BIN" -p "$PREFIX" -c "$PREFIX/conf/nginx.conf"
+# The instance is already running under the small renew_before from the quiesce
+# restart above, so healthy stored certs are NOT due — that lets us prove the
+# scheduler reissues ONLY when the stored fullchain is unusable (corrupt /
+# missing / a symlink), and leaves a healthy cert untouched.
 
 # Healthy certs must survive the initial scan unchanged (control).
+grep -q 'autocert_renew_before 60s;' "$PREFIX/conf/nginx.conf" \
+    || { echo "::error::M9 negatives require the 60s instance"; exit 1; }
 SERIAL_A3=$(openssl x509 -in "$CHAIN_A" -noout -serial)
 SERIAL_B3=$(openssl x509 -in "$CHAIN_B" -noout -serial)
 sleep 6
