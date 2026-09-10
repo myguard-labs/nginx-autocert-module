@@ -137,16 +137,18 @@ policy_absent_() {
 # Presence and absence both go blind to duplication: one real collision
 # re-reported once per job matches a `policy_msg_` regex just as well as a
 # single correct report, so the only assertion that separates the fixed state
-# from the broken one is the count. grep -c exits 1 for no match and 2 for a
-# read error; the count is compared as a string so an empty capture fails the
-# assertion rather than erroring inside the comparison.
+# from the broken one is the count.
+#
+# `grep -c` prints a count on every path including no-match (`0`, exit 1), so
+# there is no empty-capture case to defend against and no status check here
+# worth writing: an exit-2 read error would still print a count, and the
+# comparison below is what rejects it. Assignment is kept off the `local` line
+# because `local` would return its own status and mask the substitution's.
 policy_count_() {
     local fixture="$1" cmd="$2" want_re="$3" want_n="$4" out n
     out="$(env "WORKFLOW_POLICY_ROOT=ci/linter/fixtures/policy/$fixture" \
         python3 ci/linter/workflow_policy.py "$cmd" 2>&1)"
-    n="$(printf '%s\n' "$out" | grep -cE "$want_re")" || [ $? -eq 1 ] || {
-        echo "FAIL policy $cmd: $fixture: cannot scan output" >&2; rc=1; return
-    }
+    n="$(printf '%s\n' "$out" | grep -cE "$want_re")"
     if [ "$n" = "$want_n" ]; then
         echo "ok   policy $cmd: $fixture (/$want_re/ x$n)"
     else
@@ -226,7 +228,7 @@ policy_count_ workflow-level-env-cross-file-collision ports \
 # rather than only counting, so a future regression that duplicates under some
 # other wording still trips something here.
 policy_absent_ workflow-level-env-cross-file-collision ports \
-    'b\.yml:[a-z]+ claims TEST_BASE_PORT'
+    'b\.yml:[A-Za-z0-9_-]+ claims TEST_BASE_PORT'
 
 # Two composite actions are both named action.yml, so a `where` built from
 # `path.name` alone names the same string for both sides of a collision and
