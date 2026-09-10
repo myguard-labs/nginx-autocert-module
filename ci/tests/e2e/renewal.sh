@@ -159,6 +159,67 @@ wait_for_cert() {
     return 1
 }
 
+# require_renew_before_token <value> <tag>
+#
+# <value> is interpolated into an ERE and a sed replacement, so it is
+# restricted to a positive integer plus an s/m/h/d unit. That is not a grammar
+# check -- the "nginx -t" that follows a rewrite is the real gate -- it only
+# keeps ERE and delimiter metacharacters, "|" above all, out of the patterns.
+# The unit is required because a bare assertion has no "nginx -t" behind it, so
+# a unitless caller typo would surface as a config-state failure instead.
+require_renew_before_token() {
+    # RHS unquoted on purpose: quoting makes bash match it literally.
+    [[ $1 =~ ^[1-9][0-9]*[smhd]$ ]] \
+        || { echo "::error::unsafe autocert_renew_before token '$1' [${2}]"; exit 1; }
+}
+
+# The match is anchored to a whole line, so a commented-out directive can
+# neither satisfy an assertion nor be rewritten in place of the active one. The
+# regex is ERE, so -E is required on both the grep and the sed below, and the
+# \1 capture restores the original indentation.
+renew_before_re() {
+    printf '^([[:space:]]*)autocert_renew_before[[:space:]]+%s;[[:space:]]*$' "$1"
+}
+
+# Assert that $PREFIX/conf/nginx.conf carries "autocert_renew_before <value>;"
+# exactly once as an active directive. <tag> names the call site in the error
+# text. Aborts with exit, so call it as a plain statement.
+#
+# The count is asserted, not just the presence: the lane's timing reasoning
+# assumes one active instance value, so a config that grew a second server
+# block with its own directive must fail here rather than be half-rewritten.
+assert_renew_before() {
+    local value="$1" tag="$2" n
+    require_renew_before_token "$value" "$tag"
+    # grep exits 1 for no match and 2 for a read error; only the former is an
+    # assertion failure, and conflating them would report a blank count.
+    n=$(grep -Ec "$(renew_before_re "$value")" "$PREFIX/conf/nginx.conf") \
+        || [[ $? == 1 ]] \
+        || { echo "::error::cannot read $PREFIX/conf/nginx.conf [${tag}]"; exit 1; }
+    # String compare: also rejects an empty count rather than erroring on it.
+    [[ $n == 1 ]] \
+        || { echo "::error::nginx.conf has ${n} active autocert_renew_before ${value} lines, want 1 [${tag}]"; exit 1; }
+}
+
+# Rewrite autocert_renew_before <from> -> <to> in $PREFIX/conf/nginx.conf,
+# asserting the value before and after. <tag> names the call site in the error
+# text. Aborts with exit, so call it as a plain statement.
+#
+# The trailing [[:space:]]* is consumed by the substitution, so a rewrite also
+# normalises away trailing whitespace.
+switch_renew_before() {
+    local from="$1" to="$2" tag="$3"
+    require_renew_before_token "$from" "$tag"
+    require_renew_before_token "$to" "$tag"
+    # A no-op switch would pass both assertions over a file that never changed.
+    [[ $from != "$to" ]] \
+        || { echo "::error::switch_renew_before: from == to ('${from}') [${tag}]"; exit 1; }
+    assert_renew_before "$from" "$tag"
+    sed -Ei "s|$(renew_before_re "$from")|\\1autocert_renew_before ${to};|" \
+        "$PREFIX/conf/nginx.conf"
+    assert_renew_before "$to" "$tag"
+}
+
 echo "== start: provision BOTH domains =="
 "$SERVER_BIN" -p "$PREFIX" -c "$PREFIX/conf/nginx.conf"
 
@@ -172,12 +233,7 @@ echo "✓ both domains provisioned (multi-name): A=$SERIAL_A1 B=$SERIAL_B1"
 # the fresh helper's initial scan — any serial change after the reload is
 # attributable to it and not to a background scheduler race.
 echo "== updating config: autocert_renew_before 60s -> 2h =="
-grep -q 'autocert_renew_before 60s;' "$PREFIX/conf/nginx.conf" \
-    || { echo "::error::nginx.conf does not contain autocert_renew_before 60s before rewrite [pass-2 switch]"; exit 1; }
-sed -i 's/autocert_renew_before 60s;/autocert_renew_before 2h;/' \
-    "$PREFIX/conf/nginx.conf"
-grep -q 'autocert_renew_before 2h;' "$PREFIX/conf/nginx.conf" \
-    || { echo "::error::nginx.conf does not contain autocert_renew_before 2h after rewrite [pass-2 switch]"; exit 1; }
+switch_renew_before 60s 2h "pass-2 switch"
 "$SERVER_BIN" -t -p "$PREFIX" -c "$PREFIX/conf/nginx.conf"
 
 # Reload -> fresh helper -> initial scan finds both inside the renew window
@@ -228,12 +284,7 @@ if [ -e "$NGINX_PID_FILE" ] \
     echo "::error::nginx master $old_pid still alive 10s after -s stop"
     exit 1
 fi
-grep -q 'autocert_renew_before 2h;' "$PREFIX/conf/nginx.conf" \
-    || { echo "::error::nginx.conf does not contain autocert_renew_before 2h before rewrite [quiesce]"; exit 1; }
-sed -i 's/autocert_renew_before 2h;/autocert_renew_before 60s;/' \
-    "$PREFIX/conf/nginx.conf"
-grep -q 'autocert_renew_before 60s;' "$PREFIX/conf/nginx.conf" \
-    || { echo "::error::nginx.conf does not contain autocert_renew_before 60s after rewrite [quiesce]"; exit 1; }
+switch_renew_before 2h 60s "quiesce"
 "$SERVER_BIN" -t -p "$PREFIX" -c "$PREFIX/conf/nginx.conf"
 "$SERVER_BIN" -p "$PREFIX" -c "$PREFIX/conf/nginx.conf"
 
@@ -275,8 +326,7 @@ echo "✓ renewed key/chain pairs are consistent, no staging leftover (atomic sw
 # min(12h, renew_before/2) floored by NGX_AUTOCERT_SCHED_FLOOR: under a 60s
 # renew_before that is 30s, NOT the 5s test floor -- which is why the
 # previous 6s window observed no sweep at all and could not fail.
-grep -q 'autocert_renew_before 60s;' "$PREFIX/conf/nginx.conf" \
-    || { echo "::error::M9 negatives require the 60s instance"; exit 1; }
+assert_renew_before 60s "M9 negatives"
 SERIAL_A3=$(openssl x509 -in "$CHAIN_A" -noout -serial)
 SERIAL_B3=$(openssl x509 -in "$CHAIN_B" -noout -serial)
 if [ -z "$SERIAL_A3" ] || [ -z "$SERIAL_B3" ]; then
