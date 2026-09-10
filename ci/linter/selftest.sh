@@ -139,16 +139,26 @@ policy_absent_() {
 # single correct report, so the only assertion that separates the fixed state
 # from the broken one is the count.
 #
-# `grep -c` prints a count on every path including no-match (`0`, exit 1), so
-# there is no empty-capture case to defend against and no status check here
-# worth writing: an exit-2 read error would still print a count, and the
-# comparison below is what rejects it. Assignment is kept off the `local` line
-# because `local` would return its own status and mask the substitution's.
+# `grep -c` prints a count on both matching paths, including no-match (`0`,
+# exit 1), so neither of those needs defending against. Exit >= 2 is the case
+# that does: a malformed ERE authored at a call site makes grep print a
+# diagnostic and NOTHING on stdout, leaving `n` empty. Comparing an empty `n`
+# would still fail the assertion, but with a blank count and the linter's
+# output dumped, pointing the reader at the linter rather than at the typo in
+# the pattern. Hence the explicit status check below. Assignment is kept off
+# the `local` line because `local` would return its own status and mask the
+# substitution's.
 policy_count_() {
-    local fixture="$1" cmd="$2" want_re="$3" want_n="$4" out n
+    local fixture="$1" cmd="$2" want_re="$3" want_n="$4" out n grep_rc
     out="$(env "WORKFLOW_POLICY_ROOT=ci/linter/fixtures/policy/$fixture" \
         python3 ci/linter/workflow_policy.py "$cmd" 2>&1)"
     n="$(printf '%s\n' "$out" | grep -cE "$want_re")"
+    grep_rc=$?
+    if [ "$grep_rc" -ge 2 ]; then
+        echo "FAIL policy $cmd: $fixture: grep failed (rc=$grep_rc) on /$want_re/ -- bad pattern?" >&2
+        rc=1
+        return
+    fi
     if [ "$n" = "$want_n" ]; then
         echo "ok   policy $cmd: $fixture (/$want_re/ x$n)"
     else
@@ -216,9 +226,11 @@ policy_ 0 workflow-level-env-shared-two-jobs ports
 # The same registration, one file over: when the port a workflow-level `env:`
 # claims is ALREADY held by another FILE, the claimant recorded in `bands` is
 # that other file, so a suppression keyed on "the claimant is me" never fires
-# and every job in the losing file re-reports the one collision -- N+1 findings
-# for N jobs. b.yml has two jobs, so the broken shape emits three lines and the
-# fixed one emits a single file-level finding. Exit 1 and the message text are
+# and every job in the LOSING file re-reports the one collision -- N+1 findings
+# for that file's N jobs, while the winning file contributes none. b.yml is the
+# loser and has two jobs, so the broken shape emits three lines and the fixed
+# one emits a single file-level finding. See the fixture README for why the
+# count depends on which file loses. Exit 1 and the message text are
 # identical either way, which is why the assertion is a COUNT.
 policy_msg_ workflow-level-env-cross-file-collision ports \
     'b\.yml claims TEST_BASE_PORT 19900 and a\.yml claims TEST_BASE_PORT 19900'
@@ -228,7 +240,7 @@ policy_count_ workflow-level-env-cross-file-collision ports \
 # rather than only counting, so a future regression that duplicates under some
 # other wording still trips something here.
 policy_absent_ workflow-level-env-cross-file-collision ports \
-    'b\.yml:[A-Za-z0-9_-]+ claims TEST_BASE_PORT'
+    'b\.yml:[^ ]+ claims TEST_BASE_PORT'
 
 # Two composite actions are both named action.yml, so a `where` built from
 # `path.name` alone names the same string for both sides of a collision and

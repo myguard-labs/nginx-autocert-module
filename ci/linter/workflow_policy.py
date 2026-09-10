@@ -472,14 +472,12 @@ def _check_port_node(
     each side actually wrote, instead of hardcoding the reporting branch's
     variable name onto both sides.
 
-    A job inheriting a WORKFLOW-level `env:` (see check_ports()) has already
-    been accounted for once under the FILE, so `wf_env_ports` carries those
-    port values and a job match on one of them is skipped here. Matching on
-    the claimant instead is not enough: that only recognises the port when
-    THIS file won the registration, so a cross-FILE collision -- where the
-    claimant is the other file -- was re-reported by every job in the losing
-    file, N+1 times for one real collision. The registration already emitted
-    it; the jobs inherit the same single declaration and add nothing.
+    `wf_env_ports` holds the ports a WORKFLOW-level `env:` already accounted
+    for at FILE level (see check_ports()); a job matching one of them adds
+    nothing, so it is skipped. Membership, not claimant identity, is the test
+    -- the fixture README under
+    fixtures/policy/workflow-level-env-cross-file-collision/ has the case that
+    distinguishes the two.
     """
     declared = re.search(r"(?m)^\s*TEST_BASE_PORT:\s*[\"']?(\d+)", body)
     starts_runtime = RUNTIME_DRIVER in body
@@ -540,7 +538,11 @@ def _check_port_node(
 
     port = declared.group(1)
     if port in wf_env_ports:
-        pass  # already registered or reported once for the file; see check_ports()
+        # The file-level pass already handled this port -- registering it as
+        # this file's band, or reporting the one collision when another file
+        # held it. Either way the job inherits that single declaration and has
+        # nothing of its own to add. See check_ports().
+        pass
     elif port in bands:
         other_where, other_name = bands[port]
         if other_where == where:

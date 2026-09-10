@@ -32,3 +32,9 @@ coverage.info*
 # local ci-build.sh fetches (any profile, including coverage)
 /nginx-*.tar.gz
 /nginx-[0-9]*/
+
+# Python bytecode written by every ci/linter/*.py run; same `git add -A`
+# hazard as the dump files above, and the cache is interpreter-versioned so
+# it is useless to anyone else.
+__pycache__/
+*.pyc
