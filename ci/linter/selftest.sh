@@ -229,9 +229,17 @@ policy_ 0 workflow-level-env-shared-two-jobs ports
 # and every job in the LOSING file re-reports the one collision -- N+1 findings
 # for that file's N jobs, while the winning file contributes none. b.yml is the
 # loser and has two jobs, so the broken shape emits three lines and the fixed
-# one emits a single file-level finding. See the fixture README for why the
-# count depends on which file loses. Exit 1 and the message text are
+# one emits a single file-level finding. Exit 1 and the message text are
 # identical either way, which is why the assertion is a COUNT.
+#
+# The two lines below are deliberately NOT folded into one. Folding the exact
+# wording into the count pattern anchors it on the bare "b.yml " prefix, which
+# the per-job repeats do not carry -- so the count would read 1 in the broken
+# shape too, and the control would go green on the very defect it exists for
+# (measured). The wording check and the count therefore need different
+# patterns: `policy_msg_` pins the message text and is green either way by
+# design, `policy_count_` matches the prefix-agnostic tail and is the leg that
+# discriminates.
 policy_msg_ workflow-level-env-cross-file-collision ports \
     'b\.yml claims TEST_BASE_PORT 19900 and a\.yml claims TEST_BASE_PORT 19900'
 policy_count_ workflow-level-env-cross-file-collision ports \
