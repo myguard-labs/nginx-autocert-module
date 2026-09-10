@@ -208,7 +208,26 @@ echo "✓ both domains reissued inside renew window: A=$SERIAL_A2 B=$SERIAL_B2"
 # live reissue's atomic swap.
 echo "== restart with small renew_before (quiesce store before verification) =="
 "$SERVER_BIN" -p "$PREFIX" -c "$PREFIX/conf/nginx.conf" -s stop
-sleep 1
+# `-s stop` signals the master and returns; it does not wait. A fixed sleep is
+# both too long on an idle runner and too short on a loaded one, and what it
+# hides is the old master still holding the store (or its listening socket)
+# when the new instance starts below -- which would let the 2h instance's
+# scheduler reissue into the store the consistency checks are about to read,
+# i.e. exactly the race this test exists to close. Poll for real exit instead.
+NGINX_PID_FILE="$PREFIX/logs/nginx.pid"
+for _ in $(seq 1 100); do
+    [ -e "$NGINX_PID_FILE" ] || break
+    old_pid=$(cat "$NGINX_PID_FILE" 2>/dev/null || true)
+    [ -n "$old_pid" ] || break
+    kill -0 "$old_pid" 2>/dev/null || break
+    sleep 0.1
+done
+if [ -e "$NGINX_PID_FILE" ] \
+   && old_pid=$(cat "$NGINX_PID_FILE" 2>/dev/null) \
+   && [ -n "$old_pid" ] && kill -0 "$old_pid" 2>/dev/null; then
+    echo "::error::nginx master $old_pid still alive 10s after -s stop"
+    exit 1
+fi
 grep -q 'autocert_renew_before 2h;' "$PREFIX/conf/nginx.conf" \
     || { echo "::error::nginx.conf does not contain autocert_renew_before 2h before rewrite [quiesce]"; exit 1; }
 sed -i 's/autocert_renew_before 2h;/autocert_renew_before 60s;/' \
