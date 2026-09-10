@@ -246,12 +246,16 @@ echo "✓ renewed key/chain pairs are consistent, no staging leftover (atomic sw
 # The observation window must be longer than one scheduler period, or the
 # control proves nothing: it would pass even against a module whose due-ness
 # gate was deleted entirely, simply because no sweep landed inside it.
-# Two sweeps land inside a 35s window, so the control is covered twice:
-# the restart's NGX_AUTOCERT_SCHED_INITIAL scan at t~1s (the reads above are
-# a handful of openssl calls, so this has NOT yet fired at capture time), and
-# the first rearm at t~31s. The rearm is min(12h, renew_before/2), floored by
-# NGX_AUTOCERT_SCHED_FLOOR (ngx_autocert_driver.c): under a 60s renew_before
-# that is 30s, NOT the 5s test floor -- which is why 6s observed nothing.
+# A healthy sweep logs nothing at notice level (only the reissue path does,
+# ngx_autocert_driver.c), so there is no positive "a sweep ran" marker to
+# assert on without a debug build. The window is therefore sized to make a
+# missed sweep impossible rather than merely unlikely: THREE sweeps fall
+# inside 65s -- the restart's NGX_AUTOCERT_SCHED_INITIAL scan at t~1s (the
+# reads above are a handful of openssl calls, so it has NOT fired yet at
+# capture time), plus rearms at t~31s and t~61s. The rearm is
+# min(12h, renew_before/2) floored by NGX_AUTOCERT_SCHED_FLOOR: under a 60s
+# renew_before that is 30s, NOT the 5s test floor -- which is why the
+# previous 6s window observed no sweep at all and could not fail.
 grep -q 'autocert_renew_before 60s;' "$PREFIX/conf/nginx.conf" \
     || { echo "::error::M9 negatives require the 60s instance"; exit 1; }
 SERIAL_A3=$(openssl x509 -in "$CHAIN_A" -noout -serial)
@@ -260,7 +264,7 @@ if [ -z "$SERIAL_A3" ] || [ -z "$SERIAL_B3" ]; then
     echo "::error::could not read baseline serials for the M9 control"
     exit 1
 fi
-sleep 35
+sleep 65
 [ "$(openssl x509 -in "$CHAIN_A" -noout -serial)" = "$SERIAL_A3" ] \
     || { echo "::error::healthy ${DOMAIN_A} reissued though not due"; exit 1; }
 [ "$(openssl x509 -in "$CHAIN_B" -noout -serial)" = "$SERIAL_B3" ] \
