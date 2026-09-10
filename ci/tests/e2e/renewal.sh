@@ -173,11 +173,11 @@ echo "✓ both domains provisioned (multi-name): A=$SERIAL_A1 B=$SERIAL_B1"
 # attributable to it and not to a background scheduler race.
 echo "== updating config: autocert_renew_before 60s -> 2h =="
 grep -q 'autocert_renew_before 60s;' "$PREFIX/conf/nginx.conf" \
-    || { echo "::error::nginx.conf does not contain autocert_renew_before 60s before rewrite"; exit 1; }
+    || { echo "::error::nginx.conf does not contain autocert_renew_before 60s before rewrite [pass-2 switch]"; exit 1; }
 sed -i 's/autocert_renew_before 60s;/autocert_renew_before 2h;/' \
     "$PREFIX/conf/nginx.conf"
 grep -q 'autocert_renew_before 2h;' "$PREFIX/conf/nginx.conf" \
-    || { echo "::error::nginx.conf does not contain autocert_renew_before 2h after rewrite"; exit 1; }
+    || { echo "::error::nginx.conf does not contain autocert_renew_before 2h after rewrite [pass-2 switch]"; exit 1; }
 "$SERVER_BIN" -t -p "$PREFIX" -c "$PREFIX/conf/nginx.conf"
 
 # Reload -> fresh helper -> initial scan finds both inside the renew window
@@ -208,11 +208,11 @@ echo "== restart with small renew_before (quiesce store before verification) =="
 "$SERVER_BIN" -p "$PREFIX" -c "$PREFIX/conf/nginx.conf" -s stop
 sleep 1
 grep -q 'autocert_renew_before 2h;' "$PREFIX/conf/nginx.conf" \
-    || { echo "::error::nginx.conf does not contain autocert_renew_before 2h before rewrite"; exit 1; }
+    || { echo "::error::nginx.conf does not contain autocert_renew_before 2h before rewrite [quiesce]"; exit 1; }
 sed -i 's/autocert_renew_before 2h;/autocert_renew_before 60s;/' \
     "$PREFIX/conf/nginx.conf"
 grep -q 'autocert_renew_before 60s;' "$PREFIX/conf/nginx.conf" \
-    || { echo "::error::nginx.conf does not contain autocert_renew_before 60s after rewrite"; exit 1; }
+    || { echo "::error::nginx.conf does not contain autocert_renew_before 60s after rewrite [quiesce]"; exit 1; }
 "$SERVER_BIN" -t -p "$PREFIX" -c "$PREFIX/conf/nginx.conf"
 "$SERVER_BIN" -p "$PREFIX" -c "$PREFIX/conf/nginx.conf"
 
@@ -239,12 +239,25 @@ echo "✓ renewed key/chain pairs are consistent, no staging leftover (atomic sw
 # scheduler reissues ONLY when the stored fullchain is unusable (corrupt /
 # missing / a symlink), and leaves a healthy cert untouched.
 
-# Healthy certs must survive the initial scan unchanged (control).
+# Healthy certs must survive a REAL sweep unchanged (control).
+#
+# The observation window must be longer than one scheduler period, or the
+# control proves nothing: it would pass even against a module whose due-ness
+# gate was deleted entirely, simply because no sweep landed inside it.
+# The rearm interval is min(12h, renew_before/2), floored (see
+# NGX_AUTOCERT_SCHED_FLOOR in ngx_autocert_driver.c): under a 60s
+# renew_before that is 30s, NOT the 5s test floor.
+# The restart above already consumed the 1s initial scan, so sleep past one
+# full 30s rearm with margin.
 grep -q 'autocert_renew_before 60s;' "$PREFIX/conf/nginx.conf" \
     || { echo "::error::M9 negatives require the 60s instance"; exit 1; }
 SERIAL_A3=$(openssl x509 -in "$CHAIN_A" -noout -serial)
 SERIAL_B3=$(openssl x509 -in "$CHAIN_B" -noout -serial)
-sleep 6
+if [ -z "$SERIAL_A3" ] || [ -z "$SERIAL_B3" ]; then
+    echo "::error::could not read baseline serials for the M9 control"
+    exit 1
+fi
+sleep 35
 [ "$(openssl x509 -in "$CHAIN_A" -noout -serial)" = "$SERIAL_A3" ] \
     || { echo "::error::healthy ${DOMAIN_A} reissued though not due"; exit 1; }
 [ "$(openssl x509 -in "$CHAIN_B" -noout -serial)" = "$SERIAL_B3" ] \
