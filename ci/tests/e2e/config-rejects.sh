@@ -161,6 +161,34 @@ EOF
     || { echo "::error::a valid autocert_renew_before was rejected"; exit 1; }
 echo "✓ valid autocert_renew_before accepted"
 
+# autocert_handshake_load_limit is parsed by the hand-rolled uint setter
+# (ngx_http_autocert_uint_slot), which rejects non-numeric values and duplicate
+# directives. Either guard must fire at config time, not silently drop the check.
+expect_reject "autocert_handshake_load_limit non-numeric" \
+    "    autocert_handshake_load_limit abc;" \
+    "invalid number"
+expect_reject "autocert_handshake_load_limit duplicate" \
+    "    autocert_handshake_load_limit 100;
+    autocert_handshake_load_limit 200;" \
+    "is duplicate"
+
+# Sanity: a valid handshake_load_limit is accepted.
+cat > "$PREFIX/conf/nginx.conf" <<EOF
+load_module $HTTP_SO;
+error_log $PREFIX/logs/error.log;
+events {}
+http {
+    autocert on;
+    autocert_contact a@b.com;
+    autocert_store_path $PREFIX/store;
+    autocert_handshake_load_limit 100;
+    server { listen $PORT; server_name x.example.com; }
+}
+EOF
+"$SERVER_BIN" -t -p "$PREFIX" -c "$PREFIX/conf/nginx.conf" 2>&1 | grep -q "syntax is ok" \
+    || { echo "::error::a valid autocert_handshake_load_limit was rejected"; exit 1; }
+echo "✓ valid autocert_handshake_load_limit accepted"
+
 # ngx_autocert_sec_to_msec_clamped() silently caps resolver_timeout above
 # 3600s to 3600000ms at runtime; reject the confusing gap at config load
 # instead (same reasoning as autocert_renew_before above).
