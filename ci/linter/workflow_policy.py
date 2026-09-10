@@ -455,6 +455,8 @@ def _check_port_node(
     bands: dict[str, tuple[str, str]],
     errors: list[str],
     collision_scope: str,
+    *,
+    wf_env_ports: frozenset[str] = frozenset(),
 ) -> None:
     """The uniqueness/wiring checks shared by a workflow job and a composite
     action, run once against ONE body string covering the whole node.
@@ -470,12 +472,12 @@ def _check_port_node(
     each side actually wrote, instead of hardcoding the reporting branch's
     variable name onto both sides.
 
-    A job inheriting a WORKFLOW-level `env:` (see check_ports()) is
-    pre-registered in `bands` under the FILE, not the job -- `where` for a
-    job is always "<file>:<job>", so a match whose claimant is exactly that
-    file prefix with varname TEST_BASE_PORT is this job's own inherited
-    declaration, not a second claimant: every job in the file shares that one
-    line and must neither re-register it nor collide with it.
+    `wf_env_ports` holds the ports a WORKFLOW-level `env:` already accounted
+    for at FILE level (see check_ports()); a job matching one of them adds
+    nothing, so it is skipped. Membership, not claimant identity, is the test
+    -- the fixture README under
+    fixtures/policy/workflow-level-env-cross-file-collision/ has the case that
+    distinguishes the two.
     """
     declared = re.search(r"(?m)^\s*TEST_BASE_PORT:\s*[\"']?(\d+)", body)
     starts_runtime = RUNTIME_DRIVER in body
@@ -535,8 +537,12 @@ def _check_port_node(
         return
 
     port = declared.group(1)
-    if bands.get(port) == (where.split(":", 1)[0], "TEST_BASE_PORT"):
-        pass  # already registered once for the whole file; see check_ports()
+    if port in wf_env_ports:
+        # The file-level pass already handled this port -- registering it as
+        # this file's band, or reporting the one collision when another file
+        # held it. Either way the job inherits that single declaration and has
+        # nothing of its own to add. See check_ports().
+        pass
     elif port in bands:
         other_where, other_name = bands[port]
         if other_where == where:
@@ -574,9 +580,10 @@ def _check_port_node(
 
 def _register_workflow_env_band(
     path: pathlib.Path, doc: dict, bands: dict[str, tuple[str, str]], errors: list[str]
-) -> str:
+) -> tuple[str, frozenset[str]]:
     """Register a WORKFLOW-level `env:` band ONCE under the file, and return
-    its dumped text so callers can append it to each job's own body.
+    its dumped text plus the port values it accounted for, so callers can
+    append the text to each job's own body and skip re-reporting those ports.
 
     A workflow-level `env:` sits on `doc`, one level above every job node
     `jobs()` hands out, so a job's own `_body(node)` dump never contains it --
@@ -589,11 +596,13 @@ def _register_workflow_env_band(
     """
     wf_env = doc.get("env")
     if not isinstance(wf_env, dict):
-        return ""
+        return "", frozenset()
     wf_env_body = yaml.safe_dump(
         {"env": wf_env}, default_flow_style=False, sort_keys=False
     )
+    seen: set[str] = set()
     for port in re.findall(r"(?m)^\s*TEST_BASE_PORT:\s*[\"']?(\d+)", wf_env_body):
+        seen.add(port)
         if port in bands:
             other_where, other_name = bands[port]
             errors.append(
@@ -603,7 +612,7 @@ def _register_workflow_env_band(
             )
         else:
             bands[port] = (path.name, "TEST_BASE_PORT")
-    return wf_env_body
+    return wf_env_body, frozenset(seen)
 
 
 def check_ports() -> int:
@@ -612,7 +621,9 @@ def check_ports() -> int:
 
     for path in workflows():
         doc = load(path)
-        wf_env_body = _register_workflow_env_band(path, doc, bands, errors)
+        wf_env_body, wf_env_ports = _register_workflow_env_band(
+            path, doc, bands, errors
+        )
 
         for job, node in jobs(doc):
             where = f"{path.name}:{job}"
@@ -622,7 +633,13 @@ def check_ports() -> int:
                 errors.append(order)
 
             _check_port_node(
-                where, node, _body(node) + wf_env_body, bands, errors, "ALL workflows"
+                where,
+                node,
+                _body(node) + wf_env_body,
+                bands,
+                errors,
+                "ALL workflows",
+                wf_env_ports=wf_env_ports,
             )
 
     for path in actions():
