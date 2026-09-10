@@ -131,6 +131,31 @@ policy_absent_() {
     fi
 }
 
+# policy_count_ <fixture> <subcommand> <grep-ere> <n> -- the pattern must match
+# EXACTLY <n> output lines.
+#
+# Presence and absence both go blind to duplication: one real collision
+# re-reported once per job matches a `policy_msg_` regex just as well as a
+# single correct report, so the only assertion that separates the fixed state
+# from the broken one is the count. grep -c exits 1 for no match and 2 for a
+# read error; the count is compared as a string so an empty capture fails the
+# assertion rather than erroring inside the comparison.
+policy_count_() {
+    local fixture="$1" cmd="$2" want_re="$3" want_n="$4" out n
+    out="$(env "WORKFLOW_POLICY_ROOT=ci/linter/fixtures/policy/$fixture" \
+        python3 ci/linter/workflow_policy.py "$cmd" 2>&1)"
+    n="$(printf '%s\n' "$out" | grep -cE "$want_re")" || [ $? -eq 1 ] || {
+        echo "FAIL policy $cmd: $fixture: cannot scan output" >&2; rc=1; return
+    }
+    if [ "$n" = "$want_n" ]; then
+        echo "ok   policy $cmd: $fixture (/$want_re/ x$n)"
+    else
+        echo "FAIL policy $cmd: $fixture: expected $want_n line(s) matching /$want_re/, got $n" >&2
+        printf '%s\n' "$out" | sed 's/^/       | /' >&2
+        rc=1
+    fi
+}
+
 # THE control that makes the rest mean anything: a fixture tree that is simply
 # a valid workflow must be GREEN on all three. Without it, a red on any bypass
 # fixture could be the fixture shape rather than the bypass.
@@ -185,6 +210,23 @@ policy_ 0 workflow-level-env-declared ports
 # into a self-collision generator. Two jobs, one workflow-level
 # TEST_BASE_PORT, must stay clean.
 policy_ 0 workflow-level-env-shared-two-jobs ports
+
+# The same registration, one file over: when the port a workflow-level `env:`
+# claims is ALREADY held by another FILE, the claimant recorded in `bands` is
+# that other file, so a suppression keyed on "the claimant is me" never fires
+# and every job in the losing file re-reports the one collision -- N+1 findings
+# for N jobs. b.yml has two jobs, so the broken shape emits three lines and the
+# fixed one emits a single file-level finding. Exit 1 and the message text are
+# identical either way, which is why the assertion is a COUNT.
+policy_msg_ workflow-level-env-cross-file-collision ports \
+    'b\.yml claims TEST_BASE_PORT 19900 and a\.yml claims TEST_BASE_PORT 19900'
+policy_count_ workflow-level-env-cross-file-collision ports \
+    'claims TEST_BASE_PORT 19900 and' 1
+# The per-job repeats carried a "<file>:<job>" prefix; assert that shape is gone
+# rather than only counting, so a future regression that duplicates under some
+# other wording still trips something here.
+policy_absent_ workflow-level-env-cross-file-collision ports \
+    'b\.yml:[a-z]+ claims TEST_BASE_PORT'
 
 # Two composite actions are both named action.yml, so a `where` built from
 # `path.name` alone names the same string for both sides of a collision and
