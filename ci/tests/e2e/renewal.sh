@@ -200,8 +200,10 @@ SERIAL_B2=$(renewed "$CHAIN_B" "$SERIAL_B1") || { echo "::error::${DOMAIN_B} not
 echo "✓ both domains reissued inside renew window: A=$SERIAL_A2 B=$SERIAL_B2"
 
 # The running instance still holds renew_before 2h against 1h Pebble certs, so
-# every stored cert reads as permanently due and the scheduler (NGX_AUTOCERT_TEST
-# floor: ~5s) will keep reissuing. Bring the store back to a not-due, quiescent
+# every stored cert reads as permanently due and the scheduler will keep
+# reissuing (driven by the 1s initial scan and order completion pumping the
+# scan forward -- at 2h the rearm is min(12h, 1h) = 1h, so the 5s floor never
+# binds here). Bring the store back to a not-due, quiescent
 # state before reading it, or the consistency checks below can sample across a
 # live reissue's atomic swap.
 echo "== restart with small renew_before (quiesce store before verification) =="
@@ -244,11 +246,12 @@ echo "✓ renewed key/chain pairs are consistent, no staging leftover (atomic sw
 # The observation window must be longer than one scheduler period, or the
 # control proves nothing: it would pass even against a module whose due-ness
 # gate was deleted entirely, simply because no sweep landed inside it.
-# The rearm interval is min(12h, renew_before/2), floored (see
-# NGX_AUTOCERT_SCHED_FLOOR in ngx_autocert_driver.c): under a 60s
-# renew_before that is 30s, NOT the 5s test floor.
-# The restart above already consumed the 1s initial scan, so sleep past one
-# full 30s rearm with margin.
+# Two sweeps land inside a 35s window, so the control is covered twice:
+# the restart's NGX_AUTOCERT_SCHED_INITIAL scan at t~1s (the reads above are
+# a handful of openssl calls, so this has NOT yet fired at capture time), and
+# the first rearm at t~31s. The rearm is min(12h, renew_before/2), floored by
+# NGX_AUTOCERT_SCHED_FLOOR (ngx_autocert_driver.c): under a 60s renew_before
+# that is 30s, NOT the 5s test floor -- which is why 6s observed nothing.
 grep -q 'autocert_renew_before 60s;' "$PREFIX/conf/nginx.conf" \
     || { echo "::error::M9 negatives require the 60s instance"; exit 1; }
 SERIAL_A3=$(openssl x509 -in "$CHAIN_A" -noout -serial)
@@ -285,6 +288,10 @@ echo "✓ corrupt + missing fullchain both trigger reissue: A=$SERIAL_A4 B=$SERI
 # follow it (NGX_ERROR -> due) and reissue a real regular file in its place.
 echo "== symlink A's fullchain, reload =="
 SERIAL_A5=$(openssl x509 -in "$CHAIN_A" -noout -serial)
+if [ -z "$SERIAL_A5" ]; then
+    echo "::error::could not read baseline serial before the symlink case"
+    exit 1
+fi
 rm -f "$CHAIN_A"
 ln -s /etc/hostname "$CHAIN_A"
 "$SERVER_BIN" -p "$PREFIX" -c "$PREFIX/conf/nginx.conf" -s reload
