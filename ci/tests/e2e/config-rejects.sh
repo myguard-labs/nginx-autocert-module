@@ -49,7 +49,6 @@ http {
 $body
     server { listen $PORT; server_name x.example.com; }
 }
-
 EOF
     # Detect rejection by `-t` exit status, not by the absence of the
     # "syntax is ok" line: angie prints "syntax is ok" for the *parse* phase
@@ -199,9 +198,6 @@ http {
     server { listen $PORT; server_name x.example.com; }
 }
 EOF
-# Detect acceptance by exit status, not by "syntax is ok": angie prints
-# "syntax is ok" for the parse phase and only then fails init_main_conf,
-# so string-based checks wrongly read a rejected config as accepted.
 expect_accept "autocert_handshake_load_limit 0 (unlimited)"
 
 # ngx_autocert_sec_to_msec_clamped() silently caps resolver_timeout above
