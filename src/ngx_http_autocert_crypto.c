@@ -1450,8 +1450,8 @@ ngx_http_autocert_cert_not_after(const char *path, time_t *out, int *key_id,
     errno = 0;
     leaf = PEM_read_bio_X509(bio, NULL, NULL, NULL);
     if (leaf == NULL) {
-        ngx_int_t  rc = ngx_http_autocert_pem_read_transient(errno)
-                            ? NGX_ERROR : NGX_ABORT;
+        rc = ngx_http_autocert_pem_read_transient(errno)
+                 ? NGX_ERROR : NGX_ABORT;
 
         BIO_free(bio);
         return rc;
