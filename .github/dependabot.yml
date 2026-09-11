@@ -11,8 +11,8 @@ updates:
   # action running in one job graph. Drop the second entry once #6345 and
   # #6704 land.
   - package-ecosystem: github-actions
-    # Duplicate weekly PRs mean dependabot-core#10884 double-matched the root
-    # and composite-action glob.
+    # If duplicate weekly PRs appear, investigate dependabot-core#10884 before
+    # changing the directory list.
     directories:
       - "/"
       - "/.github/actions/*"
