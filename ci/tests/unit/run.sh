@@ -485,10 +485,12 @@ WORKSPACE="$WORKSPACE" "$BUILD_DIR/test_seed_chunk"
 # closes that gap on the HOST: extract_win32_readdir.sh slices the production
 # struct, fdopendir, readdir loop, accessor, and closedir out of
 # src/ngx_autocert_win32.h and compiles them against stand-in Windows types
-# with a scripted NtQueryDirectoryFile -- so a regression that drops
-# `dh->err = 0` from the STATUS_NO_MORE_FILES path recompiles into this test
-# and fails it. Freestanding (no ngx_core.h, no nginx objects): the slice's
-# only nginx-isms are typedefs the test supplies itself.
+# with a scripted NtQueryDirectoryFile. It verifies fdopendir initializes the
+# channel clean, clean EOF stays clean despite dirty ambient LastError, and
+# genuine failures latch and report nonzero; it has no structural control for
+# the redundant second zero write at STATUS_NO_MORE_FILES. Freestanding (no
+# ngx_core.h, no nginx objects): the slice's only nginx-isms are typedefs the
+# test supplies itself.
 bash "$WORKSPACE/ci/tests/unit/extract_win32_readdir.sh"
 # shellcheck disable=SC2086
 "$CC" $SANITIZE_CFLAGS $EXTRA_CFLAGS -D_GNU_SOURCE -Wall -Wextra -Werror -Ici/tests/unit \

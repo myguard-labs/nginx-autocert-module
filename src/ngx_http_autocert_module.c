@@ -1641,18 +1641,18 @@ ngx_http_autocert_postconfig(ngx_conf_t *cf)
          * changes behaviour.
          *
          * Limitation of serving this early: at POST_READ no location has
-         * matched yet, so ngx_http_update_location_config() never runs for a
-         * challenge request. Location-level directives therefore do not apply
-         * to challenge responses -- server_tokens, access_log off, error_page,
-         * and client_max_body_size are skipped. On a reused keepalive
-         * connection, r->sendfile, r->connection->tcp_nopush and
-         * r->limit_except can consequently retain state from the prior
-         * request. That is harmless for this fixed, tiny in-memory response.
-         * Keepalive follows the request's Connection header because
-         * keepalive_timeout is not applied; the keepalive_requests and
-         * keepalive_time counter checks performed by the update function are
-         * skipped too. Calling ngx_http_update_location_config() here would
-         * not help because there is no matched location to update from.
+         * matched yet, so location and limit_except selection are skipped and
+         * ngx_http_update_location_config() never runs for a challenge
+         * request. Location-level directives therefore do not apply, and on a
+         * reused connection r->connection->sendfile can retain its value from
+         * the prior request. That is harmless for this fixed, tiny in-memory
+         * response. r->keepalive is initially derived from the HTTP version
+         * and Connection header. Skipping the update function omits its
+         * keepalive_requests and keepalive_time counter checks. For HTTP/1.x,
+         * final request handling still reads keepalive_timeout from the
+         * server/default location config both to decide whether to keep the
+         * connection open and to set the idle timer. Calling the update
+         * function here would not help because there is no matched location.
          */
         h = ngx_array_push(&cmcf2->phases[NGX_HTTP_POST_READ_PHASE].handlers);
         if (h == NULL) {

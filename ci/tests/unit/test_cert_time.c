@@ -1,9 +1,10 @@
 /*
  * Unit tests for the crypto TU's certificate-expiry helpers (M8 renewal):
- *   - ngx_http_autocert_cert_not_after(path, &out, &key_id, verify_name, &test_log) — read a
- *     leaf PEM's notAfter as a Unix epoch; ENOENT/ENOTDIR -> NGX_DECLINED, a
- *     symlinked path -> NGX_ERROR (O_NOFOLLOW), other failures -> NGX_ERROR; a
- *     non-NULL verify_name the leaf does not cover -> NGX_ABORT (M2).
+ *   - ngx_http_autocert_cert_not_after(path, &out, &key_id, verify_name,
+ *     key_path, &test_log) — read a leaf PEM's notAfter as a Unix epoch;
+ *     ENOENT/ENOTDIR -> NGX_DECLINED, a symlinked/malformed chain -> NGX_ABORT,
+ *     transient resource failure -> NGX_ERROR; a non-NULL verify_name the leaf
+ *     does not cover -> NGX_ABORT.
  *   - ngx_autocert_timegm(struct tm*) — a self-contained, timezone-independent
  *     UTC tm -> time_t, exercised with a leap day and a year past 2038.
  *
@@ -18,6 +19,13 @@
 #include <ngx_config.h>
 #include <ngx_core.h>
 
+#include <errno.h>
+#include <stdlib.h>
+#include <unistd.h>
+#include <openssl/bio.h>
+#include <openssl/err.h>
+#include <openssl/pem.h>
+
 /* Log + cycle stubs the crypto TU references; define BEFORE including it. */
 volatile ngx_cycle_t  *ngx_cycle;
 
@@ -28,14 +36,211 @@ ngx_log_error_core(ngx_uint_t level, ngx_log_t *log, ngx_err_t err,
     (void) level; (void) log; (void) err; (void) fmt;
 }
 
+enum {
+    TEST_BIO_FAIL_NONE = 0,
+    TEST_BIO_FAIL_SYS_EIO,
+    TEST_BIO_FAIL_MALLOC
+};
+
+static int  test_cert_bio_fail_mode;
+static int  test_cert_bio_fail_after;
+static int  test_cert_bio_gets_calls;
+static int  test_cert_alloc_fail_armed;
+static int  test_cert_alloc_fail_calls;
+
+static void *
+test_crypto_malloc(size_t size, const char *file, int line)
+{
+    void  *ptr;
+
+    (void) file;
+    (void) line;
+
+    if (test_cert_alloc_fail_armed > 0
+        && --test_cert_alloc_fail_armed == 0)
+    {
+        test_cert_alloc_fail_calls++;
+        errno = ENOMEM;
+        ERR_raise(ERR_LIB_SYS, ENOMEM);
+        return NULL;
+    }
+    ptr = malloc(size);
+    if (test_cert_alloc_fail_calls != 0) {
+        errno = ENOMEM;
+    }
+    return ptr;
+}
+
+static void *
+test_crypto_realloc(void *ptr, size_t size, const char *file, int line)
+{
+    void  *new_ptr;
+
+    (void) file;
+    (void) line;
+
+    if (test_cert_alloc_fail_armed > 0
+        && --test_cert_alloc_fail_armed == 0)
+    {
+        test_cert_alloc_fail_calls++;
+        errno = ENOMEM;
+        ERR_raise(ERR_LIB_SYS, ENOMEM);
+        return NULL;
+    }
+    new_ptr = realloc(ptr, size);
+    if (test_cert_alloc_fail_calls != 0) {
+        errno = ENOMEM;
+    }
+    return new_ptr;
+}
+
+static void
+test_crypto_free(void *ptr, const char *file, int line)
+{
+    (void) file;
+    (void) line;
+    free(ptr);
+}
+
+static int
+test_fail_bio_create(BIO *bio)
+{
+    BIO_set_init(bio, 1);
+    BIO_set_data(bio, NULL);
+    return 1;
+}
+
+static int
+test_fail_bio_destroy(BIO *bio)
+{
+    BIO  *inner;
+
+    if (bio == NULL) {
+        return 0;
+    }
+    inner = BIO_get_data(bio);
+    if (inner != NULL) {
+        BIO_free(inner);
+    }
+    BIO_set_init(bio, 0);
+    BIO_set_data(bio, NULL);
+    return 1;
+}
+
+static int
+test_raise_bio_failure(void)
+{
+    if (test_cert_bio_fail_mode == TEST_BIO_FAIL_SYS_EIO) {
+        errno = EIO;
+        ERR_raise(ERR_LIB_SYS, EIO);
+    } else {
+        errno = 0;
+        ERR_raise(ERR_LIB_PEM, ERR_R_MALLOC_FAILURE);
+    }
+    return -1;
+}
+
+static int
+test_fail_bio_read(BIO *bio, char *buf, int len)
+{
+    int  n;
+
+    if (test_cert_bio_fail_mode == TEST_BIO_FAIL_MALLOC) {
+        test_cert_alloc_fail_armed = 1;
+        n = BIO_read(BIO_get_data(bio), buf, len);
+        return n;
+    }
+    return test_raise_bio_failure();
+}
+
+static int
+test_fail_bio_gets(BIO *bio, char *buf, int len)
+{
+    int  n;
+
+    test_cert_bio_gets_calls++;
+    if (test_cert_bio_fail_mode == TEST_BIO_FAIL_MALLOC) {
+        test_cert_alloc_fail_armed = 1;
+        n = BIO_gets(BIO_get_data(bio), buf, len);
+        return n;
+    }
+    return test_raise_bio_failure();
+}
+
+static long
+test_fail_bio_ctrl(BIO *bio, int cmd, long num, void *ptr)
+{
+    (void) num;
+    (void) ptr;
+
+    if (cmd == BIO_CTRL_GET_CLOSE) {
+        return BIO_get_shutdown(bio);
+    }
+    if (cmd == BIO_CTRL_FLUSH) {
+        return 1;
+    }
+    return BIO_ctrl(BIO_get_data(bio), cmd, num, ptr);
+}
+
+static BIO *
+test_bio_new_fd(int fd, int close_flag)
+{
+    static BIO_METHOD  *method;
+    BIO                *bio, *inner;
+
+    if (test_cert_bio_fail_mode == TEST_BIO_FAIL_NONE) {
+        return BIO_new_fd(fd, close_flag);
+    }
+    if (test_cert_bio_fail_after > 0) {
+        test_cert_bio_fail_after--;
+        return BIO_new_fd(fd, close_flag);
+    }
+
+    if (test_cert_bio_fail_mode == TEST_BIO_FAIL_MALLOC) {
+        bio = BIO_new_fd(fd, close_flag);
+        if (bio != NULL && test_cert_alloc_fail_calls == 0) {
+            test_cert_alloc_fail_armed = 20;
+        }
+        return bio;
+    }
+
+    if (method == NULL) {
+        method = BIO_meth_new(BIO_TYPE_SOURCE_SINK, "autocert test failure");
+        if (method == NULL
+            || BIO_meth_set_create(method, test_fail_bio_create) != 1
+            || BIO_meth_set_destroy(method, test_fail_bio_destroy) != 1
+            || BIO_meth_set_read(method, test_fail_bio_read) != 1
+            || BIO_meth_set_gets(method, test_fail_bio_gets) != 1
+            || BIO_meth_set_ctrl(method, test_fail_bio_ctrl) != 1)
+        {
+            BIO_meth_free(method);
+            method = NULL;
+            return NULL;
+        }
+    }
+
+    inner = BIO_new_fd(fd, close_flag);
+    if (inner == NULL) {
+        return NULL;
+    }
+    bio = BIO_new(method);
+    if (bio == NULL) {
+        BIO_free(inner);
+        return NULL;
+    }
+    BIO_set_data(bio, inner);
+    BIO_set_shutdown(bio, 1);
+    return bio;
+}
+
 /* Include-shim: pulls in the static ngx_autocert_timegm + the public
  * ngx_http_autocert_cert_not_after, compiled exactly as shipped. */
+#define BIO_new_fd  test_bio_new_fd
 #include "../../../src/ngx_http_autocert_crypto.c"
+#undef BIO_new_fd
 
 #include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
-#include <unistd.h>
 #include <time.h>
 #include <sys/stat.h>
 
@@ -154,6 +359,146 @@ test_timegm_vectors(void)
 
 
 static void
+test_cert_malformed_pem(void)
+{
+    char        path[] = "/tmp/autocert_bad_pem_XXXXXX";
+    const char  payload[] = "not a certificate\n";
+    time_t      out = 0;
+    int         fd;
+
+    fd = mkstemp(path);
+    CHECK(fd != -1, "malformed PEM fixture created");
+    if (fd == -1) {
+        return;
+    }
+
+    CHECK(write(fd, payload, sizeof(payload) - 1)
+              == (ssize_t) (sizeof(payload) - 1),
+          "malformed PEM fixture written");
+    close(fd);
+    CHECK(ngx_http_autocert_cert_not_after(path, &out, NULL, NULL, NULL,
+                                           &test_log) == NGX_ABORT,
+          "cert_not_after marks malformed PEM invalid");
+
+    ERR_raise(ERR_LIB_SYS, EIO);
+    CHECK(ngx_http_autocert_cert_not_after(path, &out, NULL, NULL, NULL,
+                                           &test_log) == NGX_ABORT,
+          "stale system error does not make malformed PEM transient");
+    unlink(path);
+}
+
+
+static void
+test_cert_malformed_not_after(void)
+{
+    char        path[] = "/tmp/autocert_bad_time_XXXXXX";
+    int         fd = -1;
+    time_t      out = 0;
+    FILE       *in = NULL;
+    FILE       *outf = NULL;
+    X509       *cert = NULL;
+    ASN1_TIME  *invalid = NULL;
+
+    fd = mkstemp(path);
+    in = fopen(FIXTURE_PATH, "r");
+    if (in != NULL) {
+        cert = PEM_read_X509(in, NULL, NULL, NULL);
+        fclose(in);
+        in = NULL;
+    }
+    invalid = ASN1_TIME_new();
+    CHECK(fd != -1 && cert != NULL && invalid != NULL,
+          "malformed notAfter fixture inputs created");
+    if (fd == -1 || cert == NULL || invalid == NULL) {
+        goto cleanup;
+    }
+
+    close(fd);
+    fd = -1;
+    CHECK(ASN1_STRING_set(invalid, "991332235959Z", -1) == 1,
+          "malformed notAfter payload set");
+    invalid->type = V_ASN1_UTCTIME;
+    CHECK(X509_set1_notAfter(cert, invalid) == 1,
+          "malformed notAfter installed in certificate");
+    outf = fopen(path, "w");
+    CHECK(outf != NULL && PEM_write_X509(outf, cert) == 1,
+          "malformed notAfter fixture written");
+    if (outf == NULL) {
+        goto cleanup;
+    }
+    fclose(outf);
+    outf = NULL;
+
+    CHECK(ngx_http_autocert_cert_not_after(path, &out, NULL, NULL, NULL,
+                                           &test_log) == NGX_ABORT,
+          "cert_not_after marks malformed notAfter invalid");
+
+cleanup:
+    if (outf != NULL) {
+        fclose(outf);
+    }
+    if (fd != -1) {
+        close(fd);
+    }
+    unlink(path);
+    ASN1_TIME_free(invalid);
+    X509_free(cert);
+}
+
+
+static void
+test_pem_read_transient_queue_only(void)
+{
+    ERR_clear_error();
+    errno = 0;
+    ERR_raise(ERR_LIB_BIO, 1);
+    CHECK(ngx_http_autocert_pem_read_transient(errno) == 1,
+          "BIO error queue entry is transient when errno is zero");
+    CHECK(ERR_peek_error() == 0,
+          "BIO queue-only classification consumes the error queue");
+
+    ERR_clear_error();
+    errno = 0;
+    ERR_raise(ERR_LIB_PEM, ERR_R_MALLOC_FAILURE);
+    CHECK(ngx_http_autocert_pem_read_transient(errno) == 1,
+          "malloc-failure reason is transient when errno is zero");
+    CHECK(ERR_peek_error() == 0,
+          "malloc queue-only classification consumes the error queue");
+}
+
+
+static void
+test_cert_bio_failures(void)
+{
+    time_t     out = 0;
+    ngx_int_t  rc;
+
+    test_cert_bio_gets_calls = 0;
+    test_cert_bio_fail_after = 0;
+    test_cert_bio_fail_mode = TEST_BIO_FAIL_SYS_EIO;
+    rc = ngx_http_autocert_cert_not_after(FIXTURE_PATH, &out, NULL, NULL,
+                                          NULL, &test_log);
+    CHECK(test_cert_bio_gets_calls > 0,
+          "PEM reader invoked the injected BIO gets callback for EIO");
+    CHECK(rc == NGX_ERROR,
+          "cert_not_after classifies BIO EIO as transient");
+
+    test_cert_bio_gets_calls = 0;
+    test_cert_alloc_fail_calls = 0;
+    test_cert_bio_fail_after = 0;
+    test_cert_bio_fail_mode = TEST_BIO_FAIL_MALLOC;
+    rc = ngx_http_autocert_cert_not_after(FIXTURE_PATH, &out, NULL, NULL,
+                                          NULL, &test_log);
+    CHECK(test_cert_alloc_fail_calls == 1,
+          "certificate decoder reached the injected allocation failure");
+    CHECK(rc == NGX_ERROR,
+          "cert_not_after classifies PEM allocation failure as transient");
+    test_cert_bio_fail_mode = TEST_BIO_FAIL_NONE;
+    test_cert_alloc_fail_calls = 0;
+}
+
+
+static void
 test_cert_not_after(void)
 {
     time_t  out = 0;
@@ -206,7 +551,7 @@ test_cert_not_after(void)
               == NGX_DECLINED,
           "cert_not_after missing file -> NGX_DECLINED");
 
-    /* Symlink to the fixture -> NGX_ERROR (O_NOFOLLOW refuses to traverse). */
+    /* A symlink is a persistent-invalid store entry, not transient I/O. */
     {
         char  link[] = "/tmp/autocert_test_link_XXXXXX";
         int   fd = mkstemp(link);
@@ -219,8 +564,8 @@ test_cert_not_after(void)
                 && symlink(abs_target, link) == 0)
             {
                 out = 0;
-                CHECK(ngx_http_autocert_cert_not_after(link, &out, NULL, NULL, NULL, &test_log) == NGX_ERROR,
-                      "cert_not_after refuses to follow a symlink (O_NOFOLLOW)");
+                CHECK(ngx_http_autocert_cert_not_after(link, &out, NULL, NULL, NULL, &test_log) == NGX_ABORT,
+                      "cert_not_after marks a symlinked chain invalid");
                 unlink(link);
             } else {
                 CHECK(0, "could not set up symlink fixture");
@@ -229,6 +574,11 @@ test_cert_not_after(void)
             CHECK(0, "could not create temp path for symlink fixture");
         }
     }
+
+    test_cert_malformed_pem();
+    test_cert_malformed_not_after();
+    test_pem_read_transient_queue_only();
+    test_cert_bio_failures();
 }
 
 
@@ -395,6 +745,7 @@ test_cert_pair_check(void)
     char       oth_p[]  = "/tmp/autocert_pair_oth_XXXXXX";
     int        fd_c, fd_k, fd_o;
     time_t     out = 0;
+    ngx_int_t  rc;
     FILE      *f;
 
     if (key == NULL || other == NULL) {
@@ -444,6 +795,48 @@ test_cert_pair_check(void)
               == NGX_OK && out > 0,
           "cert_not_after accepts a chain whose stored key matches");
 
+    test_cert_bio_gets_calls = 0;
+    test_cert_bio_fail_after = 1;       /* chain BIO succeeds; key BIO fails */
+    test_cert_bio_fail_mode = TEST_BIO_FAIL_SYS_EIO;
+    rc = ngx_http_autocert_cert_not_after(cert_p, &out, NULL, NULL, key_p,
+                                          &test_log);
+    CHECK(test_cert_bio_gets_calls > 0,
+          "private-key decoder invoked the injected BIO gets callback for EIO");
+    CHECK(rc == NGX_ERROR,
+          "cert_not_after classifies private-key BIO EIO as transient");
+
+    test_cert_bio_gets_calls = 0;
+    test_cert_alloc_fail_calls = 0;
+    test_cert_bio_fail_after = 1;
+    test_cert_bio_fail_mode = TEST_BIO_FAIL_MALLOC;
+    rc = ngx_http_autocert_cert_not_after(cert_p, &out, NULL, NULL, key_p,
+                                          &test_log);
+    CHECK(test_cert_alloc_fail_calls == 1,
+          "private-key decoder reached the injected allocation failure");
+    CHECK(rc == NGX_ERROR,
+          "cert_not_after classifies private-key allocation failure as transient");
+    test_cert_bio_fail_mode = TEST_BIO_FAIL_NONE;
+    test_cert_alloc_fail_calls = 0;
+
+    {
+        char        bad_key[] = "/tmp/autocert_pair_bad_key_XXXXXX";
+        const char  payload[] = "not a private key\n";
+        int         fd = mkstemp(bad_key);
+
+        CHECK(fd != -1, "malformed private-key fixture created");
+        if (fd != -1) {
+            CHECK(write(fd, payload, sizeof(payload) - 1)
+                      == (ssize_t) (sizeof(payload) - 1),
+                  "malformed private-key fixture written");
+            close(fd);
+            CHECK(ngx_http_autocert_cert_not_after(cert_p, &out, NULL, NULL,
+                                                   bad_key, &test_log)
+                      == NGX_ABORT,
+                  "cert_not_after marks malformed private key invalid");
+            unlink(bad_key);
+        }
+    }
+
     /* Mismatched pair -> NGX_ABORT, which the scheduler routes to reissue. */
     out = 0;
     CHECK(ngx_http_autocert_cert_not_after(cert_p, &out, NULL, NULL, oth_p, &test_log)
@@ -480,11 +873,11 @@ test_cert_pair_check(void)
         char  noperm_p[] = "/tmp/autocert_pair_noperm_XXXXXX";
         int   fd_n = mkstemp(noperm_p);
 
-        CHECK(fd_n != -1, "could not create the no-permission key fixture");
+        CHECK(fd_n != -1, "no-permission key fixture created");
         if (fd_n != -1) {
             close(fd_n);
             CHECK(chmod(noperm_p, 0000) == 0,
-                  "could not chmod the no-permission key fixture to 0000");
+                  "no-permission key fixture mode set to 0000");
 
             out = 0;
             CHECK(ngx_http_autocert_cert_not_after(cert_p, &out, NULL, NULL,
@@ -498,25 +891,23 @@ test_cert_pair_check(void)
         }
     }
 
-    /* Deterministic non-missing open failure even under root: O_NOFOLLOW
-     * rejects the symlink with ELOOP. It must propagate as transient I/O,
-     * never as the NGX_ABORT missing/mismatch verdict that triggers issuance. */
+    /* O_NOFOLLOW rejects a symlinked key with ELOOP. Like a symlinked chain,
+     * this is a persistent-invalid store entry that must trigger reissue. */
     {
         char  link_p[] = "/tmp/autocert_pair_link_XXXXXX";
         int   fd_l = mkstemp(link_p);
 
-        CHECK(fd_l != -1, "could not reserve the symlink key fixture path");
+        CHECK(fd_l != -1, "symlink key fixture path reserved");
         if (fd_l != -1) {
             close(fd_l);
             unlink(link_p);
             CHECK(symlink(key_p, link_p) == 0,
-                  "could not create the symlink key fixture");
+                  "symlink key fixture created");
             out = 0;
             CHECK(ngx_http_autocert_cert_not_after(cert_p, &out, NULL, NULL,
                                                    link_p, &test_log)
-                      == NGX_ERROR,
-                  "cert_not_after propagates a non-missing key open error "
-                  "for driver backoff");
+                      == NGX_ABORT,
+                  "cert_not_after marks a symlinked private key invalid");
             unlink(link_p);
         }
     }
@@ -535,6 +926,13 @@ cleanup:
 int
 main(void)
 {
+    if (CRYPTO_set_mem_functions(test_crypto_malloc, test_crypto_realloc,
+                                 test_crypto_free) != 1)
+    {
+        fprintf(stderr, "FAIL: could not install OpenSSL allocator hooks\n");
+        return 1;
+    }
+
     /* timegm path needs ngx_time initialised? It does not, but harmless. */
     ngx_time_init();
 

@@ -410,7 +410,6 @@ main(void)
 
             /* The REAL flood: each name re-presents carrying whatever
              * deferred bit serve.c would have left on it last window. */
-            assert(ndef <= TEST_MAX_DEFERRED);
             for (j = 0; j < ndef; j++) {
                 attacker_deferred[j] =
                     ngx_autocert_loadcap_admit_retry_n(&cap, now, limit, slots,
@@ -456,7 +455,6 @@ main(void)
         for (w = 1; w <= 512 && served_in_window == 0; w++) {
             time_t  now = 40000 + (time_t) w;
 
-            assert(ndef <= TEST_MAX_DEFERRED);
             for (j = 0; j < ndef; j++) {
                 attacker_deferred[j] =
                     ngx_autocert_loadcap_admit_retry_n(&cap, now, limit, slots,

@@ -341,7 +341,7 @@ sleep 65
 echo "✓ healthy certs not reissued under small renew_before (control)"
 
 # Corrupt A's fullchain, remove B's entirely, then reload (fresh helper scans
-# at once). A: parse fails -> NGX_ERROR -> due. B: open ENOENT -> NGX_DECLINED
+# at once). A: parse fails -> NGX_ABORT -> due. B: open ENOENT -> NGX_DECLINED
 # -> due. Both must be reissued into a fresh, valid cert.
 echo "== corrupt A + remove B, reload =="
 printf '%s\n' '-----BEGIN CERTIFICATE-----' 'not a real cert' '-----END CERTIFICATE-----' \
@@ -358,7 +358,7 @@ openssl x509 -in "$CHAIN_A" -noout -ext subjectAltName 2>/dev/null \
 echo "✓ corrupt + missing fullchain both trigger reissue: A=$SERIAL_A4 B=$SERIAL_B4"
 
 # Replace A's fullchain with a symlink: the O_NOFOLLOW open must refuse to
-# follow it (NGX_ERROR -> due) and reissue a real regular file in its place.
+# follow it (NGX_ABORT -> due) and reissue a real regular file in its place.
 echo "== symlink A's fullchain, reload =="
 SERIAL_A5=$(openssl x509 -in "$CHAIN_A" -noout -serial)
 if [ -z "$SERIAL_A5" ]; then

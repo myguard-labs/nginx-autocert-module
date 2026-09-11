@@ -35,7 +35,7 @@ case_() {
         echo "ok   $desc (exit $got)"
     else
         echo "FAIL $desc: expected exit $want, got $got" >&2
-        echo "$out" | sed 's/^/       | /' >&2
+        printf '%s\n' "$out" | sed 's/^/       | /' >&2
         rc=1
     fi
 }
@@ -443,6 +443,90 @@ printf 'a: 1\na: 2\n' > "$yamlroot/err.yml"
 case_ 1 "lint-yaml: error-level YAML fails the gate" \
     bash -c "cd '$PWD' && ci/linter/lint-yaml.sh '$yamlroot/err.yml'"
 
+# CodeQL's result can carry severity directly, identify a rule by ruleId, or
+# identify it only by ruleIndex. Pin all three resolution paths and the count;
+# a warning-only report is the green control for the gate's passing direction.
+sarifroot="$(mktemp -d)"
+trap 'rm -rf "$badroot" "$yamlroot" "$sarifroot"' EXIT
+cat > "$sarifroot/blocking.sarif" <<'EOF'
+{"runs":[{"tool":{"driver":{"rules":[
+  {"id":"security-by-id","properties":{"security-severity":"7.5"}},
+  {"id":"error-by-default","defaultConfiguration":{"level":"error"}},
+  {"id":"problem-by-index","defaultConfiguration":{"level":"warning"},
+   "properties":{"problem.severity":"error"}}
+]}},"results":[
+  {"ruleId":"result-level","level":"error"},
+  {"ruleId":"security-by-id"},
+  {"ruleId":"error-by-default"},
+  {"ruleIndex":2}
+]}]}
+EOF
+cat > "$sarifroot/warning.sarif" <<'EOF'
+{"runs":[{"tool":{"driver":{"rules":[
+  {"id":"ordinary-warning","defaultConfiguration":{"level":"warning"}}
+]}},"results":[{"ruleId":"ordinary-warning","level":"warning"}]}]}
+EOF
+cat > "$sarifroot/rule-index.sarif" <<'EOF'
+{"runs":[{"tool":{"driver":{"rules":[
+  {"id":"index-zero-decoy","defaultConfiguration":{"level":"warning"}},
+  {"id":"index-one-decoy","defaultConfiguration":{"level":"note"}},
+  {"id":"indexed-error","defaultConfiguration":{"level":"error"}}
+]}},"results":[
+  {"ruleIndex":0},
+  {"ruleIndex":1},
+  {"ruleIndex":2}
+]}]}
+EOF
+cat > "$sarifroot/blocking-second.sarif" <<'EOF'
+{"runs":[{"tool":{"driver":{"rules":[]}},"results":[
+  {"ruleId":"second-file-error-a","level":"error"},
+  {"ruleId":"second-file-error-b","level":"error"}
+]}]}
+EOF
+printf '{' > "$sarifroot/malformed.sarif"
+cat > "$sarifroot/null-results.sarif" <<'EOF'
+{"runs":[{"tool":{"driver":{"rules":[]}},"results":null}]}
+EOF
+cat > "$sarifroot/absent-results.sarif" <<'EOF'
+{"runs":[{"tool":{"driver":{"rules":[]}}}]}
+EOF
+cat > "$sarifroot/empty-runs.sarif" <<'EOF'
+{"runs":[]}
+EOF
+
+codeql_case_() {
+    local want_exit="$1" want_count="$2" desc="$3" out got
+    shift 3
+    out="$(ci/linter/codeql-sarif-verdict.sh "$@" 2>&1)"; got=$?
+    if [ "$got" -eq "$want_exit" ] &&
+       printf '%s\n' "$out" | grep -qx "blocking CodeQL findings: $want_count"; then
+        echo "ok   $desc (count $want_count, exit $got)"
+    else
+        echo "FAIL $desc: expected count $want_count and exit $want_exit, got exit $got" >&2
+        printf '%s\n' "$out" | sed 's/^/       | /' >&2
+        rc=1
+    fi
+}
+
+codeql_case_ 1 4 "CodeQL SARIF: all blocking severity paths resolve" \
+    "$sarifroot/blocking.sarif"
+codeql_case_ 0 0 "CodeQL SARIF: ordinary warning passes" \
+    "$sarifroot/warning.sarif"
+codeql_case_ 1 1 "CodeQL SARIF: ruleIndex selects the indexed rule" \
+    "$sarifroot/rule-index.sarif"
+codeql_case_ 1 6 "CodeQL SARIF: two blocking files are summed" \
+    "$sarifroot/blocking.sarif" "$sarifroot/blocking-second.sarif"
+codeql_case_ 1 4 "CodeQL SARIF: warning after blocking preserves count" \
+    "$sarifroot/blocking.sarif" "$sarifroot/warning.sarif"
+case_ 2 "CodeQL SARIF: malformed JSON fails closed" \
+    ci/linter/codeql-sarif-verdict.sh "$sarifroot/malformed.sarif"
+case_ 2 "CodeQL SARIF: null results fail closed" \
+    ci/linter/codeql-sarif-verdict.sh "$sarifroot/null-results.sarif"
+case_ 2 "CodeQL SARIF: absent results fail closed" \
+    ci/linter/codeql-sarif-verdict.sh "$sarifroot/absent-results.sarif"
+case_ 2 "CodeQL SARIF: empty runs fail closed" \
+    ci/linter/codeql-sarif-verdict.sh "$sarifroot/empty-runs.sarif"
+
 # lint-ca-log-safety: whitespace-tolerant &r->url detection.
 #
 # lint_files() matches only '^src/.*\.[ch]$' and, given explicit args, filters
@@ -452,7 +536,7 @@ case_ 1 "lint-yaml: error-level YAML fails the gate" \
 # `git rev-parse --show-toplevel`). Build a scratch git repo with its own
 # src/ and a copied lib.sh so nothing here touches the real tree or git index.
 calogroot="$(mktemp -d)"
-trap 'rm -rf "$badroot" "$yamlroot" "$calogroot"' EXIT
+trap 'rm -rf "$badroot" "$yamlroot" "$sarifroot" "$calogroot"' EXIT
 mkdir -p "$calogroot/src" "$calogroot/ci/linter"
 cp "$ROOT/ci/linter/lib.sh" "$calogroot/ci/linter/lib.sh"
 git -C "$calogroot" init -q .

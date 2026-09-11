@@ -318,17 +318,20 @@ answers the CA must therefore be (or inherit) an autocert-enabled server — a b
 > you already have one.
 >
 > **Challenge responses are served before location configuration is updated.**
-> No `location` has been selected when the token is written, so location-level
-> directives such as `server_tokens`, `access_log off`, `error_page`, and
-> `client_max_body_size` are not applied. The module discards any request body as
-> a stream, so an oversized body costs bandwidth, not memory. On a reused
-> keepalive connection, skipping `ngx_http_update_location_config()` also leaves
-> `sendfile`, `tcp_nopush`, and `limit_except` state from the prior request. That
-> is harmless for this tiny in-memory response. Keepalive itself follows the
-> request's `Connection` header: `keepalive_timeout` is not applied, nor are the
-> `keepalive_requests` and `keepalive_time` counter checks. This applies only to
-> `/.well-known/acme-challenge/` URIs; every other request is configured exactly
-> as before.
+> No `location` has been selected when the token is written, so location and
+> `limit_except` selection are skipped and location-level directives such as
+> `server_tokens`, `access_log off`, `error_page`, and `client_max_body_size` do
+> not apply. On a reused connection, the connection's `sendfile` setting can
+> retain its value from the prior request; that is harmless for this tiny
+> in-memory response. The request's initial keepalive decision follows its HTTP
+> version and `Connection` header. Skipping
+> `ngx_http_update_location_config()` omits the `keepalive_requests` and
+> `keepalive_time` counter checks. For HTTP/1.x, final request handling still
+> consults the server/default location's `keepalive_timeout` to decide whether
+> to keep the connection open and to set its idle timer. The module discards
+> any request body as a stream, so an oversized body costs bandwidth, not memory.
+> This applies only to `/.well-known/acme-challenge/` URIs; every other request
+> is configured exactly as before.
 
 ### DNS-01 hook contract
 

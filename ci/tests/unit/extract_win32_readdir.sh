@@ -36,9 +36,10 @@
 #
 # The test supplies stand-in Windows types and a scripted
 # NtQueryDirectoryFile that returns whatever batch (or NTSTATUS) a case needs.
-# So this is not a re-implementation: a regression that drops `dh->err = 0`
-# from the STATUS_NO_MORE_FILES path, or forgets to set it on a failure path,
-# recompiles into this test and fails it.
+# So this is not a re-implementation: it verifies fdopendir starts with a clean
+# channel, clean EOF stays clean despite dirty ambient LastError, and genuine
+# failures latch and report a nonzero error. It deliberately has no structural
+# control for the redundant second zero write at STATUS_NO_MORE_FILES.
 set -euo pipefail
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -93,19 +94,5 @@ for sym in 'dh->err = 0' 'ngx_autocert_readdir_err' 'STATUS_NO_MORE_FILES' \
 		exit 1
 	fi
 done
-
-# A failed query latches dh->eof, so one handle cannot first report a genuine
-# error and then be re-driven into STATUS_NO_MORE_FILES. Assert the production
-# EOF branch's clearing assignment structurally; the compiled tests separately
-# exercise its observable clean verdict after both a skipped and a good entry.
-if ! awk '
-	/status == STATUS_NO_MORE_FILES/ { eof = 1; next }
-	eof && /dh->err = 0/            { found = 1 }
-	eof && /return NULL/             { exit !found }
-	END                              { if (!found) exit 1 }
-' "$OUT"; then
-	echo "extract_win32_readdir: STATUS_NO_MORE_FILES does not clear dh->err" >&2
-	exit 1
-fi
 
 echo "✓ extracted win32 store-scan enumeration primitives -> $OUT"

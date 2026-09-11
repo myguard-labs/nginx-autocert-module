@@ -37,6 +37,7 @@ SUDO=""
 
 # tool<TAB>apt package -- checked with command -v <tool>
 APT_TOOLS=(
+    "jq:jq"                      # CodeQL SARIF verdict gate
     "shellcheck:shellcheck"      # sh/bash
     "cppcheck:cppcheck"          # C
     "flawfinder:flawfinder"      # C, risky-API scan

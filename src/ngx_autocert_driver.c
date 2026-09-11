@@ -1476,30 +1476,24 @@ ngx_autocert_name_due(ngx_cycle_t *cycle, ngx_autocert_conf_t *acf,
                                               &stored_id, verifyp,
                                               (char *) key_path, cycle->log);
 
-        if (rc == NGX_DECLINED) {
-            ngx_log_debug1(
-                NGX_LOG_DEBUG_CORE, cycle->log, 0,
-                "autocert: name \"%V\" due because no cert is stored", name );
-            return 1;                   /* no cert yet -> issue */
-        }
-        if (rc == NGX_ABORT) {
-            /* Either the leaf does not cover this name, or the stored
-             * private key does not pair with it (a torn or partially
-             * restored key/chain pair). Both are unserveable and both are
-             * fixed by reissuing. */
-            ngx_log_error(
-                NGX_LOG_NOTICE, cycle->log, 0,
-                "autocert: \"%V\" stored cert does not cover this name or "
-                "does not match the stored private key; reissuing",
-                name );
-            return 1;                   /* identity/pair mismatch -> reissue */
-        }
-        if (!ngx_autocert_cert_read_due(rc) && rc != NGX_OK) {
-            ngx_log_error(NGX_LOG_WARN, cycle->log, 0,
-                          "autocert: cannot read stored key/chain \"%s\"; "
-                          "backing off until the next sweep",
-                          path);
-            return 0;                   /* transient read error -> back off */
+        if (rc != NGX_OK) {
+            ngx_int_t  due = ngx_autocert_cert_read_due(rc);
+
+            if (rc == NGX_DECLINED) {
+                ngx_log_debug1(NGX_LOG_DEBUG_CORE, cycle->log, 0,
+                               "autocert: name \"%V\" due because no cert "
+                               "is stored", name);
+            } else if (rc == NGX_ABORT) {
+                ngx_log_error(NGX_LOG_NOTICE, cycle->log, 0,
+                              "autocert: \"%V\" stored cert does not cover "
+                              "this name, is malformed, or does not match "
+                              "the stored private key; reissuing", name);
+            } else {
+                ngx_log_error(NGX_LOG_WARN, cycle->log, 0,
+                              "autocert: cannot read stored key/chain \"%s\"; "
+                              "backing off until the next sweep", path);
+            }
+            return due;
         }
 
         /*
