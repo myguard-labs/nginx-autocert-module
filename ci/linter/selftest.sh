@@ -250,6 +250,14 @@ policy_count_ workflow-level-env-cross-file-collision ports \
 policy_absent_ workflow-level-env-cross-file-collision ports \
     'b\.yml:[^ ]+ claims TEST_BASE_PORT'
 
+# Workflow-level env names in the AC_TEST_PORT[0-9]* family claim bands too.
+# Pin both claimant orderings: file-level env before inline for 19901, and
+# inline before file-level env for 19902.
+policy_msg_ workflow-level-ac-port-cross-file-collision ports \
+    'b-inline\.yml:build claims AC_TEST_PORT 19901 and a-env\.yml claims AC_TEST_PORT 19901'
+policy_msg_ workflow-level-ac-port-cross-file-collision ports \
+    'd-env\.yml claims AC_TEST_PORT2 19902 and c-inline\.yml:build claims AC_TEST_PORT2 19902'
+
 # Two composite actions are both named action.yml, so a `where` built from
 # `path.name` alone names the same string for both sides of a collision and
 # identifies neither. Assert the message actually distinguishes them by path.
