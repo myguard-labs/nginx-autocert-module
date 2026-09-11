@@ -20,11 +20,8 @@ NGX_BUILD_DIR="${NGX_BUILD_DIR:-$(cd "$(dirname "$SERVER_BIN")/.." && pwd)}"
 HTTP_SO="$NGX_BUILD_DIR/objs/ngx_http_autocert_module.so"
 [ -f "$HTTP_SO" ] || { echo "missing $HTTP_SO"; exit 1; }
 
-# ":-" substitutes the default when PREFIX is unset OR empty, so PREFIX is
-# always non-empty below; the ":?" on the rm re-states that as an assertion the
-# linter can see, and would abort rather than let rm -rf run on "".
-PREFIX="${PREFIX:-/tmp/ac-cfgreject}"
-rm -rf "${PREFIX:?}"
+PREFIX=$(mktemp -d "${TMPDIR:-/tmp}/ac-cfgreject.XXXXXX")
+trap 'rm -rf -- "$PREFIX"' EXIT
 mkdir -p "$PREFIX/logs" "$PREFIX/conf" "$PREFIX/store"
 # store mode must not depend on the caller's umask (the driver refuses a
 # group/other-writable store, and mkdir's mode is umask-filtered).
