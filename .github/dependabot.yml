@@ -8,7 +8,8 @@ updates:
   # (dependabot-core#6345, #6704 remain open). Without the second entry, the
   # composite actions' own `uses:` pins would silently go stale while their
   # copies in .github/workflows/ get bumped, leaving two versions of the same
-  # action running in one job graph. Drop the second entry once 6345 lands.
+  # action running in one job graph. Drop the second entry once #6345 and
+  # #6704 land.
   - package-ecosystem: github-actions
     # Duplicate weekly PRs mean dependabot-core#10884 double-matched the root
     # and composite-action glob.
