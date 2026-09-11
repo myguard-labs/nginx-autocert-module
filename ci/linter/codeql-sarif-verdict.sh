@@ -27,7 +27,14 @@ for sarif in "$@"; do
                                  or (($r.ruleId | type) == "string"
                                      and ($rules[$i].id | type) == "string"
                                      and ($r.ruleId
-                                          | startswith($rules[$i].id + "/"))))
+                                          | startswith($rules[$i].id + "/"))
+                                     and ($r.ruleId
+                                          | ltrimstr($rules[$i].id + "/")
+                                          | length > 0)
+                                     and ($r.ruleId
+                                          | ltrimstr($rules[$i].id + "/")
+                                          | contains("/")
+                                          | not)))
                                 | not)
                       then error("ruleId does not match the indexed rule")
                       else $rules[$i]

@@ -504,6 +504,12 @@ cat > "$sarifroot/rule-index-hierarchical-id.sarif" <<'EOF'
   {"id":"security-family","defaultConfiguration":{"level":"error"}}
 ]}},"results":[{"ruleId":"security-family/subrule","ruleIndex":0}]}]}
 EOF
+cat > "$sarifroot/rule-index-deep-hierarchical-id.sarif" <<'EOF'
+{"runs":[{"tool":{"driver":{"rules":[
+  {"id":"security-family","defaultConfiguration":{"level":"error"}},
+  {"id":"security-family/subrule/detail","defaultConfiguration":{"level":"warning"}}
+]}},"results":[{"ruleId":"security-family/subrule/detail","ruleIndex":0}]}]}
+EOF
 cat > "$sarifroot/blocking-second.sarif" <<'EOF'
 {"runs":[{"tool":{"driver":{"rules":[]}},"results":[
   {"ruleId":"second-file-error-a","level":"error"},
@@ -551,6 +557,8 @@ case_ 2 "CodeQL SARIF: mismatched ruleId and ruleIndex fail closed" \
     ci/linter/codeql-sarif-verdict.sh "$sarifroot/rule-index-mismatch.sarif"
 codeql_case_ 1 1 "CodeQL SARIF: hierarchical ruleId agrees with ruleIndex" \
     "$sarifroot/rule-index-hierarchical-id.sarif"
+case_ 2 "CodeQL SARIF: multi-component hierarchical ruleId fails closed" \
+    ci/linter/codeql-sarif-verdict.sh "$sarifroot/rule-index-deep-hierarchical-id.sarif"
 codeql_case_ 1 6 "CodeQL SARIF: two blocking files are summed" \
     "$sarifroot/blocking.sarif" "$sarifroot/blocking-second.sarif"
 codeql_case_ 1 4 "CodeQL SARIF: warning after blocking preserves count" \
