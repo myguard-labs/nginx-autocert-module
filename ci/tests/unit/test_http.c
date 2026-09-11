@@ -454,12 +454,13 @@ test_hdr_scan_cursor(void)
     {
         static const char  resp[] =
             "HTTP/1.1 200 OK\r\n"
-            "X-Odd: a\r\n"          /* ordinary header, no false start */
+            "X-Odd: a\r\n\rX-Next: b\r\n" /* false delimiter: CRLF + CR */
             "Content-Length: 0\r\n"
             "\r\n";
         size_t              feeds[3];
 
-        feeds[0] = 20;                      /* mid status-line/header area */
+        feeds[0] = sizeof("HTTP/1.1 200 OK\r\nX-Odd: a\r\n\r") - 1;
+                                                /* stop on false CRLF + CR */
         feeds[1] = sizeof(resp) - 1 - 4;    /* just before final CRLFCRLF */
         feeds[2] = sizeof(resp) - 1;
 

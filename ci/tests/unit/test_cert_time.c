@@ -334,8 +334,10 @@ test_cmp_current_time_zero_is_rejected(void)
 
     /* Not a valid UTCTime/GeneralizedTime payload -> parse failure. */
     ASN1_STRING_set(bad, "not-a-time", -1);
-    ASN1_TIME_set(past, (time_t) 0);            /* 1970, well in the past */
-    ASN1_TIME_set(future, (time_t) 4102444800); /* 2100, well in the future */
+    CHECK(ASN1_TIME_set_string(past, "19700101000000Z") == 1,
+          "constructed a parseable past ASN1_TIME");
+    CHECK(ASN1_TIME_set_string(future, "21000101000000Z") == 1,
+          "constructed a parseable future ASN1_TIME");
 
     r_bad = X509_cmp_current_time(bad);
     r_past = X509_cmp_current_time(past);
