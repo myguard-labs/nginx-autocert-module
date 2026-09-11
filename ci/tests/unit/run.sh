@@ -341,6 +341,15 @@ cd "$WORKSPACE"
 	$INET_OBJS -lssl -lcrypto $SANITIZE_LIBS
 "$BUILD_DIR/test_cert_time"
 
+# Renewal read verdict: slice the driver's pure four-way certificate-read
+# decision so missing/invalid pairs issue while transient I/O backs off.
+bash "$WORKSPACE/ci/tests/unit/extract_cert_read_due.sh"
+# shellcheck disable=SC2086
+"$CC" $SANITIZE_CFLAGS $EXTRA_CFLAGS -Wall -Wextra -Werror $CORE_INC \
+	-I"$WORKSPACE/ci/tests/unit" -o "$BUILD_DIR/test_cert_read_due" \
+	"$WORKSPACE/ci/tests/unit/test_cert_read_due.c" $SANITIZE_LIBS
+"$BUILD_DIR/test_cert_read_due"
+
 # Slice ngx_autocert_account_json_safe + ngx_autocert_account_log_safe from
 # the shipped account source. json_safe depends only on ngx_str_t; log_safe
 # calls nginx core's ngx_escape_json (ngx_string.o) but never touches a pool

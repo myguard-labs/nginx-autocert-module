@@ -1288,9 +1288,9 @@ ngx_http_autocert_no_passphrase(char *buf, int size, int rwflag, void *u)
 /*
  * Does the private key at `key_path` match `leaf`? Returns NGX_OK on a
  * verified match, NGX_ABORT when the key is genuinely absent, unparsable or
- * does not pair with the leaf, and NGX_DECLINED when the open failed for a
+ * does not pair with the leaf, and NGX_ERROR when the open failed for a
  * transient reason unrelated to the key's presence (e.g. a concurrent
- * publish holding the file busy) -- the caller treats NGX_DECLINED as "skip
+ * publish holding the file busy) -- the caller treats NGX_ERROR as "skip
  * this check for now", not as "reissue".
  *
  * Why the freshness path needs this at all: the store publishes privkey and
@@ -1328,7 +1328,7 @@ ngx_http_autocert_key_pairs_with(const char *key_path, X509 *leaf,
                       "autocert: open key \"%s\" failed transiently; "
                       "skipping key-pair freshness check for this sweep",
                       key_path);
-        return NGX_DECLINED;            /* transient -> skip, do not reissue */
+        return NGX_ERROR;               /* transient -> back off, no reissue */
     }
 
     bio = BIO_new_fd(fd, BIO_CLOSE);    /* BIO owns + closes fd */
@@ -1345,7 +1345,7 @@ ngx_http_autocert_key_pairs_with(const char *key_path, X509 *leaf,
                       "autocert: BIO_new_fd for key \"%s\" failed; "
                       "skipping key-pair freshness check for this sweep",
                       key_path);
-        return NGX_DECLINED;            /* allocation failure -> skip */
+        return NGX_ERROR;               /* allocation failure -> back off */
     }
 
     key = PEM_read_bio_PrivateKey(bio, NULL, ngx_http_autocert_no_passphrase,
@@ -1425,10 +1425,10 @@ ngx_http_autocert_cert_not_after(const char *path, time_t *out, int *key_id,
     /*
      * Pair check: the stored private key must actually match this leaf.
      * NGX_ABORT here has the same "caller reissues" contract as the identity
-     * check above. NGX_DECLINED from the pair check itself means the open
-     * failed transiently (not a torn pair) -- skip this check for the sweep
-     * and let the remaining freshness tests decide, rather than forcing a
-     * reissue on a passing I/O error. Runs after the identity check so a
+     * check above. NGX_ERROR from the pair check itself means the open failed
+     * transiently (not a torn pair) -- propagate it so the driver backs off
+     * rather than issuing based on the chain's expiry alone. Runs after the
+     * identity check so a
      * wrong-domain leaf is still reported as such, and only when the caller
      * asks (key_path non-NULL).
      */
@@ -1436,9 +1436,9 @@ ngx_http_autocert_cert_not_after(const char *path, time_t *out, int *key_id,
         ngx_int_t  pair_rc;
 
         pair_rc = ngx_http_autocert_key_pairs_with(key_path, leaf, log);
-        if (pair_rc == NGX_ABORT) {
+        if (pair_rc != NGX_OK) {
             X509_free(leaf);
-            return NGX_ABORT;
+            return pair_rc;
         }
     }
 

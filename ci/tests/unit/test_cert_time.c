@@ -468,8 +468,8 @@ test_cert_pair_check(void)
      * fix this collapsed every open() errno to NGX_ABORT, which on win32 is
      * reachable from the publish path itself (a sharing violation while a
      * rename is in flight) and would trigger a spurious real ACME reissue.
-     * The correct outcome is the pair check being SKIPPED, so the overall
-     * call still reports NGX_OK (the chain itself is fresh and valid). Skips
+     * The correct outcome is NGX_ERROR, which makes the driver back off
+     * without ordering. Skips
      * gracefully when running as root, where chmod 0000 does not deny
      * self-open. */
     if (geteuid() == 0) {
@@ -489,13 +489,35 @@ test_cert_pair_check(void)
             out = 0;
             CHECK(ngx_http_autocert_cert_not_after(cert_p, &out, NULL, NULL,
                                                    noperm_p, &test_log)
-                      == NGX_OK,
-                  "cert_not_after does NOT abort on a non-ENOENT (EACCES) "
-                  "key_path open failure -- the pair check is skipped, not "
-                  "treated as a torn pair");
+                      == NGX_ERROR,
+                  "cert_not_after reports a non-ENOENT (EACCES) key open "
+                  "failure as transient, not as a torn pair");
 
             chmod(noperm_p, 0600);
             unlink(noperm_p);
+        }
+    }
+
+    /* Deterministic non-missing open failure even under root: O_NOFOLLOW
+     * rejects the symlink with ELOOP. It must propagate as transient I/O,
+     * never as the NGX_ABORT missing/mismatch verdict that triggers issuance. */
+    {
+        char  link_p[] = "/tmp/autocert_pair_link_XXXXXX";
+        int   fd_l = mkstemp(link_p);
+
+        CHECK(fd_l != -1, "could not reserve the symlink key fixture path");
+        if (fd_l != -1) {
+            close(fd_l);
+            unlink(link_p);
+            CHECK(symlink(key_p, link_p) == 0,
+                  "could not create the symlink key fixture");
+            out = 0;
+            CHECK(ngx_http_autocert_cert_not_after(cert_p, &out, NULL, NULL,
+                                                   link_p, &test_log)
+                      == NGX_ERROR,
+                  "cert_not_after propagates a non-missing key open error "
+                  "for driver backoff");
+            unlink(link_p);
         }
     }
 

@@ -230,10 +230,9 @@ X509 *ngx_http_autocert_acme_tls_cert(EVP_PKEY *pkey, ngx_str_t *domain,
  * forever while the serve path refuses the mismatched pair on every handshake.
  * A missing, unparsable or mismatched key all report NGX_ABORT (=> reissue).
  * A transient I/O error opening key_path (e.g. a concurrent publish holding
- * the file busy) does NOT report NGX_ABORT: the pair check is silently
- * skipped for this call and the remaining freshness tests decide, so a
- * passing I/O condition never forces an ACME reissue. `log` is used only to
- * report that skip; pass the caller's cycle/request log.
+ * the file busy) reports NGX_ERROR, like an unreadable chain. The scheduler
+ * backs off rather than letting the chain's age force an ACME reissue. `log`
+ * is used to report that failure; pass the caller's cycle/request log.
  */
 ngx_int_t ngx_http_autocert_cert_not_after(const char *path, time_t *out,
     int *key_id, const ngx_str_t *verify_name, const char *key_path,

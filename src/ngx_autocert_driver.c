@@ -1306,10 +1306,20 @@ ngx_autocert_backoff_hold(ngx_autocert_ca_state_t *state, ngx_uint_t index,
 }
 
 
+/* Translate the certificate reader's four-way result into the scheduler's
+ * due/not-due decision. Missing or invalid pairs need issuance; transient I/O
+ * failures must not spend a CA order, and are retried by the next sweep. */
+static ngx_int_t
+ngx_autocert_cert_read_due(ngx_int_t rc)
+{
+    return rc == NGX_DECLINED || rc == NGX_ABORT;
+}
+
+
 /*
  * Decide whether `name` needs an order now: true if no fullchain.pem is stored
- * yet, if it is unreadable/corrupt, or if it is inside the renew_before window
- * (now >= notAfter - renew_before).
+ * yet, if it is invalid, or if it is inside the renew_before window. Transient
+ * read failures back off until a later sweep instead of launching a CA order.
  */
 static ngx_int_t
 ngx_autocert_name_due(ngx_cycle_t *cycle, ngx_autocert_conf_t *acf,
@@ -1484,11 +1494,12 @@ ngx_autocert_name_due(ngx_cycle_t *cycle, ngx_autocert_conf_t *acf,
                 name );
             return 1;                   /* identity/pair mismatch -> reissue */
         }
-        if (rc != NGX_OK) {
+        if (!ngx_autocert_cert_read_due(rc) && rc != NGX_OK) {
             ngx_log_error(NGX_LOG_WARN, cycle->log, 0,
-                          "autocert: cannot read notAfter of \"%s\"; reissuing",
+                          "autocert: cannot read stored key/chain \"%s\"; "
+                          "backing off until the next sweep",
                           path);
-            return 1;                   /* corrupt/unreadable -> reissue */
+            return 0;                   /* transient read error -> back off */
         }
 
         /*
