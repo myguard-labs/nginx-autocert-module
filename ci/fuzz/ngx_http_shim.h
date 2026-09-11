@@ -388,6 +388,10 @@ typedef struct {
     u_char  *end;
 } ngx_buf_t;
 
+#define NGX_AUTOCERT_DECHUNK_CHUNKS            0
+#define NGX_AUTOCERT_DECHUNK_TRAILER_START     1
+#define NGX_AUTOCERT_DECHUNK_TRAILER_NONEMPTY  2
+
 /* --- captured response header (mirror of ngx_autocert_acme.h) --- */
 typedef struct {
     ngx_str_t  name;
@@ -426,6 +430,7 @@ struct ngx_autocert_acme_request_s {
     size_t       hdr_scan_pos;
     size_t       dechunk_pos;
     size_t       dechunk_total;
+    ngx_uint_t   dechunk_state;
 };
 
 /*

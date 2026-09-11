@@ -23,6 +23,10 @@
 #define NGX_AUTOCERT_RECV_MAX   (256 * 1024)   /* cap a CA response */
 #define NGX_AUTOCERT_RECV_INIT  (16 * 1024)
 
+#define NGX_AUTOCERT_DECHUNK_CHUNKS            0
+#define NGX_AUTOCERT_DECHUNK_TRAILER_START     1
+#define NGX_AUTOCERT_DECHUNK_TRAILER_NONEMPTY  2
+
 /* Total wall-clock budget for reading one response body, independent of the
  * per-IO read timer (which resets on every NGX_AGAIN). Bounds a slow/dripping
  * peer; an ACME response is small, so 60 s is very generous. Overridable at
@@ -1545,7 +1549,21 @@ ngx_autocert_acme_dechunk(ngx_autocert_acme_request_t *r)
     total = r->dechunk_total;
 
     /* Bail NGX_AGAIN if we hit the end mid-chunk; the cursor stays at the last
-     * fully-validated chunk boundary, so the next read resumes there. */
+     * fully-validated chunk boundary, so the next read resumes there.
+     *
+     * Trailer parsing has three states. CHUNKS transitions to TRAILER_START
+     * exactly once, after validating the zero chunk. TRAILER_START means no
+     * non-CRLF byte has yet been seen on the current line; after one is seen,
+     * TRAILER_NONEMPTY makes that line ineligible to terminate the message.
+     * dechunk_pos is the next CRLF scan offset in both trailer states. On an
+     * incomplete line it retains only a final CR, the sole byte that can begin
+     * a delimiter split across reads. Thus each trailer byte is examined at
+     * most twice across incremental calls.
+     */
+    if (r->dechunk_state != NGX_AUTOCERT_DECHUNK_CHUNKS) {
+        goto trailers;
+    }
+
     for ( ;; ) {
         eol = ngx_autocert_memmem(p, end - p, CRLF, sizeof(CRLF) - 1);
         if (eol == NULL) {
@@ -1571,18 +1589,41 @@ ngx_autocert_acme_dechunk(ngx_autocert_acme_request_t *r)
              * misread as a clean end-of-body. Walk trailer lines one at a
              * time and require the terminator to be an EMPTY line.
              */
+            r->dechunk_state = NGX_AUTOCERT_DECHUNK_TRAILER_START;
+            r->dechunk_pos = p - b->start;
+
+trailers:
+            p = b->start + r->dechunk_pos;
+
             for ( ;; ) {
                 eol = ngx_autocert_memmem(p, end - p, CRLF, sizeof(CRLF) - 1);
                 if (eol == NULL) {
+                    size_t  pending = end - p;
+
+                    if (pending != 0
+                        && !(r->dechunk_state
+                             == NGX_AUTOCERT_DECHUNK_TRAILER_START
+                             && pending == 1 && *p == '\r'))
+                    {
+                        r->dechunk_state =
+                            NGX_AUTOCERT_DECHUNK_TRAILER_NONEMPTY;
+                        r->dechunk_pos = (end - b->start)
+                            - (end[-1] == '\r' ? 1 : 0);
+                    }
                     return NGX_AGAIN;      /* line not complete yet */
                 }
-                if (eol == p) {
+                if (r->dechunk_state
+                        == NGX_AUTOCERT_DECHUNK_TRAILER_START
+                    && eol == p)
+                {
                     /* genuine empty line: end of trailers, end of message */
                     p = eol + sizeof(CRLF) - 1;
                     break;
                 }
                 /* a trailer field line; skip it and look for the next one */
                 p = eol + sizeof(CRLF) - 1;
+                r->dechunk_state = NGX_AUTOCERT_DECHUNK_TRAILER_START;
+                r->dechunk_pos = p - b->start;
             }
             break;
         }

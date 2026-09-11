@@ -497,6 +497,74 @@ test_hdr_scan_cursor(void)
 }
 
 
+static void
+test_chunked_trailer_cursor(void)
+{
+    static const char  prefix[] =
+        "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n";
+    ngx_autocert_acme_request_t  r;
+    ngx_buf_t                   *b;
+    u_char                       resp[512];
+    size_t                       visible, i;
+    ngx_int_t                    rc;
+    int                          bounded = 1;
+
+    req_init(&r);
+    b = ngx_pnalloc(&pool, sizeof(ngx_buf_t));
+    memcpy(resp, prefix, sizeof(prefix) - 1);
+    visible = sizeof(prefix) - 1;
+    b->start = resp;
+    b->pos = resp;
+    b->last = resp + visible;
+    b->end = resp + sizeof(resp);
+    r.recv = b;
+
+    rc = ngx_autocert_acme_parse_response(&r);
+    bounded &= rc == NGX_AGAIN
+               && r.dechunk_state == NGX_AUTOCERT_DECHUNK_TRAILER_START
+               && r.dechunk_pos == visible;
+
+    /* Feed 64 one-byte trailer fields one byte at a time. After every parse,
+     * all but at most a trailing CR must be behind the persisted scan cursor.
+     * This is the executable linear-work invariant: 195 parser calls cover
+     * 194 incrementally exposed trailer bytes and retain at most one byte of
+     * delimiter overlap. */
+    for (i = 0; i < 64; i++) {
+        resp[visible++] = 'X';
+        b->last = resp + visible;
+        rc = ngx_autocert_acme_parse_response(&r);
+        bounded &= rc == NGX_AGAIN && visible - r.dechunk_pos <= 1;
+
+        resp[visible++] = '\r';
+        b->last = resp + visible;
+        rc = ngx_autocert_acme_parse_response(&r);
+        bounded &= rc == NGX_AGAIN && visible - r.dechunk_pos <= 1;
+
+        resp[visible++] = '\n';
+        b->last = resp + visible;
+        rc = ngx_autocert_acme_parse_response(&r);
+        bounded &= rc == NGX_AGAIN && r.dechunk_pos == visible
+                   && r.dechunk_state
+                      == NGX_AUTOCERT_DECHUNK_TRAILER_START;
+    }
+
+    resp[visible++] = '\r';
+    b->last = resp + visible;
+    rc = ngx_autocert_acme_parse_response(&r);
+    bounded &= rc == NGX_AGAIN && visible - r.dechunk_pos == 1;
+
+    resp[visible++] = '\n';
+    b->last = resp + visible;
+    rc = ngx_autocert_acme_parse_response(&r);
+    bounded &= rc == NGX_DONE && r.body_out.len == 0;
+
+    CHECK(bounded,
+          "dechunk_pos: 195 byte-split trailer reads retain at most one "
+          "byte of scan overlap");
+    ngx_http_fuzz_pool_reset(&pool);
+}
+
+
 /*
  * ---- fragmentation-parity harness ----
  *
@@ -953,6 +1021,7 @@ main(void)
     test_status_line();
     test_body_framing();
     test_hdr_scan_cursor();
+    test_chunked_trailer_cursor();
     test_hdr_split_parity();
 
     if (failures) {
