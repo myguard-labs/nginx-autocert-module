@@ -352,14 +352,19 @@ cleanup_cc_probe() {
 	rm -rf "$CC_PROBE_DIR"
 }
 trap cleanup_cc_probe EXIT
-cat >"$CC_PROBE_DIR/cc" <<'EOF'
+cat >"$CC_PROBE_DIR/compiler" <<'EOF'
 #!/bin/sh
-echo "hardcoded cc bypassed the selected compiler" >&2
-exit 99
+: >"$CC_PROBE_MARKER"
+exec "$REAL_CC" "$@"
 EOF
-chmod +x "$CC_PROBE_DIR/cc"
-PATH="$CC_PROBE_DIR:$PATH" CC="$CC" \
+chmod +x "$CC_PROBE_DIR/compiler"
+env CC_PROBE_MARKER="$CC_PROBE_DIR/used" REAL_CC="$CC" \
+	CC="$CC_PROBE_DIR/compiler" \
 	bash "$WORKSPACE/ci/tests/unit/extract_cert_read_due.sh"
+[ -e "$CC_PROBE_DIR/used" ] || {
+	echo "extract_cert_read_due.sh bypassed the selected compiler" >&2
+	exit 1
+}
 cleanup_cc_probe
 trap - EXIT
 # shellcheck disable=SC2086
