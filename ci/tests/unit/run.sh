@@ -354,15 +354,16 @@ cleanup_cc_probe() {
 trap cleanup_cc_probe EXIT
 cat >"$CC_PROBE_DIR/compiler" <<'EOF'
 #!/bin/sh
-: >"$CC_PROBE_MARKER"
+printf '.\n' >>"$CC_PROBE_MARKER"
 exec "$REAL_CC" "$@"
 EOF
 chmod +x "$CC_PROBE_DIR/compiler"
 env CC_PROBE_MARKER="$CC_PROBE_DIR/used" REAL_CC="$CC" \
 	CC="$CC_PROBE_DIR/compiler" \
 	bash "$WORKSPACE/ci/tests/unit/extract_cert_read_due.sh"
-[ -e "$CC_PROBE_DIR/used" ] || {
-	echo "extract_cert_read_due.sh bypassed the selected compiler" >&2
+CC_PROBE_COUNT="$(wc -l <"$CC_PROBE_DIR/used")"
+[ "$CC_PROBE_COUNT" -eq 8 ] || {
+	echo "extract_cert_read_due.sh used the selected compiler $CC_PROBE_COUNT times, expected 8" >&2
 	exit 1
 }
 cleanup_cc_probe
