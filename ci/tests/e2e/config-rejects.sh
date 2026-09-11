@@ -68,9 +68,8 @@ EOF
     echo "✓ $label rejected at config time"
 }
 
-# Asserts `nginx -t` accepts a complete config and prints its diagnostic when
-# it does not. Use the exit status: a successful parse can still fail during
-# init_main_conf, after nginx/angie has already printed "syntax is ok".
+# Asserts `nginx -t` accepts a complete config. Capture the output so a failure
+# is diagnosable without piping the server through an early-exiting `grep -q`.
 expect_accept() {
     local label="$1" out rc=0
     out=$("$SERVER_BIN" -t -p "$PREFIX" -c "$PREFIX/conf/nginx.conf" 2>&1) || rc=$?
