@@ -20,8 +20,11 @@ NGX_BUILD_DIR="${NGX_BUILD_DIR:-$(cd "$(dirname "$SERVER_BIN")/.." && pwd)}"
 HTTP_SO="$NGX_BUILD_DIR/objs/ngx_http_autocert_module.so"
 [ -f "$HTTP_SO" ] || { echo "missing $HTTP_SO"; exit 1; }
 
+# ":-" substitutes the default when PREFIX is unset OR empty, so PREFIX is
+# always non-empty below; the ":?" on the rm re-states that as an assertion the
+# linter can see, and would abort rather than let rm -rf run on "".
 PREFIX="${PREFIX:-/tmp/ac-cfgreject}"
-rm -rf "$PREFIX"
+rm -rf "${PREFIX:?}"
 mkdir -p "$PREFIX/logs" "$PREFIX/conf" "$PREFIX/store"
 # store mode must not depend on the caller's umask (the driver refuses a
 # group/other-writable store, and mkdir's mode is umask-filtered).
@@ -113,8 +116,13 @@ http {
     server { listen $PORT; server_name x.example.com; }
 }
 EOF
-"$SERVER_BIN" -t -p "$PREFIX" -c "$PREFIX/conf/nginx.conf" 2>&1 | grep -q "syntax is ok" \
-    || { echo "::error::a valid autocert_dns_hook_timeout was rejected"; exit 1; }
+dnshook_rc=0
+dnshook_out=$("$SERVER_BIN" -t -p "$PREFIX" -c "$PREFIX/conf/nginx.conf" 2>&1) || dnshook_rc=$?
+if [ "$dnshook_rc" -ne 0 ]; then
+    echo "::error::a valid autocert_dns_hook_timeout was rejected"
+    printf '%s\n' "$dnshook_out" | sed 's/^/    /'
+    exit 1
+fi
 echo "✓ valid autocert_dns_hook_timeout accepted"
 
 # Phase B dual-cert: autocert_key_type is a 1-4 element list. Two ECDSA types
@@ -157,8 +165,13 @@ http {
     server { listen $PORT; server_name x.example.com; }
 }
 EOF
-"$SERVER_BIN" -t -p "$PREFIX" -c "$PREFIX/conf/nginx.conf" 2>&1 | grep -q "syntax is ok" \
-    || { echo "::error::a valid autocert_renew_before was rejected"; exit 1; }
+rbefore_rc=0
+rbefore_out=$("$SERVER_BIN" -t -p "$PREFIX" -c "$PREFIX/conf/nginx.conf" 2>&1) || rbefore_rc=$?
+if [ "$rbefore_rc" -ne 0 ]; then
+    echo "::error::a valid autocert_renew_before was rejected"
+    printf '%s\n' "$rbefore_out" | sed 's/^/    /'
+    exit 1
+fi
 echo "✓ valid autocert_renew_before accepted"
 
 # autocert_handshake_load_limit is parsed by the hand-rolled uint setter
@@ -166,11 +179,11 @@ echo "✓ valid autocert_renew_before accepted"
 # directives. Either guard must fire at config time, not silently drop the check.
 expect_reject "autocert_handshake_load_limit non-numeric" \
     "    autocert_handshake_load_limit abc;" \
-    "invalid number"
+    "invalid number \"abc\""
 expect_reject "autocert_handshake_load_limit duplicate" \
     "    autocert_handshake_load_limit 100;
     autocert_handshake_load_limit 200;" \
-    "is duplicate"
+    "\"autocert_handshake_load_limit\" directive is duplicate"
 
 # Sanity: a valid handshake_load_limit is accepted.
 cat > "$PREFIX/conf/nginx.conf" <<EOF
@@ -185,8 +198,16 @@ http {
     server { listen $PORT; server_name x.example.com; }
 }
 EOF
-"$SERVER_BIN" -t -p "$PREFIX" -c "$PREFIX/conf/nginx.conf" 2>&1 | grep -q "syntax is ok" \
-    || { echo "::error::a valid autocert_handshake_load_limit was rejected"; exit 1; }
+# Detect acceptance by exit status, not by "syntax is ok": angie prints
+# "syntax is ok" for the parse phase and only then fails init_main_conf,
+# so string-based checks wrongly read a rejected config as accepted.
+hll_rc=0
+hll_out=$("$SERVER_BIN" -t -p "$PREFIX" -c "$PREFIX/conf/nginx.conf" 2>&1) || hll_rc=$?
+if [ "$hll_rc" -ne 0 ]; then
+    echo "::error::a valid autocert_handshake_load_limit was rejected"
+    printf '%s\n' "$hll_out" | sed 's/^/    /'
+    exit 1
+fi
 echo "✓ valid autocert_handshake_load_limit accepted"
 
 # ngx_autocert_sec_to_msec_clamped() silently caps resolver_timeout above
@@ -212,8 +233,13 @@ http {
     server { listen $PORT; server_name x.example.com; }
 }
 EOF
-"$SERVER_BIN" -t -p "$PREFIX" -c "$PREFIX/conf/nginx.conf" 2>&1 | grep -q "syntax is ok" \
-    || { echo "::error::a valid autocert_resolver_timeout was rejected"; exit 1; }
+rtimeout_rc=0
+rtimeout_out=$("$SERVER_BIN" -t -p "$PREFIX" -c "$PREFIX/conf/nginx.conf" 2>&1) || rtimeout_rc=$?
+if [ "$rtimeout_rc" -ne 0 ]; then
+    echo "::error::a valid autocert_resolver_timeout was rejected"
+    printf '%s\n' "$rtimeout_out" | sed 's/^/    /'
+    exit 1
+fi
 echo "✓ valid autocert_resolver_timeout accepted"
 
 # --- IP-address certs (RFC 8738) ---------------------------------------------
@@ -282,8 +308,13 @@ http {
     server { listen $PORT; server_name 2001:db8::1; }
 }
 EOF
-"$SERVER_BIN" -t -p "$PREFIX" -c "$PREFIX/conf/nginx.conf" 2>&1 | grep -q "syntax is ok" \
-    || { echo "::error::a valid IP-cert + profile config was rejected"; exit 1; }
+ipcert_rc=0
+ipcert_out=$("$SERVER_BIN" -t -p "$PREFIX" -c "$PREFIX/conf/nginx.conf" 2>&1) || ipcert_rc=$?
+if [ "$ipcert_rc" -ne 0 ]; then
+    echo "::error::a valid IP-cert + profile config was rejected"
+    printf '%s\n' "$ipcert_out" | sed 's/^/    /'
+    exit 1
+fi
 echo "✓ IP server_names + autocert_profile accepted under http-01"
 
 echo "✓✓ config-time rejection checks verified"
