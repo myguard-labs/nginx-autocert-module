@@ -362,6 +362,7 @@ env CC_PROBE_MARKER="$CC_PROBE_DIR/used" REAL_CC="$CC" \
 	CC="$CC_PROBE_DIR/compiler" \
 	bash "$WORKSPACE/ci/tests/unit/extract_cert_read_due.sh"
 CC_PROBE_COUNT="$(wc -l <"$CC_PROBE_DIR/used")"
+# Four probe invocations each run in two preprocessing modes.
 [ "$CC_PROBE_COUNT" -eq 8 ] || {
 	echo "extract_cert_read_due.sh used the selected compiler $CC_PROBE_COUNT times, expected 8" >&2
 	exit 1
