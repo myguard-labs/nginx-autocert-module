@@ -30,11 +30,9 @@ for sarif in "$@"; do
                                           | startswith($rules[$i].id + "/"))
                                      and ($r.ruleId
                                           | ltrimstr($rules[$i].id + "/")
-                                          | length > 0)
-                                     and ($r.ruleId
-                                          | ltrimstr($rules[$i].id + "/")
-                                          | contains("/")
-                                          | not)))
+                                          | . as $suffix
+                                          | ($suffix | length > 0)
+                                            and ($suffix | contains("/") | not))))
                                 | not)
                       then error("ruleId does not match the indexed rule")
                       else $rules[$i]
