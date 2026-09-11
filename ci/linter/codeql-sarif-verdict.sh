@@ -15,18 +15,19 @@ for sarif in "$@"; do
                | .results[]
                | . as $r
                | ($run.tool.driver.rules // []) as $rules
-               | ( [ $run.tool.driver.rules[]?
-                     | select(.id == $r.ruleId) ][0]
-                   // ($r.ruleIndex as $i
-                       | if $i == null then null
-                         elif ($i | type) == "number"
-                              and ($i | floor) == $i
-                              and $i >= 0
-                              and $i < ($rules | length)
-                         then $rules[$i]
-                         else error("ruleIndex must be an in-range nonnegative integer")
-                         end)
-                   // {} ) as $rule
+               | (if $r.ruleIndex != null
+                  then $r.ruleIndex as $i
+                    | if ($i | type) != "number"
+                         or ($i | floor) != $i
+                         or $i < 0
+                         or $i >= ($rules | length)
+                      then error("ruleIndex must be an in-range nonnegative integer")
+                      elif $r.ruleId != null and $r.ruleId != $rules[$i].id
+                      then error("ruleId does not match the indexed rule")
+                      else $rules[$i]
+                      end
+                  else ([ $rules[]? | select(.id == $r.ruleId) ][0] // {})
+                  end) as $rule
                | select(
                    ($r.level
                     // $rule.defaultConfiguration.level?

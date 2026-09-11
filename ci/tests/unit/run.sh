@@ -343,7 +343,25 @@ cd "$WORKSPACE"
 
 # Renewal read verdict: slice the driver's pure four-way certificate-read
 # decision so missing/invalid pairs issue while transient I/O backs off.
-CC="$CC" bash "$WORKSPACE/ci/tests/unit/extract_cert_read_due.sh"
+if ! SELECTED_CC="$(command -v -- "$CC")"; then
+	echo "✗ selected compiler is not executable: $CC" >&2
+	exit 2
+fi
+CC_PROBE_DIR="$(mktemp -d "$BUILD_DIR/cc-probe.XXXXXX")"
+cleanup_cc_probe() {
+	rm -rf "$CC_PROBE_DIR"
+}
+trap cleanup_cc_probe EXIT
+cat >"$CC_PROBE_DIR/cc" <<'EOF'
+#!/bin/sh
+echo "hardcoded cc bypassed the selected compiler" >&2
+exit 99
+EOF
+chmod +x "$CC_PROBE_DIR/cc"
+PATH="$CC_PROBE_DIR:$PATH" CC="$SELECTED_CC" \
+	bash "$WORKSPACE/ci/tests/unit/extract_cert_read_due.sh"
+cleanup_cc_probe
+trap - EXIT
 # shellcheck disable=SC2086
 "$CC" $SANITIZE_CFLAGS $EXTRA_CFLAGS -Wall -Wextra -Werror $CORE_INC \
 	-I"$WORKSPACE/ci/tests/unit" -o "$BUILD_DIR/test_cert_read_due" \
