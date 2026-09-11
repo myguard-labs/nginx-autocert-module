@@ -4,10 +4,8 @@
 # module fails configuration — rather than misbehaving at runtime — for invalid
 # directive values.
 #
-# Cases:
-#   - autocert_dns_hook_timeout 0;  (and negative) must be rejected: a
-#     non-positive timeout otherwise reaches the driver as 0 and SIGKILLs every
-#     dns-01 hook on the first poll tick, silently breaking all dns-01 issuance.
+# Covers config-time rejection and acceptance boundaries for directives whose
+# invalid values would otherwise fail later during issuance or runtime.
 #
 # Inputs (env):
 #   SERVER_BIN   - path to the built nginx/angie binary (required)
