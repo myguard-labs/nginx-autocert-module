@@ -572,7 +572,7 @@ case_ 2 "CodeQL SARIF: absent results fail closed" \
 case_ 2 "CodeQL SARIF: empty runs fail closed" \
     ci/linter/codeql-sarif-verdict.sh "$sarifroot/empty-runs.sarif"
 
-# lint-ca-log-safety: whitespace-tolerant &r->url detection.
+# lint-ca-log-safety: C-aware, balanced-call CA-field detection.
 #
 # lint_files() matches only '^src/.*\.[ch]$' and, given explicit args, filters
 # on the string alone without consulting git -- so a fixture rooted under a
@@ -584,6 +584,7 @@ calogroot="$(mktemp -d)"
 trap 'rm -rf "$badroot" "$yamlroot" "$sarifroot" "$calogroot"' EXIT
 mkdir -p "$calogroot/src" "$calogroot/ci/linter"
 cp "$ROOT/ci/linter/lib.sh" "$calogroot/ci/linter/lib.sh"
+cp "$ROOT/ci/linter/ca_log_safety.py" "$calogroot/ci/linter/ca_log_safety.py"
 git -C "$calogroot" init -q .
 
 calog_case() {
@@ -606,10 +607,24 @@ calog_case 1 "lint-ca-log-safety: '&r -> url' spacing is caught" \
     'ngx_log_error(NGX_LOG_ERR, r->log, 0, "%V", &r -> url);'
 calog_case 1 "lint-ca-log-safety: '&r->    url' spacing is caught" \
     'ngx_log_error(NGX_LOG_ERR, r->log, 0, "%V", &r->    url);'
-calog_case 0 "lint-ca-log-safety: wrapped call still passes" \
+for field in body_out kid nonce new_nonce_url new_account_url post_url \
+    new_order_url order_url finalize_url authz_url challenge_url cert_url \
+    cert_chain; do
+    calog_case 1 "lint-ca-log-safety: CA field $field is caught" \
+        "ngx_log_error(NGX_LOG_ERR, r->log, 0, \"%V\", &r->$field);"
+done
+calog_case 0 "lint-ca-log-safety: ACME safe wrapper passes" \
     'ngx_log_error(NGX_LOG_ERR, r->log, 0, "%V", ngx_autocert_acme_log_safe(&r->url));'
+calog_case 0 "lint-ca-log-safety: account safe wrapper passes" \
+    'ngx_log_error(NGX_LOG_NOTICE, r->log, 0, "%V", ngx_autocert_account_log_safe(&acct->kid, buf, sizeof(buf)));'
 calog_case 0 "lint-ca-log-safety: debug level stays exempt" \
-    'ngx_log_debug1(NGX_LOG_DEBUG_HTTP, r->connection->log, 0, "%V", &r->url);'
+    'ngx_log_debug4(NGX_LOG_DEBUG_HTTP, r->connection->log, 0, "%V%V%V%V", &r->url, &r->body_out, &acct->kid, &acct->nonce);'
+calog_case 0 "lint-ca-log-safety: validated URL parts and token stay allowed" \
+    'ngx_log_error(NGX_LOG_ERR, r->log, 0, "%V%V%V", &r->host, &r->uri, &order->token);'
+calog_case 0 "lint-ca-log-safety: CRLF-delimited header value stays allowed" \
+    'ngx_log_error(NGX_LOG_ERR, r->log, 0, "%V", &header->value);'
+calog_case 0 "lint-ca-log-safety: CA string length metadata stays allowed" \
+    'ngx_log_error(NGX_LOG_NOTICE, r->log, 0, "%uz", req->body_out.len);'
 calog_case 1 "lint-ca-log-safety: 'not ngx_log_debug' comment does not exempt an ERROR call" \
     'ngx_log_error(NGX_LOG_ERR, r->log, 0, /* not ngx_log_debug */
                   "%V", &r->url);'
@@ -621,6 +636,88 @@ calog_case 1 "lint-ca-log-safety: commented-out helper call does not mask a raw 
 calog_case 1 "lint-ca-log-safety: legitimate trailing comment after ; still terminates the statement" \
     'ngx_log_error(NGX_LOG_ERR, r->log, 0, "%V", &r->url); /* trailing comment */
     ngx_log_error(NGX_LOG_ERR, r->log, 0, "%V", ngx_autocert_acme_log_safe(&r->url));'
+calog_case 1 "lint-ca-log-safety: semicolon in a literal cannot truncate a call" \
+    'ngx_log_error(NGX_LOG_ERR, r->log, 0, "pretend; call ngx_log_debug1() %V", &req->body_out);'
+calog_case 1 "lint-ca-log-safety: statement-expression semicolons cannot truncate a call" \
+    'ngx_log_error(NGX_LOG_ERR, r->log, 0, "%d %V", ({ int n = 1; n; }), &r->url);'
+calog_case 1 "lint-ca-log-safety: C line splicing cannot split a field name" \
+    'ngx_log_error(NGX_LOG_ERR, r->log, 0, "%V", &req->body_\
+out);'
+calog_case 1 "lint-ca-log-safety: line comment cannot hide a continuation argument" \
+    'ngx_log_error(NGX_LOG_WARN, r->log, 0, "%V", // safe-looking ; )
+                  &acct->nonce);'
+calog_case 0 "lint-ca-log-safety: comments and literals are not call sites" \
+    '/* ngx_log_error(NGX_LOG_ERR, log, 0, "%V", &acct->kid); */
+    const char *s = "ngx_log_error(NGX_LOG_ERR, log, 0, &req->body_out)";'
+calog_case 0 "lint-ca-log-safety: inactive preprocessor parentheses do not reject valid C" \
+    '#if ONE
+    first(
+    #else
+    second(
+    #endif
+    value);'
+calog_case 0 "lint-ca-log-safety: three conditional call alternatives are valid C" \
+    'ngx_log_error(NGX_LOG_ERR, r->log, 0, "%V",
+    #if ONE
+                  first(
+    #elif TWO
+                  second(
+    #else
+                  third(
+    #endif
+                  safe_value));'
+calog_case 0 "lint-ca-log-safety: semicolon-free log macro is valid C" \
+    '#define LOG_NOTICE(...) ngx_log_error(NGX_LOG_NOTICE, __VA_ARGS__)'
+calog_case 0 "lint-ca-log-safety: spaced semicolon-free log macro is valid C" \
+    '# define LOG_NOTICE(...) ngx_log_error(NGX_LOG_NOTICE, __VA_ARGS__)'
+calog_case 1 "lint-ca-log-safety: macro body with a CA field is still caught" \
+    '#define LOG_KID() \
+        ngx_log_error(NGX_LOG_NOTICE, acct->log, 0, "%V", &acct->kid)'
+calog_case 1 "lint-ca-log-safety: preprocessor alternatives cannot hide a CA field" \
+    'ngx_log_error(NGX_LOG_ERR, r->log, 0,
+    #if ONE
+                  "%V", safe_value)
+    #else
+                  "%V", &req->body_out)
+    #endif
+                  ;'
+calog_case 1 "lint-ca-log-safety: conditional wrapper alternative cannot mask raw field" \
+    'ngx_log_error(NGX_LOG_ERR, r->log, 0, "%V",
+    #if SAFE
+                  ngx_autocert_acme_log_safe(
+    #else
+                  identity(
+    #endif
+                  &r->url));'
+calog_case 1 "lint-ca-log-safety: sibling-branch closing paren cannot complete wrapper" \
+    'ngx_log_error(NGX_LOG_ERR, r->log, 0, "%V",
+    #if SAFE
+                  ngx_autocert_acme_log_safe(
+    #else
+                  identity(
+    #endif
+                  &r->url
+    #if SAFE
+                  )
+    #else
+                  )
+    #endif
+                  );'
+calog_case 0 "lint-ca-log-safety: wrapper around conditional arguments stays safe" \
+    'ngx_log_error(NGX_LOG_ERR, r->log, 0, "%V",
+                  ngx_autocert_acme_log_safe(
+    #if FIRST
+                  &r->url
+    #else
+                  &acct->kid
+    #endif
+                  ));'
+calog_case 1 "lint-ca-log-safety: one-line adjacent calls do not merge" \
+    'ngx_log_error(NGX_LOG_ERR, r->log, 0, "safe"); ngx_log_error(NGX_LOG_ERR, r->log, 0, "%V", &order->cert_url);'
+calog_case 1 "lint-ca-log-safety: safe nested peer does not mask raw field" \
+    'ngx_log_error(NGX_LOG_ERR, r->log, 0, "%V%V", ngx_autocert_acme_log_safe(&r->url), &req->body_out);'
+calog_case 1 "lint-ca-log-safety: an enclosing safe-wrapper name cannot mask a log" \
+    'ngx_autocert_acme_log_safe(ngx_log_error(NGX_LOG_ERR, r->log, 0, "%V", &req->body_out));'
 
 if [ "$rc" -eq 0 ]; then
     echo "== lint gate selftest: all controls held =="

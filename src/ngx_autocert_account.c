@@ -1544,9 +1544,13 @@ ngx_autocert_account_finish(ngx_autocert_account_t *acct, ngx_int_t rc)
     acct->done = 1;
 
     if (rc == NGX_OK) {
+        u_char     safe_buf[256];
+        ngx_str_t  safe_kid = ngx_autocert_account_log_safe(
+                                  &acct->kid, safe_buf, sizeof(safe_buf));
+
         ngx_log_error(NGX_LOG_NOTICE, acct->log, 0,
                       "autocert: ACME account registered, kid \"%V\"",
-                      &acct->kid);
+                      &safe_kid);
     }
 
     /*
