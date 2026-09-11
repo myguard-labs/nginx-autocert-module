@@ -15,15 +15,19 @@ if [ -z "${WORKSPACE:-}" ]; then
 fi
 
 # Compiler + optional sanitizer instrumentation. Default (CC unset, SANITIZE
-# unset) is byte-identical to the historical hardcoded `gcc` invocation: CC
-# resolves to plain "gcc" and both flag/lib additions are empty strings, so
-# every gcc line below compiles and links exactly as before.
+# unset) uses the historical `gcc` default: CC resolves once to that executable
+# and both flag/lib additions are empty strings.
 #
 # SANITIZE=1 (or any non-empty value) turns on ASan+UBSan for the WHOLE suite
 # (same flags ci/tests/unit/run-asan.sh already uses for its one test), so the
 # same 12-binary suite this script runs by default can also run instrumented,
 # rather than maintaining a second parallel script per binary.
 CC="${CC:-gcc}"
+if ! SELECTED_CC="$(command -v -- "$CC")"; then
+	echo "✗ selected compiler is not executable: $CC" >&2
+	exit 2
+fi
+CC="$SELECTED_CC"
 SANITIZE_CFLAGS=""
 SANITIZE_LIBS=""
 if [ -n "${SANITIZE:-}" ]; then
@@ -343,10 +347,6 @@ cd "$WORKSPACE"
 
 # Renewal read verdict: slice the driver's pure four-way certificate-read
 # decision so missing/invalid pairs issue while transient I/O backs off.
-if ! SELECTED_CC="$(command -v -- "$CC")"; then
-	echo "✗ selected compiler is not executable: $CC" >&2
-	exit 2
-fi
 CC_PROBE_DIR="$(mktemp -d "$BUILD_DIR/cc-probe.XXXXXX")"
 cleanup_cc_probe() {
 	rm -rf "$CC_PROBE_DIR"
@@ -358,7 +358,7 @@ echo "hardcoded cc bypassed the selected compiler" >&2
 exit 99
 EOF
 chmod +x "$CC_PROBE_DIR/cc"
-PATH="$CC_PROBE_DIR:$PATH" CC="$SELECTED_CC" \
+PATH="$CC_PROBE_DIR:$PATH" CC="$CC" \
 	bash "$WORKSPACE/ci/tests/unit/extract_cert_read_due.sh"
 cleanup_cc_probe
 trap - EXIT

@@ -22,7 +22,13 @@ for sarif in "$@"; do
                          or $i < 0
                          or $i >= ($rules | length)
                       then error("ruleIndex must be an in-range nonnegative integer")
-                      elif $r.ruleId != null and $r.ruleId != $rules[$i].id
+                      elif $r.ruleId != null
+                           and (($r.ruleId == $rules[$i].id
+                                 or (($r.ruleId | type) == "string"
+                                     and ($rules[$i].id | type) == "string"
+                                     and ($r.ruleId
+                                          | startswith($rules[$i].id + "/"))))
+                                | not)
                       then error("ruleId does not match the indexed rule")
                       else $rules[$i]
                       end
