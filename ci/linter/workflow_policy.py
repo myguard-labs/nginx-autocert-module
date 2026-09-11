@@ -581,9 +581,10 @@ def _check_port_node(
 def _register_workflow_env_band(
     path: pathlib.Path, doc: dict, bands: dict[str, tuple[str, str]], errors: list[str]
 ) -> tuple[str, frozenset[str]]:
-    """Register a WORKFLOW-level `env:` band ONCE under the file, and return
-    its dumped text plus the port values it accounted for, so callers can
-    append the text to each job's own body and skip re-reporting those ports.
+    """Register WORKFLOW-level `TEST_BASE_PORT` and `AC_TEST_PORT[0-9]*`
+    bands ONCE under the file, and return the dumped env text plus inherited
+    TEST_BASE_PORT values so callers can append the text to each job's own body
+    without re-reporting that declaration.
 
     A workflow-level `env:` sits on `doc`, one level above every job node
     `jobs()` hands out, so a job's own `_body(node)` dump never contains it --
@@ -600,19 +601,27 @@ def _register_workflow_env_band(
     wf_env_body = yaml.safe_dump(
         {"env": wf_env}, default_flow_style=False, sort_keys=False
     )
-    seen: set[str] = set()
-    for port in re.findall(r"(?m)^\s*TEST_BASE_PORT:\s*[\"']?(\d+)", wf_env_body):
-        seen.add(port)
+    inherited_test_base_ports: set[str] = set()
+    for name, raw_value in wf_env.items():
+        if not isinstance(name, str) or not (
+            name == "TEST_BASE_PORT" or _PORT_NAME_RE.fullmatch(name)
+        ):
+            continue
+        port = str(raw_value)
+        if not port.isdigit():
+            continue
+        if name == "TEST_BASE_PORT":
+            inherited_test_base_ports.add(port)
         if port in bands:
             other_where, other_name = bands[port]
             errors.append(
-                f"{path.name} claims TEST_BASE_PORT {port} and {other_where} "
+                f"{path.name} claims {name} {port} and {other_where} "
                 f"claims {other_name} {port} -- bands must be disjoint "
                 "across ALL workflows"
             )
         else:
-            bands[port] = (path.name, "TEST_BASE_PORT")
-    return wf_env_body, frozenset(seen)
+            bands[port] = (path.name, name)
+    return wf_env_body, frozenset(inherited_test_base_ports)
 
 
 def check_ports() -> int:

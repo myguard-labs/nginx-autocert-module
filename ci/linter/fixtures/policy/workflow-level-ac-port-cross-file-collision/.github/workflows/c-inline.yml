@@ -1,0 +1,8 @@
+name: inline-first
+on: pull_request
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - run: bash ci/tools/max-port.sh 19902
+      - run: AC_TEST_PORT2=19902 python3 ci/tools/test_runtime.py --port "$AC_TEST_PORT2"

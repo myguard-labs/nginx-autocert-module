@@ -33,7 +33,11 @@
 
 #include "../../../src/ngx_autocert_loadcap.h"
 
+#include <assert.h>
 #include <stdio.h>
+
+
+#define TEST_MAX_DEFERRED  64
 
 
 /*
@@ -362,7 +366,7 @@ main(void)
     {
         ngx_uint_t  limit, slots, reserve, general, w, threshold;
         ngx_uint_t  ndef, served_in_window;
-        static ngx_uint_t  attacker_deferred[512];
+        static ngx_uint_t  attacker_deferred[TEST_MAX_DEFERRED];
         ngx_uint_t  victim_deferred, j;
 
         limit = 64;
@@ -392,6 +396,7 @@ main(void)
          * measurable benefit against the real adversary.
          */
         ndef = 39;
+        assert(ndef <= TEST_MAX_DEFERRED);
         for (j = 0; j < ndef; j++) {
             attacker_deferred[j] = 0;
         }
@@ -438,6 +443,7 @@ main(void)
          * adversary all over again.
          */
         ndef = 40;                       /* == threshold, likewise a literal */
+        assert(ndef <= TEST_MAX_DEFERRED);
         for (j = 0; j < ndef; j++) {
             attacker_deferred[j] = 0;
         }

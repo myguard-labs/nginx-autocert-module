@@ -210,9 +210,11 @@ X509 *ngx_http_autocert_acme_tls_cert(EVP_PKEY *pkey, ngx_str_t *domain,
  * (NUL-terminated C string) and convert it to a Unix `time_t` in *out. The
  * leaf is the FIRST certificate in the file (per the store layout). Returns
  * NGX_OK on success; NGX_DECLINED if the file is absent (ENOENT/ENOTDIR);
- * NGX_ERROR on any other open/parse failure. Used by the renewal scheduler
- * (M8) to decide whether a stored cert is inside its renew window. No nginx
- * pool dependency.
+ * NGX_ABORT if the stored chain is persistently invalid (including malformed
+ * PEM, malformed notAfter, or a symlinked chain entry); NGX_ERROR on a
+ * transient open, BIO/system read, or allocation failure. Used by the renewal
+ * scheduler (M8) to decide whether a stored cert is inside its renew window.
+ * No nginx pool dependency.
  *
  * key_id (nullable): out-param set to the leaf public key's EVP_PKEY family
  * (EVP_PKEY_EC / EVP_PKEY_RSA), or EVP_PKEY_NONE if unreadable.
@@ -229,11 +231,10 @@ X509 *ngx_http_autocert_acme_tls_cert(EVP_PKEY *pkey, ngx_str_t *domain,
  * but otherwise perfectly valid chain; without this the chain reads as fresh
  * forever while the serve path refuses the mismatched pair on every handshake.
  * A missing, unparsable or mismatched key all report NGX_ABORT (=> reissue).
- * A transient I/O error opening key_path (e.g. a concurrent publish holding
- * the file busy) does NOT report NGX_ABORT: the pair check is silently
- * skipped for this call and the remaining freshness tests decide, so a
- * passing I/O condition never forces an ACME reissue. `log` is used only to
- * report that skip; pass the caller's cycle/request log.
+ * A transient open, BIO/system read, or allocation error on key_path reports
+ * NGX_ERROR, like an unreadable chain. The scheduler backs off rather than
+ * letting the chain's age force an ACME reissue. `log` is used to report that
+ * failure; pass the caller's cycle/request log.
  */
 ngx_int_t ngx_http_autocert_cert_not_after(const char *path, time_t *out,
     int *key_id, const ngx_str_t *verify_name, const char *key_path,
