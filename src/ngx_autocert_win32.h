@@ -2141,6 +2141,12 @@ ngx_autocert_readdir(ngx_autocert_dir_t *dh)
                 NGX_AUTOCERT_FileDirectoryInformation, FALSE, NULL, FALSE);
 
             if (status == STATUS_NO_MORE_FILES) {
+                /* A genuine failure latches eof as well, so the same handle
+                 * cannot be re-driven from an error into this EOF branch.
+                 * Clearing here is nevertheless required for every clean
+                 * walk; the extracted win32 test asserts this branch writes
+                 * zero, while its dirty-LastError and good-entry EOF cases
+                 * exercise the observable clean verdict. */
                 dh->err = 0;                /* clean end of enumeration */
                 dh->eof = 1;
                 return NULL;

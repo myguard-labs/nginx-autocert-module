@@ -51,7 +51,7 @@ if [ ! -f "$SRC" ]; then
 fi
 
 # Slice from the dir-handle struct's typedef through the end of
-# ngx_autocert_readdir_err(). Anchors are production identifiers, not line
+# ngx_autocert_closedir(). Anchors are production identifiers, not line
 # numbers, so ordinary edits above or below the region do not shift the slice.
 START='ngx_autocert_dirent_t (W12)'
 END='ngx_autocert_closedir(ngx_autocert_dir_t *dh)'
@@ -65,7 +65,7 @@ if ! grep -qF "$END" "$SRC"; then
 	exit 1
 fi
 
-# Emit from the start anchor through the closing brace of the accessor whose
+# Emit from the start anchor through the closing brace of closedir(), whose
 # signature is the end anchor. `tail` latches on that signature; the first
 # line that is exactly "}" after it closes the function and ends the slice.
 {
@@ -93,5 +93,19 @@ for sym in 'dh->err = 0' 'ngx_autocert_readdir_err' 'STATUS_NO_MORE_FILES' \
 		exit 1
 	fi
 done
+
+# A failed query latches dh->eof, so one handle cannot first report a genuine
+# error and then be re-driven into STATUS_NO_MORE_FILES. Assert the production
+# EOF branch's clearing assignment structurally; the compiled tests separately
+# exercise its observable clean verdict after both a skipped and a good entry.
+if ! awk '
+	/status == STATUS_NO_MORE_FILES/ { eof = 1; next }
+	eof && /dh->err = 0/            { found = 1 }
+	eof && /return NULL/             { exit !found }
+	END                              { if (!found) exit 1 }
+' "$OUT"; then
+	echo "extract_win32_readdir: STATUS_NO_MORE_FILES does not clear dh->err" >&2
+	exit 1
+fi
 
 echo "✓ extracted win32 store-scan enumeration primitives -> $OUT"

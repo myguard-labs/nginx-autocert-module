@@ -317,16 +317,18 @@ answers the CA must therefore be (or inherit) an autocert-enabled server — a b
 > `location ^~ /.well-known/acme-challenge/ { }` carve-out remains harmless if
 > you already have one.
 >
-> **Challenge responses are served from server-level config.** Serving before
-> location matching means no `location` has been selected when the token is
-> written, so location-level directives do not apply to the challenge response:
-> `server_tokens`, `access_log off`, `error_page`, and the keepalive settings
-> (`keepalive_timeout`, `keepalive_requests`, `keepalive_time`) are taken from
-> the enclosing `server` (or `http`) level instead. `client_max_body_size` is
-> likewise not enforced for a challenge URI — the module discards any request
-> body as a stream, so an oversized body costs bandwidth, not memory. This
-> applies only to `/.well-known/acme-challenge/` URIs; every other request is
-> configured exactly as before.
+> **Challenge responses are served before location configuration is updated.**
+> No `location` has been selected when the token is written, so location-level
+> directives such as `server_tokens`, `access_log off`, `error_page`, and
+> `client_max_body_size` are not applied. The module discards any request body as
+> a stream, so an oversized body costs bandwidth, not memory. On a reused
+> keepalive connection, skipping `ngx_http_update_location_config()` also leaves
+> `sendfile`, `tcp_nopush`, and `limit_except` state from the prior request. That
+> is harmless for this tiny in-memory response. Keepalive itself follows the
+> request's `Connection` header: `keepalive_timeout` is not applied, nor are the
+> `keepalive_requests` and `keepalive_time` counter checks. This applies only to
+> `/.well-known/acme-challenge/` URIs; every other request is configured exactly
+> as before.
 
 ### DNS-01 hook contract
 
