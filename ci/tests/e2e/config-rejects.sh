@@ -177,6 +177,9 @@ expect_accept "valid autocert_renew_before"
 expect_reject "autocert_handshake_load_limit non-numeric" \
     "    autocert_handshake_load_limit abc;" \
     "invalid number \"abc\""
+expect_reject "autocert_handshake_load_limit negative" \
+    "    autocert_handshake_load_limit -1;" \
+    "invalid number \"-1\""
 expect_reject "autocert_handshake_load_limit duplicate" \
     "    autocert_handshake_load_limit 100;
     autocert_handshake_load_limit 200;" \
