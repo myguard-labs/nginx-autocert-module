@@ -388,9 +388,9 @@ typedef struct {
     u_char  *end;
 } ngx_buf_t;
 
-#define NGX_AUTOCERT_DECHUNK_CHUNKS            0
-#define NGX_AUTOCERT_DECHUNK_TRAILER_START     1
-#define NGX_AUTOCERT_DECHUNK_TRAILER_NONEMPTY  2
+#ifndef NGX_AUTOCERT_TEST_MEMMEM_VISIT
+#define NGX_AUTOCERT_TEST_MEMMEM_VISIT()       (void) 0
+#endif
 
 /* --- captured response header (mirror of ngx_autocert_acme.h) --- */
 typedef struct {

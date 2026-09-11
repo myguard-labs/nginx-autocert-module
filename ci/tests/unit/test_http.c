@@ -18,6 +18,12 @@
  */
 
 #include "../../fuzz/ngx_http_shim.h"
+
+static size_t  ngx_autocert_test_memmem_visits;
+
+#undef NGX_AUTOCERT_TEST_MEMMEM_VISIT
+#define NGX_AUTOCERT_TEST_MEMMEM_VISIT()  ngx_autocert_test_memmem_visits++
+
 #include "../../fuzz/generated_http.inc"
 
 #include <stdio.h>
@@ -505,9 +511,31 @@ test_chunked_trailer_cursor(void)
     ngx_autocert_acme_request_t  r;
     ngx_buf_t                   *b;
     u_char                       resp[512];
-    size_t                       visible, i;
+    size_t                       visible, i, fail_i = 0, fail_cursor = 0;
+    size_t                       fail_visits = 0, fail_visible = 0;
     ngx_int_t                    rc;
+    ngx_int_t                    fail_rc = NGX_OK;
+    ngx_uint_t                   fail_state = 0;
+    const char                  *fail_phase = "none";
     int                          bounded = 1;
+
+#define TRAILER_STEP_OK(condition, phase_name)                                \
+    do {                                                                      \
+        size_t  trailer_bytes = visible - (sizeof(prefix) - 1);               \
+        if (bounded                                                           \
+            && (!(condition)                                                  \
+                || ngx_autocert_test_memmem_visits > 2 * trailer_bytes + 2))  \
+        {                                                                     \
+            bounded = 0;                                                      \
+            fail_i = i;                                                       \
+            fail_phase = phase_name;                                          \
+            fail_rc = rc;                                                     \
+            fail_cursor = r.dechunk_pos;                                      \
+            fail_state = r.dechunk_state;                                     \
+            fail_visits = ngx_autocert_test_memmem_visits;                    \
+            fail_visible = visible;                                           \
+        }                                                                     \
+    } while (0)
 
     req_init(&r);
     b = ngx_pnalloc(&pool, sizeof(ngx_buf_t));
@@ -520,9 +548,19 @@ test_chunked_trailer_cursor(void)
     r.recv = b;
 
     rc = ngx_autocert_acme_parse_response(&r);
-    bounded &= rc == NGX_AGAIN
-               && r.dechunk_state == NGX_AUTOCERT_DECHUNK_TRAILER_START
-               && r.dechunk_pos == visible;
+    if (rc != NGX_AGAIN
+        || r.dechunk_state != NGX_AUTOCERT_DECHUNK_TRAILER_START
+        || r.dechunk_pos != visible)
+    {
+        bounded = 0;
+        fail_phase = "zero-chunk";
+        fail_rc = rc;
+        fail_cursor = r.dechunk_pos;
+        fail_state = r.dechunk_state;
+        fail_visits = ngx_autocert_test_memmem_visits;
+        fail_visible = visible;
+    }
+    ngx_autocert_test_memmem_visits = 0;
 
     /* Feed 64 one-byte trailer fields one byte at a time. After every parse,
      * all but at most a trailing CR must be behind the persisted scan cursor.
@@ -533,34 +571,51 @@ test_chunked_trailer_cursor(void)
         resp[visible++] = 'X';
         b->last = resp + visible;
         rc = ngx_autocert_acme_parse_response(&r);
-        bounded &= rc == NGX_AGAIN && visible - r.dechunk_pos <= 1;
+        TRAILER_STEP_OK(rc == NGX_AGAIN && visible - r.dechunk_pos <= 1,
+                        "field-byte");
 
         resp[visible++] = '\r';
         b->last = resp + visible;
         rc = ngx_autocert_acme_parse_response(&r);
-        bounded &= rc == NGX_AGAIN && visible - r.dechunk_pos <= 1;
+        TRAILER_STEP_OK(rc == NGX_AGAIN && visible - r.dechunk_pos <= 1,
+                        "field-cr");
 
         resp[visible++] = '\n';
         b->last = resp + visible;
         rc = ngx_autocert_acme_parse_response(&r);
-        bounded &= rc == NGX_AGAIN && r.dechunk_pos == visible
-                   && r.dechunk_state
-                      == NGX_AUTOCERT_DECHUNK_TRAILER_START;
+        TRAILER_STEP_OK(rc == NGX_AGAIN && r.dechunk_pos == visible
+                        && r.dechunk_state
+                           == NGX_AUTOCERT_DECHUNK_TRAILER_START,
+                        "field-lf");
     }
 
     resp[visible++] = '\r';
     b->last = resp + visible;
     rc = ngx_autocert_acme_parse_response(&r);
-    bounded &= rc == NGX_AGAIN && visible - r.dechunk_pos == 1;
+    TRAILER_STEP_OK(rc == NGX_AGAIN && visible - r.dechunk_pos == 1,
+                    "terminator-cr");
 
     resp[visible++] = '\n';
     b->last = resp + visible;
     rc = ngx_autocert_acme_parse_response(&r);
-    bounded &= rc == NGX_DONE && r.body_out.len == 0;
+    TRAILER_STEP_OK(rc == NGX_DONE && r.body_out.len == 0,
+                    "terminator-lf");
+
+    if (!bounded) {
+        fprintf(stderr,
+                "diag: trailer step=%zu phase=%s rc=%ld cursor=%zu "
+                "state=%lu memmem_visits=%zu visible=%zu\n",
+                fail_i, fail_phase, (long) fail_rc, fail_cursor,
+                (unsigned long) fail_state, fail_visits, fail_visible);
+    }
+
+    fprintf(stderr, "metric: trailer_bytes=194 parser_calls=195 "
+            "memmem_visits=%zu\n", ngx_autocert_test_memmem_visits);
 
     CHECK(bounded,
-          "dechunk_pos: 195 byte-split trailer reads retain at most one "
-          "byte of scan overlap");
+          "dechunk: 195 byte-split trailer reads stay within linear "
+          "memmem/cursor bound");
+#undef TRAILER_STEP_OK
     ngx_http_fuzz_pool_reset(&pool);
 }
 

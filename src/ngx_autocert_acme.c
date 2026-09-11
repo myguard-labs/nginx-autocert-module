@@ -27,6 +27,10 @@
 #define NGX_AUTOCERT_DECHUNK_TRAILER_START     1
 #define NGX_AUTOCERT_DECHUNK_TRAILER_NONEMPTY  2
 
+#ifndef NGX_AUTOCERT_TEST_MEMMEM_VISIT
+#define NGX_AUTOCERT_TEST_MEMMEM_VISIT()       (void) 0
+#endif
+
 /* Total wall-clock budget for reading one response body, independent of the
  * per-IO read timer (which resets on every NGX_AGAIN). Bounds a slow/dripping
  * peer; an ACME response is small, so 60 s is very generous. Overridable at
@@ -1225,6 +1229,7 @@ ngx_autocert_memmem(u_char *hay, size_t n, const char *needle, size_t m)
     }
 
     for (p = hay; p <= hay + n - m; p++) {
+        NGX_AUTOCERT_TEST_MEMMEM_VISIT();
         if (ngx_memcmp(p, needle, m) == 0) {
             return p;
         }
