@@ -49,6 +49,7 @@ http {
 $body
     server { listen $PORT; server_name x.example.com; }
 }
+
 EOF
     # Detect rejection by `-t` exit status, not by the absence of the
     # "syntax is ok" line: angie prints "syntax is ok" for the *parse* phase
@@ -69,6 +70,20 @@ EOF
         return 1
     fi
     echo "✓ $label rejected at config time"
+}
+
+# Asserts `nginx -t` accepts a complete config and prints its diagnostic when
+# it does not. Use the exit status: a successful parse can still fail during
+# init_main_conf, after nginx/angie has already printed "syntax is ok".
+expect_accept() {
+    local label="$1" out rc=0
+    out=$("$SERVER_BIN" -t -p "$PREFIX" -c "$PREFIX/conf/nginx.conf" 2>&1) || rc=$?
+    if [ "$rc" -ne 0 ]; then
+        echo "::error::$label was rejected"
+        printf '%s\n' "$out" | sed 's/^/    /'
+        return 1
+    fi
+    echo "✓ $label accepted"
 }
 
 # 0 is the value ngx_conf_set_sec_slot accepts but the driver cannot use; our
@@ -116,14 +131,7 @@ http {
     server { listen $PORT; server_name x.example.com; }
 }
 EOF
-dnshook_rc=0
-dnshook_out=$("$SERVER_BIN" -t -p "$PREFIX" -c "$PREFIX/conf/nginx.conf" 2>&1) || dnshook_rc=$?
-if [ "$dnshook_rc" -ne 0 ]; then
-    echo "::error::a valid autocert_dns_hook_timeout was rejected"
-    printf '%s\n' "$dnshook_out" | sed 's/^/    /'
-    exit 1
-fi
-echo "✓ valid autocert_dns_hook_timeout accepted"
+expect_accept "valid autocert_dns_hook_timeout"
 
 # Phase B dual-cert: autocert_key_type is a 1-4 element list. Two ECDSA types
 # collide on the flat privkey.pem/fullchain.pem name; two RSA types collide on
@@ -165,14 +173,7 @@ http {
     server { listen $PORT; server_name x.example.com; }
 }
 EOF
-rbefore_rc=0
-rbefore_out=$("$SERVER_BIN" -t -p "$PREFIX" -c "$PREFIX/conf/nginx.conf" 2>&1) || rbefore_rc=$?
-if [ "$rbefore_rc" -ne 0 ]; then
-    echo "::error::a valid autocert_renew_before was rejected"
-    printf '%s\n' "$rbefore_out" | sed 's/^/    /'
-    exit 1
-fi
-echo "✓ valid autocert_renew_before accepted"
+expect_accept "valid autocert_renew_before"
 
 # autocert_handshake_load_limit is parsed by the hand-rolled uint setter
 # (ngx_http_autocert_uint_slot), which rejects non-numeric values and duplicate
@@ -194,21 +195,14 @@ http {
     autocert on;
     autocert_contact a@b.com;
     autocert_store_path $PREFIX/store;
-    autocert_handshake_load_limit 100;
+    autocert_handshake_load_limit 0;
     server { listen $PORT; server_name x.example.com; }
 }
 EOF
 # Detect acceptance by exit status, not by "syntax is ok": angie prints
 # "syntax is ok" for the parse phase and only then fails init_main_conf,
 # so string-based checks wrongly read a rejected config as accepted.
-hll_rc=0
-hll_out=$("$SERVER_BIN" -t -p "$PREFIX" -c "$PREFIX/conf/nginx.conf" 2>&1) || hll_rc=$?
-if [ "$hll_rc" -ne 0 ]; then
-    echo "::error::a valid autocert_handshake_load_limit was rejected"
-    printf '%s\n' "$hll_out" | sed 's/^/    /'
-    exit 1
-fi
-echo "✓ valid autocert_handshake_load_limit accepted"
+expect_accept "autocert_handshake_load_limit 0 (unlimited)"
 
 # ngx_autocert_sec_to_msec_clamped() silently caps resolver_timeout above
 # 3600s to 3600000ms at runtime; reject the confusing gap at config load
@@ -233,14 +227,7 @@ http {
     server { listen $PORT; server_name x.example.com; }
 }
 EOF
-rtimeout_rc=0
-rtimeout_out=$("$SERVER_BIN" -t -p "$PREFIX" -c "$PREFIX/conf/nginx.conf" 2>&1) || rtimeout_rc=$?
-if [ "$rtimeout_rc" -ne 0 ]; then
-    echo "::error::a valid autocert_resolver_timeout was rejected"
-    printf '%s\n' "$rtimeout_out" | sed 's/^/    /'
-    exit 1
-fi
-echo "✓ valid autocert_resolver_timeout accepted"
+expect_accept "valid autocert_resolver_timeout"
 
 # --- IP-address certs (RFC 8738) ---------------------------------------------
 
@@ -308,13 +295,6 @@ http {
     server { listen $PORT; server_name 2001:db8::1; }
 }
 EOF
-ipcert_rc=0
-ipcert_out=$("$SERVER_BIN" -t -p "$PREFIX" -c "$PREFIX/conf/nginx.conf" 2>&1) || ipcert_rc=$?
-if [ "$ipcert_rc" -ne 0 ]; then
-    echo "::error::a valid IP-cert + profile config was rejected"
-    printf '%s\n' "$ipcert_out" | sed 's/^/    /'
-    exit 1
-fi
-echo "✓ IP server_names + autocert_profile accepted under http-01"
+expect_accept "IP server_names + autocert_profile under http-01"
 
 echo "✓✓ config-time rejection checks verified"
