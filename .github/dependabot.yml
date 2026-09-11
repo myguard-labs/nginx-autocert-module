@@ -10,6 +10,8 @@ updates:
   # copies in .github/workflows/ get bumped, leaving two versions of the same
   # action running in one job graph. Drop the second entry once 6345 lands.
   - package-ecosystem: github-actions
+    # Duplicate weekly PRs mean dependabot-core#10884 double-matched the root
+    # and composite-action glob.
     directories:
       - "/"
       - "/.github/actions/*"
