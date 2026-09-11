@@ -111,7 +111,7 @@ jobs:
       # move only when the vcpkg baseline does.
       - name: Cache vcpkg OpenSSL
         id: vcpkg-cache
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           # Literal path, not ${{ env.VCPKG_INSTALLATION_ROOT }}: that variable
           # is set by the runner image rather than by this workflow, and the
@@ -131,7 +131,7 @@ jobs:
       # in the fetch step still runs against whatever is restored, so a bad
       # cache entry fails the build rather than being compiled.
       - name: Cache source tarballs
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             pcre2-10.44.tar.gz
@@ -1973,7 +1973,7 @@ jobs:
       # fails the build instead of being compiled -- caching does not weaken
       # the verification, it only skips the transfer.
       - name: Cache source tarballs
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             pcre2-10.44.tar.gz
@@ -2057,7 +2057,7 @@ jobs:
       # mismatch, not a warm start.
       - name: Cache the compiled OpenSSL
         id: ossl-cache
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: openssl-3.5.4/.openssl
           key: openssl-mingw-${{ env.MINGW_GCC_VERSION }}-${{ env.DEPS_KEY }}
