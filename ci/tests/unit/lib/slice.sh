@@ -41,6 +41,60 @@
 # not catch a stray closer that lands depth exactly back on zero; that
 # would need real parsing, which this helper deliberately does not do.
 #
+# _slice SRC START_LINE ENTER_NAME EMIT
+#   Shared parser for slice_function and slice_end_line. EMIT is "body" to
+#   print each candidate source line, or "end" to print only the closing line
+#   number. Keep the lexical and malformed-source guards in this one program so
+#   the two public interfaces cannot drift.
+_slice() {
+	local src="$1" start="$2" enter_name="$3" emit="$4"
+
+	[ -r "$src" ] || return 4
+
+	awk -v s="$start" -v name="$enter_name" -v emit="$emit" '
+        NR >= s {
+            if (emit == "body") print
+            if ($0 ~ ("^" name "\\(")) { entered = 1 }
+            if (entered) {
+                # Braces that are not code must not be counted: a comment,
+                # character constant, or string literal can otherwise skew
+                # depth. Strip all three from a copy and count on that.
+                q = sprintf("%c", 39)
+                code = $0
+                gsub(/\/\*[^*]*\*+([^\/*][^*]*\*+)*\//, " ", code)
+                # Character constants must precede string literals: a
+                # character constant may itself contain a double quote.
+                gsub(q "(\\\\.|[^" q "\\\\])*" q, " ", code)
+                gsub(/"(\\.|[^"\\])*"/, " ", code)
+                # Braces before the parameter list closes are not the body.
+                n_lp = gsub(/\(/, "(", code)
+                n_rp = gsub(/\)/, ")", code)
+                sig_was_closed = sig_closed
+                if (n_lp > 0) { saw_lp = 1 }
+                paren += n_lp - n_rp
+                if (saw_lp && paren <= 0) { sig_closed = 1 }
+                pre_depth = depth
+                n_open = gsub(/{/, "{", code); depth += n_open
+                n = gsub(/}/, "}", code); depth -= n
+                if (depth < 0) { negative = 1; exit 2 }
+                # opened covers bodies spanning lines; same_line covers a body
+                # whose opening and closing braces occur on the same line.
+                same_line = (sig_was_closed && pre_depth == 0 && n_open > 0)
+                if ((opened || same_line) && depth == 0) {
+                    if (emit == "end") print NR
+                    closed = 1; exit
+                }
+                if (depth > 0) { opened = 1 }
+            }
+        }
+        # awk runs END after exit; preserve the distinct negative-depth status.
+        END {
+            if (negative) { exit 2 }
+            if (!closed) exit 1
+        }
+    ' "$src"
+}
+
 # slice_function SRC START_LINE ENTER_NAME
 #   Prints the sliced function body (from START_LINE through its closing
 #   brace) on stdout and exits 0, OR prints nothing and returns non-zero if:
@@ -55,80 +109,7 @@
 #   ENTER_NAME is a literal function name (no regex metacharacters); the
 #   match pattern is built inside awk to avoid shell/awk double-escaping.
 slice_function() {
-	local src="$1" start="$2" enter_name="$3"
-
-	[ -r "$src" ] || return 4
-
-	awk -v s="$start" -v name="$enter_name" '
-        NR >= s {
-            print
-            if ($0 ~ ("^" name "\\(")) { entered = 1 }
-            if (entered) {
-                # Braces that are not code must not be counted: a comment
-                # ("target_fn(void) /* {} */") would otherwise open and
-                # close on the signature line and read as a one-line body,
-                # and a character constant (case OPEN_BRACE_CHAR:) or a
-                # string literal skews depth outright. Strip all three from
-                # a copy and count on that, never on $0 itself.
-                #
-                # Stripping only comments is WORSE than stripping nothing:
-                # in src/ngx_autocert_json.c the spurious "{" from a
-                # character constant was cancelled by a spurious "{" inside
-                # a comment, and removing just the comment half exposed the
-                # imbalance and truncated the slice by 42 lines at exit 0.
-                # Strip the set together or not at all.
-                q = sprintf("%c", 39)
-                code = $0
-                gsub(/\/\*[^*]*\*+([^\/*][^*]*\*+)*\//, " ", code)
-                # Character constants BEFORE string literals: a line may
-                # hold a character constant whose value is a double quote
-                # (case DQUOTE_CHAR:), and stripping strings first would
-                # consume from that quote onward and mangle the line.
-                gsub(q "(\\\\.|[^" q "\\\\])*" q, " ", code)
-                gsub(/"(\\.|[^"\\])*"/, " ", code)
-                # Track the parameter list. A brace can only open the BODY
-                # once the closing ")" of the signature; before that, any
-                # balanced "{...}" is a default argument or an initialiser,
-                # not a one-line body. Without this, a wrapped parameter
-                # list such as "struct s v = { 0 })" ends the slice at the
-                # signature and returns a truncated stub at exit 0.
-                n_lp = gsub(/\(/, "(", code)
-                n_rp = gsub(/\)/, ")", code)
-                # sig_was_closed is the state BEFORE this line. A line that
-                # both closes the parameter list and carries balanced braces
-                # ("struct s v = { 0 })") must not have those braces read as
-                # a body, so the same-line-body test below uses the prior
-                # state, not the state this line just produced.
-                sig_was_closed = sig_closed
-                if (n_lp > 0) { saw_lp = 1 }
-                paren += n_lp - n_rp
-                if (saw_lp && paren <= 0) { sig_closed = 1 }
-                pre_depth = depth
-                n_open = gsub(/{/, "{", code); depth += n_open
-                n = gsub(/}/, "}", code); depth -= n
-                if (depth < 0) { negative = 1; exit 2 }
-                # A one-line body ("{ return 0; }") opens and closes on the
-                # same line: depth is already back down to 0 by the time we
-                # reach this check, so a lone (opened && depth == 0) test
-                # (which only sees opened from a PRIOR line) never fires for
-                # it. (pre_depth == 0 && n_open > 0) catches "this line
-                # itself went positive", so the same-line close is not
-                # missed.
-                same_line = (sig_was_closed && pre_depth == 0 && n_open > 0)
-                if ((opened || same_line) && depth == 0) {
-                    closed = 1; exit
-                }
-                if (depth > 0) { opened = 1 }
-            }
-        }
-        # awk always runs END after an in-block exit, and an unconditional
-        # exit here would silently overwrite the depth<0 exit(2) above with
-        # exit(1) -- skip entirely once that branch already fired.
-        END {
-            if (negative) { exit 2 }
-            if (!closed) exit 1
-        }
-    ' "$src"
+	_slice "$1" "$2" "$3" body
 }
 
 # slice_end_line SRC START_LINE ENTER_NAME
@@ -140,76 +121,7 @@ slice_function() {
 #   (checked before awk ever runs, so this is never confused with the
 #   depth<0 signal above).
 slice_end_line() {
-	local src="$1" start="$2" enter_name="$3"
-
-	[ -r "$src" ] || return 4
-
-	awk -v s="$start" -v name="$enter_name" '
-        NR >= s {
-            if ($0 ~ ("^" name "\\(")) { entered = 1 }
-            if (entered) {
-                # Braces that are not code must not be counted: a comment
-                # ("target_fn(void) /* {} */") would otherwise open and
-                # close on the signature line and read as a one-line body,
-                # and a character constant (case OPEN_BRACE_CHAR:) or a
-                # string literal skews depth outright. Strip all three from
-                # a copy and count on that, never on $0 itself.
-                #
-                # Stripping only comments is WORSE than stripping nothing:
-                # in src/ngx_autocert_json.c the spurious "{" from a
-                # character constant was cancelled by a spurious "{" inside
-                # a comment, and removing just the comment half exposed the
-                # imbalance and truncated the slice by 42 lines at exit 0.
-                # Strip the set together or not at all.
-                q = sprintf("%c", 39)
-                code = $0
-                gsub(/\/\*[^*]*\*+([^\/*][^*]*\*+)*\//, " ", code)
-                # Character constants BEFORE string literals: a line may
-                # hold a character constant whose value is a double quote
-                # (case DQUOTE_CHAR:), and stripping strings first would
-                # consume from that quote onward and mangle the line.
-                gsub(q "(\\\\.|[^" q "\\\\])*" q, " ", code)
-                gsub(/"(\\.|[^"\\])*"/, " ", code)
-                # Track the parameter list. A brace can only open the BODY
-                # once the closing ")" of the signature; before that, any
-                # balanced "{...}" is a default argument or an initialiser,
-                # not a one-line body. Without this, a wrapped parameter
-                # list such as "struct s v = { 0 })" ends the slice at the
-                # signature and returns a truncated stub at exit 0.
-                n_lp = gsub(/\(/, "(", code)
-                n_rp = gsub(/\)/, ")", code)
-                # sig_was_closed is the state BEFORE this line. A line that
-                # both closes the parameter list and carries balanced braces
-                # ("struct s v = { 0 })") must not have those braces read as
-                # a body, so the same-line-body test below uses the prior
-                # state, not the state this line just produced.
-                sig_was_closed = sig_closed
-                if (n_lp > 0) { saw_lp = 1 }
-                paren += n_lp - n_rp
-                if (saw_lp && paren <= 0) { sig_closed = 1 }
-                pre_depth = depth
-                n_open = gsub(/{/, "{", code); depth += n_open
-                n = gsub(/}/, "}", code); depth -= n
-                if (depth < 0) { negative = 1; exit 2 }
-                # See slice_function matching comment above: a one-line body
-                # opens and closes on the same line, so opened (only ever
-                # set on a PRIOR line) misses it -- pre_depth==0 && n_open>0
-                # detects "this line itself went positive".
-                same_line = (sig_was_closed && pre_depth == 0 && n_open > 0)
-                if ((opened || same_line) && depth == 0) {
-                    print NR; closed = 1; exit
-                }
-                if (depth > 0) { opened = 1 }
-            }
-        }
-        # awk always runs END after an in-block exit, and an unconditional
-        # exit here would silently overwrite the depth<0 exit(2) above with
-        # exit(1) -- skip entirely once that branch already fired.
-        END {
-            if (negative) { exit 2 }
-            if (!closed) exit 1
-        }
-    ' "$src"
+	_slice "$1" "$2" "$3" end
 }
 
 # slice_find_start SRC NAME

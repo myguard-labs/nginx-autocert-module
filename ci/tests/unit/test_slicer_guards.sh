@@ -387,6 +387,13 @@ run_variant "major1_end_anchor_guard" \
 # one-line body is never recognised as closed, so test_g must go red.
 run_variant "one_line_body_disjunct" \
 	's/same_line = (sig_was_closed \&\& pre_depth == 0 \&\& n_open > 0)/same_line = 0/g' test_g
+# The shared parser must preserve distinct body and end-line output modes.
+# Route body mode through the end-line branch and test_g must reject the
+# resulting line-number-only slice while its slice_end_line assertion remains
+# valid. This discriminates the parameterized emitter from either wrapper
+# merely calling a common parser whose mode argument is ignored.
+run_variant "body_emit_mode" \
+	's/if (emit == "body") print/if (emit == "end") print/' test_g
 # The comment strip and the parameter-list gate each defend one truncation
 # shape in test_g's fixtures; remove either and test_g must go red.
 run_variant "comment_strip" \
