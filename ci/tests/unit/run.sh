@@ -343,7 +343,7 @@ cd "$WORKSPACE"
 
 # Renewal read verdict: slice the driver's pure four-way certificate-read
 # decision so missing/invalid pairs issue while transient I/O backs off.
-bash "$WORKSPACE/ci/tests/unit/extract_cert_read_due.sh"
+CC="$CC" bash "$WORKSPACE/ci/tests/unit/extract_cert_read_due.sh"
 # shellcheck disable=SC2086
 "$CC" $SANITIZE_CFLAGS $EXTRA_CFLAGS -Wall -Wextra -Werror $CORE_INC \
 	-I"$WORKSPACE/ci/tests/unit" -o "$BUILD_DIR/test_cert_read_due" \

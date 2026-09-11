@@ -494,6 +494,7 @@ test_cert_bio_failures(void)
     CHECK(rc == NGX_ERROR,
           "cert_not_after classifies PEM allocation failure as transient");
     test_cert_bio_fail_mode = TEST_BIO_FAIL_NONE;
+    test_cert_alloc_fail_armed = 0;
     test_cert_alloc_fail_calls = 0;
 }
 
@@ -816,6 +817,7 @@ test_cert_pair_check(void)
     CHECK(rc == NGX_ERROR,
           "cert_not_after classifies private-key allocation failure as transient");
     test_cert_bio_fail_mode = TEST_BIO_FAIL_NONE;
+    test_cert_alloc_fail_armed = 0;
     test_cert_alloc_fail_calls = 0;
 
     {

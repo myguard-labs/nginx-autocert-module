@@ -8,6 +8,7 @@ SRC="$DIR/../../../src/ngx_autocert_driver.c"
 CRYPTO_SRC="$DIR/../../../src/ngx_http_autocert_crypto.c"
 OUT="$DIR/generated_cert_read_due.inc"
 FN="ngx_autocert_cert_read_due"
+CC="${CC:-cc}"
 
 rtype=$(slice_find_start "$SRC" "$FN") || {
 	echo "x could not locate ${FN}() in $SRC" >&2
@@ -41,9 +42,9 @@ eloop_preprocess_status() {
 	local function_body="$1" windows_body nonwindows_body
 
 	windows_body=$(printf '%s\n' "$function_body" \
-		| cc -E -P -x c -DNGX_WIN32=1 -) || return 3
+		| "$CC" -E -P -x c -DNGX_WIN32=1 -) || return 3
 	nonwindows_body=$(printf '%s\n' "$function_body" \
-		| cc -E -P -x c -UNGX_WIN32 -) || return 3
+		| "$CC" -E -P -x c -UNGX_WIN32 -) || return 3
 
 	grep -qE 'errno[[:space:]]*==[[:space:]]*ELOOP' \
 		<<<"$windows_body" || return 1

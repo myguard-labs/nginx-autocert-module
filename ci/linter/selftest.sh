@@ -477,6 +477,16 @@ cat > "$sarifroot/rule-index.sarif" <<'EOF'
   {"ruleIndex":2}
 ]}]}
 EOF
+cat > "$sarifroot/rule-index-negative.sarif" <<'EOF'
+{"runs":[{"tool":{"driver":{"rules":[
+  {"id":"index-zero","defaultConfiguration":{"level":"warning"}}
+]}},"results":[{"ruleIndex":-1}]}]}
+EOF
+cat > "$sarifroot/rule-index-out-of-range.sarif" <<'EOF'
+{"runs":[{"tool":{"driver":{"rules":[
+  {"id":"index-zero","defaultConfiguration":{"level":"warning"}}
+]}},"results":[{"ruleIndex":1}]}]}
+EOF
 cat > "$sarifroot/blocking-second.sarif" <<'EOF'
 {"runs":[{"tool":{"driver":{"rules":[]}},"results":[
   {"ruleId":"second-file-error-a","level":"error"},
@@ -514,6 +524,10 @@ codeql_case_ 0 0 "CodeQL SARIF: ordinary warning passes" \
     "$sarifroot/warning.sarif"
 codeql_case_ 1 1 "CodeQL SARIF: ruleIndex selects the indexed rule" \
     "$sarifroot/rule-index.sarif"
+case_ 2 "CodeQL SARIF: negative ruleIndex fails closed" \
+    ci/linter/codeql-sarif-verdict.sh "$sarifroot/rule-index-negative.sarif"
+case_ 2 "CodeQL SARIF: out-of-range ruleIndex fails closed" \
+    ci/linter/codeql-sarif-verdict.sh "$sarifroot/rule-index-out-of-range.sarif"
 codeql_case_ 1 6 "CodeQL SARIF: two blocking files are summed" \
     "$sarifroot/blocking.sarif" "$sarifroot/blocking-second.sarif"
 codeql_case_ 1 4 "CodeQL SARIF: warning after blocking preserves count" \
