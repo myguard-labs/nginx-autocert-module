@@ -229,18 +229,32 @@ problems=0
 if ls "$WORK"/logs/asan* >/dev/null 2>&1; then
     echo "FAIL: ASAN/UBSAN report:"; cat "$WORK"/logs/asan*; problems=1
 fi
-if ls "$WORK"/logs/valgrind.* "$WORK"/logs/helgrind.* >/dev/null 2>&1; then
+_valgrind_logs=()
+for _f in "$WORK"/logs/valgrind.* "$WORK"/logs/helgrind.*; do
+    [ -e "$_f" ] && _valgrind_logs+=("$_f")
+done
+if { [ "${USE_VALGRIND:-0}" = "1" ] || [ "${USE_HELGRIND:-0}" = "1" ]; } &&
+        [ "${#_valgrind_logs[@]}" -eq 0 ]; then
+    echo "FAIL: Valgrind/Helgrind produced no report log"
+    problems=1
+fi
+for _f in "${_valgrind_logs[@]}"; do
+    if [ ! -r "$_f" ]; then
+        echo "FAIL: cannot read Valgrind/Helgrind report: $_f"
+        problems=1
+    fi
+done
+if [ "${#_valgrind_logs[@]}" -gt 0 ]; then
     if grep -qE 'ERROR SUMMARY: [1-9]|definitely lost: [1-9]' \
-            "$WORK"/logs/valgrind.* "$WORK"/logs/helgrind.* 2>/dev/null; then
+            "${_valgrind_logs[@]}" 2>/dev/null; then
         echo "FAIL: valgrind/helgrind errors:"
         grep -E 'ERROR SUMMARY|definitely lost' \
-            "$WORK"/logs/valgrind.* "$WORK"/logs/helgrind.* 2>/dev/null
+            "${_valgrind_logs[@]}" 2>/dev/null
         # Dump every log holding errors in full: the WORK dir is wiped on
         # exit, so this is the only place the stacks (and the exact
         # suppression blocks from --gen-suppressions=all) survive, e.g.
         # in a CI job log.
-        for _vglog in "$WORK"/logs/valgrind.* "$WORK"/logs/helgrind.*; do
-            [ -f "$_vglog" ] || continue
+        for _vglog in "${_valgrind_logs[@]}"; do
             grep -qE 'ERROR SUMMARY: [1-9]|definitely lost: [1-9]' "$_vglog" || continue
             echo "---- $_vglog ----"
             cat "$_vglog"

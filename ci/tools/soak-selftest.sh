@@ -16,7 +16,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-mkdir -p "$WORK/bin" "$WORK/logs"
+mkdir -p "$WORK/bin" "$WORK/logs" "$WORK/valgrind-bin"
 
 # Strip the bypass in a controlled wrapper. With a dead ambient proxy and an
 # empty NO_PROXY, this models a regression that removes --noproxy from soak.sh.
@@ -60,10 +60,71 @@ if ! grep -qE 'BAD |wrong response' "$WORK/proxy-negative.log"; then
 fi
 echo "ok   proxy negative control fails without --noproxy"
 
+positive_rc=0
 env "${proxy_env[@]}" \
     bash "$ROOT/ci/tools/soak.sh" "$NGINX" 1 1 \
-    > "$WORK/proxy-positive.log" 2>&1
+    > "$WORK/proxy-positive.log" 2>&1 || positive_rc=$?
+if [ "$positive_rc" -ne 0 ]; then
+    echo "FAIL: forced proxy environment captured a loopback soak request" >&2
+    sed -n '1,160p' "$WORK/proxy-positive.log" >&2
+    exit "$positive_rc"
+fi
 echo "ok   forced proxy environment cannot capture loopback soak requests"
+
+# Model Memcheck finding a definite leak while the nginx master still exits 0.
+# Valgrind and Helgrind are mutually exclusive modes, so only one report glob
+# exists in a real run. The soak must inspect that one log and fail.
+cat > "$WORK/valgrind-bin/valgrind" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+log_file=
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --log-file=*) log_file="${1#*=}"; shift ;;
+        --*) shift ;;
+        *) break ;;
+    esac
+done
+log_file="${log_file//%p/$$}"
+case "${FAKE_VALGRIND_REPORT:?}" in
+    clean) printf 'ERROR SUMMARY: 0 errors\n' > "$log_file" ;;
+    error) printf 'ERROR SUMMARY: 1 errors\n' > "$log_file" ;;
+    leak)  printf 'definitely lost: 8 bytes\nERROR SUMMARY: 1 errors\n' > "$log_file" ;;
+    *) exit 64 ;;
+esac
+exec "$@"
+EOF
+chmod +x "$WORK/valgrind-bin/valgrind"
+
+run_valgrind_control() {
+    local mode_var="$1" report="$2" expected="$3" label="$4"
+    local output="$WORK/${mode_var}-${report}.log" control_rc=0
+
+    env "${proxy_env[@]}" PATH="$WORK/valgrind-bin:$PATH" \
+        FAKE_VALGRIND_REPORT="$report" "$mode_var=1" \
+        bash "$ROOT/ci/tools/soak.sh" "$NGINX" 1 1 \
+        > "$output" 2>&1 || control_rc=$?
+    if [ "$expected" = fail ]; then
+        if [ "$control_rc" -eq 0 ] ||
+                ! grep -q 'FAIL: valgrind/helgrind errors' "$output"; then
+            echo "FAIL: $label did not fail through its report log" >&2
+            sed -n '1,160p' "$output" >&2
+            exit 1
+        fi
+    elif [ "$control_rc" -ne 0 ]; then
+        echo "FAIL: $label did not stay clean" >&2
+        sed -n '1,160p' "$output" >&2
+        exit 1
+    fi
+    echo "ok   $label"
+}
+
+run_valgrind_control USE_VALGRIND leak fail \
+    "sole Valgrind report log fails on a definite leak"
+run_valgrind_control USE_HELGRIND error fail \
+    "sole Helgrind report log fails on an error"
+run_valgrind_control USE_VALGRIND clean pass \
+    "clean Valgrind report log passes"
 
 cat > "$WORK/canary.c" <<'EOF'
 #include <stdlib.h>
@@ -97,6 +158,7 @@ autocert_sanitizer_env "$WORK/logs"
 "$WORK/canary" leak
 if compgen -G "$WORK/logs/asan*" > /dev/null; then
     echo "FAIL: intentional leak produced a report although LSan is disabled" >&2
+    sed -n '1,160p' "$WORK"/logs/asan* >&2
     exit 1
 fi
 echo "ok   intentional leak is delegated to Valgrind"
