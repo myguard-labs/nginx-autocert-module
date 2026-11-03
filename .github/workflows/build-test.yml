@@ -1,4 +1,4 @@
-# sync-sha: 23fe0a3abcce5376fe9a3454a15ba4542397dd1fde7ce6a2bcdb67f9241be1e1
+# sync-sha: 446d0601168c7c1f8d04cff30294d402ad617b0cb82cdad7164ed1931b780fe4
 name: Build & Test
 
 # Third-party actions pinned to commit SHAs for supply-chain safety.
@@ -546,6 +546,9 @@ jobs:
         uses: ./.github/actions/setup  # zizmor: ignore[self-repository] actionlint rejects $/ (actionlint#711)
         with:
           packages: build-essential libssl-dev
+
+      - name: Test coverage workload paths and failures
+        run: python3 ci/tests/unit/test_coverage_workload.py
 
       - name: Download nginx build
         uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
