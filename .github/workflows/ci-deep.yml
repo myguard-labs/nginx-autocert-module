@@ -1,4 +1,4 @@
-# sync-sha: de22c25c554789b695bbd1aa2ea2319edff8b1bb611dae6e4bc07ecd2f2a5fce
+# sync-sha: 755deeec8291f03f4576e3bc67c1ee8c9ae62f4ee7c6df4df81d14302c6b36c9
 name: CI Deep
 
 # Exhaustive dynamic analysis — monthly cron, release, and on-demand only,
@@ -365,6 +365,8 @@ jobs:
             build-essential ccache curl gcovr libpcre2-dev libssl-dev
             pkg-config wget zlib1g-dev
           ccache-key: ci-deep-coverage
+      - name: Test coverage workload paths and failures
+        run: python3 ci/tests/unit/test_coverage_workload.py
       - name: Run coverage.sh (instrumented build + unit suite + report)
         run: bash ci/tools/coverage.sh
       - name: Upload coverage report
