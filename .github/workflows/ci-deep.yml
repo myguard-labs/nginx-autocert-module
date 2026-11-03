@@ -1,4 +1,4 @@
-# sync-sha: 755deeec8291f03f4576e3bc67c1ee8c9ae62f4ee7c6df4df81d14302c6b36c9
+# sync-sha: 6e9f2191fa0ec767dffcbf4278b06b2ef9af7b3a19a4cd6f8e4c0194e54c8ec8
 name: CI Deep
 
 # Exhaustive dynamic analysis — monthly cron, release, and on-demand only,
@@ -204,6 +204,8 @@ jobs:
             build-essential ccache curl libpcre2-dev libssl-dev pkg-config
             valgrind wget zlib1g-dev
           ccache-key: ci-deep-valgrind
+      - name: Verify Helgrind suppression boundaries
+        run: bash ci/tools/helgrind-selftest.sh
       - name: Build debug nginx + autocert module (dynamic, AUTOCERT_TEST=1)
         run: bash ci/tools/ci-build.sh valgrind
       - name: Helgrind soak (600s @ 4 conc, --error-exitcode=99, WITH suppressions)
