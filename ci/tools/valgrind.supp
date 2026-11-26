@@ -5,6 +5,18 @@
 # autocert module (which always carries an ngx_autocert_*/ngx_http_autocert_*
 # frame) is never hidden.
 
+# Helgrind tracks sem_post within one process, but nginx's shared mutex can
+# be posted by another worker. A valid cross-process wait then reports
+# "sem_wait succeeded on semaphore without prior sem_post". Limit this to
+# the Misc diagnostic at nginx's core wait frame; Race errors still fail.
+# ci/tools/helgrind-selftest.sh exercises the limitation and both boundaries.
+{
+   nginx-shmtx-cross-process-semaphore
+   Helgrind:Misc
+   fun:sem_wait_WRK
+   fun:ngx_shmtx_lock
+}
+
 {
    nginx-set-environment-not-freed-at-exit
    Memcheck:Leak
