@@ -88,3 +88,7 @@
 "_"
 "AAAA"
 "AAAAA"
+
+# --- SSL directive names required by the source-literal drift gate ---
+"ssl_certificate"
+"ssl_certificate_key"
