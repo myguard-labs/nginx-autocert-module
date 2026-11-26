@@ -734,6 +734,7 @@ test_readdir_error_call_site_wired(const char *workspace_driver_c)
 {
     FILE  *f;
     char   line[512];
+    char   compact[sizeof(line)];
     int    saw_error_branch = 0;
 
     f = fopen(workspace_driver_c, "r");
@@ -744,15 +745,21 @@ test_readdir_error_call_site_wired(const char *workspace_driver_c)
     }
 
     while (fgets(line, sizeof(line), f) != NULL) {
-        /* The walk's verdict local compared against NGX_ERROR. Matching the
-         * local's name is unavoidable for a source-grep guard -- but it is a
-         * private identifier in one function, not operator-facing text, so a
-         * rename is a deliberate edit to this call site and re-reading this
-         * guard is the right cost. Whitespace between the tokens is not
-         * assumed: the two substrings are matched independently on the line. */
-        if (strstr(line, "wrc") != NULL
-            && strstr(line, "NGX_ERROR") != NULL)
-        {
+        size_t  i, j;
+
+        /* Match the branch itself after removing horizontal whitespace.
+         * Merely finding both tokens also matched comments and unrelated
+         * expressions, letting the guard pass after the real branch vanished. */
+        for (i = 0, j = 0; line[i] != '\0' && j + 1 < sizeof(compact); i++) {
+            if (line[i] != ' ' && line[i] != '\t'
+                && line[i] != '\r' && line[i] != '\n')
+            {
+                compact[j++] = line[i];
+            }
+        }
+        compact[j] = '\0';
+
+        if (strcmp(compact, "if(wrc==NGX_ERROR){") == 0) {
             saw_error_branch = 1;
             break;
         }

@@ -144,14 +144,14 @@ struct ngx_autocert_acme_request_s {
      * two reads is never skipped. */
     size_t                        hdr_scan_pos;
 
-    /* Incremental chunked-decode validation cursor (avoids re-walking the whole
+    /* Incremental chunked-decode validation state (avoids re-walking the whole
      * accumulated body on every read — that would be O(N^2)). dechunk_pos is
-     * the offset into recv (from b->start) up to which framing is already
-     * validated; dechunk_total is the decoded byte count accumulated so far.
-     * Both advance only over fully-received chunks, so a partial tail is
-     * re-examined next read but already-validated chunks are not. */
+     * the next framing scan offset into recv; dechunk_total is the decoded byte
+     * count accumulated so far. dechunk_state distinguishes chunks, a possible
+     * empty trailer line, and a known-nonempty trailer line. */
     size_t                        dechunk_pos;
     size_t                        dechunk_total;
+    ngx_uint_t                    dechunk_state;
 
     /* Absolute deadline (ngx_current_msec scale) for the WHOLE response read.
      * The per-IO read timer resets on every NGX_AGAIN, so on its own it is an

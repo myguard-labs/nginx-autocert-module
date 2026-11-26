@@ -1076,11 +1076,12 @@ ngx_autocert_win32_resolve_ntdll(void)
  * ERROR_GEN_FAILURE, matching the callers that treat an unrecognised error as
  * "do not treat this as absent".
  *
- * ENOTEMPTY and ELOOP have no NGX_E* macro of their own (nginx defines
- * NGX_ELOOP as the literal 0 on win32, which is unusable as a sentinel).
- * Grepping this repo found no live call site that branches on either name,
- * so they fall back to a distinct, still-meaningful ERROR_* code for a future
- * caller or for logging, rather than colliding with 0 or an unrelated NGX_E*.
+ * ENOTEMPTY and ELOOP have no usable NGX_E* macro of their own (nginx defines
+ * NGX_ELOOP as the literal 0 on win32). Keep their distinct ERROR_* codes so
+ * ngx_autocert_win32_errno() can translate them to the plain errno values:
+ * the certificate reader branches on ELOOP to classify a symlinked store
+ * entry as NGX_ABORT, while ENOTEMPTY remains meaningful for logging and
+ * future callers without colliding with 0 or an unrelated NGX_E*.
  */
 static ngx_inline DWORD
 ngx_autocert_win32_errno_from_ntstatus(NTSTATUS status)

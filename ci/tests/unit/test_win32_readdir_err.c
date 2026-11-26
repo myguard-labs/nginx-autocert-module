@@ -37,11 +37,14 @@
  * of the struct, fdopendir, the readdir loop and the accessor -- sliced by
  * ci/tests/unit/extract_win32_readdir.sh into generated_win32_readdir.inc --
  * against stand-in Windows types and a scripted NtQueryDirectoryFile defined
- * below. It is not a re-implementation: dropping `dh->err = 0` from the
- * STATUS_NO_MORE_FILES path, or forgetting to set it on a failure path,
- * recompiles into this test and fails it. Same slicing rationale as
- * extract_seedchunk.sh, same "bind to production, not a hand-copy"
- * requirement as test_win32_rename_info_layout.c.
+ * below. It is not a re-implementation: the behavioral cases require clean
+ * EOF after both a skipped, unrepresentable name with dirty LastError and a
+ * successfully returned entry, while genuine query failures must report a
+ * nonzero channel. The handle starts with dh->err clear and failures latch
+ * eof, so these cases intentionally do not assert the redundant source shape
+ * of a second zero assignment in the STATUS_NO_MORE_FILES branch. Same slicing
+ * rationale as extract_seedchunk.sh, same "bind to production, not a
+ * hand-copy" requirement as test_win32_rename_info_layout.c.
  *
  * What it does NOT prove: that the real NtQueryDirectoryFile returns the
  * statuses scripted here, or that the real WideCharToMultiByte sets LastError

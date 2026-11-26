@@ -1263,14 +1263,6 @@ ngx_autocert_timegm(const struct tm *tm)
 
 
 /*
- * Read the leaf cert's notAfter from the PEM fullchain at `path`. See the
- * header for the contract. ENOENT/ENOTDIR => NGX_DECLINED (no cert yet);
- * other failures => NGX_ERROR. When `key_id` is non-NULL it also returns the
- * leaf's public-key family (EVP_PKEY_EC / EVP_PKEY_RSA / …) so the caller can
- * detect a stored cert whose algorithm no longer matches the slot it was read
- * for (e.g. a pre-dual-cert RSA leaf sitting under the flat EC filename).
- */
-/*
  * Passphrase callback for the freshness path's private-key probe. Returning 0
  * means "no passphrase available", so an encrypted PEM fails immediately.
  * OpenSSL's DEFAULT callback (what PEM_read_bio_PrivateKey(bio,NULL,NULL,NULL)
@@ -1285,13 +1277,16 @@ ngx_http_autocert_no_passphrase(char *buf, int size, int rwflag, void *u)
 }
 
 
+static ngx_int_t ngx_http_autocert_pem_read_transient(ngx_err_t read_errno);
+
+
 /*
  * Does the private key at `key_path` match `leaf`? Returns NGX_OK on a
  * verified match, NGX_ABORT when the key is genuinely absent, unparsable or
- * does not pair with the leaf, and NGX_DECLINED when the open failed for a
- * transient reason unrelated to the key's presence (e.g. a concurrent
- * publish holding the file busy) -- the caller treats NGX_DECLINED as "skip
- * this check for now", not as "reissue".
+ * does not pair with the leaf, and NGX_ERROR when opening or decoding failed
+ * transiently (e.g. a concurrent publish holding the file busy or decoder
+ * allocation failure) -- the caller treats NGX_ERROR as "skip this check for
+ * now", not as "reissue".
  *
  * Why the freshness path needs this at all: the store publishes privkey and
  * fullchain as two separate files, so a crash or a partially restored backup
@@ -1303,10 +1298,11 @@ ngx_http_autocert_no_passphrase(char *buf, int size, int rwflag, void *u)
  * until the OLD chain's own notAfter finally drifted into the renew window.
  * Checking the pair here is what turns that silent outage into a reissue.
  *
- * Only a genuinely absent key (ENOENT/ENOTDIR) means torn. Any other errno
- * (e.g. win32's sharing-violation errno when the freshness sweep races the
- * publish path's per-file rename over this very file) is a transient I/O
- * condition, not evidence the pair is torn -- forcing NGX_ABORT on it would
+ * A genuinely absent key (ENOENT/ENOTDIR) or rejected symlink (ELOOP) means
+ * torn. Other errno values (e.g. win32's sharing-violation errno when the
+ * freshness sweep races the publish path's per-file rename over this file)
+ * are transient I/O conditions, not evidence the pair is torn -- forcing
+ * NGX_ABORT on one would
  * trigger a real ACME reissue against the CA's rate limits on every such
  * race. Log at WARN and let the caller skip the pair check for this sweep.
  */
@@ -1324,11 +1320,14 @@ ngx_http_autocert_key_pairs_with(const char *key_path, X509 *leaf,
         if (errno == ENOENT || errno == ENOTDIR) {
             return NGX_ABORT;           /* genuinely missing -> reissue */
         }
+        if (errno == ELOOP) {
+            return NGX_ABORT;           /* symlinked store entry */
+        }
         ngx_log_error(NGX_LOG_WARN, log, errno,
                       "autocert: open key \"%s\" failed transiently; "
                       "skipping key-pair freshness check for this sweep",
                       key_path);
-        return NGX_DECLINED;            /* transient -> skip, do not reissue */
+        return NGX_ERROR;               /* transient -> back off, no reissue */
     }
 
     bio = BIO_new_fd(fd, BIO_CLOSE);    /* BIO owns + closes fd */
@@ -1345,16 +1344,29 @@ ngx_http_autocert_key_pairs_with(const char *key_path, X509 *leaf,
                       "autocert: BIO_new_fd for key \"%s\" failed; "
                       "skipping key-pair freshness check for this sweep",
                       key_path);
-        return NGX_DECLINED;            /* allocation failure -> skip */
+        return NGX_ERROR;               /* allocation failure -> back off */
     }
 
+    ERR_clear_error();
+    errno = 0;
     key = PEM_read_bio_PrivateKey(bio, NULL, ngx_http_autocert_no_passphrase,
                                   NULL);
-    BIO_free(bio);
     if (key == NULL) {
-        ERR_clear_error();              /* an unparsable key is not fatal */
-        return NGX_ABORT;
+        ngx_int_t  rc = ngx_http_autocert_pem_read_transient(errno)
+                            ? NGX_ERROR : NGX_ABORT;
+
+        BIO_free(bio);
+        return rc;
     }
+
+    /* A late decoder allocation failure can accompany a partial key. Consume
+     * the decoder state before deciding whether a pair mismatch is durable. */
+    if (ngx_http_autocert_pem_read_transient(errno)) {
+        EVP_PKEY_free(key);
+        BIO_free(bio);
+        return NGX_ERROR;
+    }
+    BIO_free(bio);
 
     ok = X509_check_private_key(leaf, key);
     EVP_PKEY_free(key);
@@ -1368,6 +1380,41 @@ ngx_http_autocert_key_pairs_with(const char *key_path, X509 *leaf,
 }
 
 
+/* PEM decoders put both format and transport failures on OpenSSL's error
+ * queue. A system/BIO/allocation entry means the input could not be read now;
+ * PEM/ASN.1-only errors mean the bytes were read but are persistently invalid.
+ * Consume the queue: callers do not expose it and stale entries must not
+ * influence the next certificate. */
+static ngx_int_t
+ngx_http_autocert_pem_read_transient(ngx_err_t read_errno)
+{
+    unsigned long  err;
+    ngx_int_t      transient = (read_errno != 0);
+    int            lib, reason;
+
+    while ((err = ERR_get_error()) != 0) {
+        lib = ERR_GET_LIB(err);
+        reason = ERR_GET_REASON(err);
+        if (lib == ERR_LIB_SYS || lib == ERR_LIB_BIO
+            || reason == ERR_R_MALLOC_FAILURE)
+        {
+            transient = 1;
+        }
+    }
+
+    return transient;
+}
+
+
+/*
+ * Read the leaf cert's notAfter from the PEM fullchain at `path`. See the
+ * header for the contract. ENOENT/ENOTDIR => NGX_DECLINED (no cert yet);
+ * persistent invalid states => NGX_ABORT; transient resource failures =>
+ * NGX_ERROR. When `key_id` is non-NULL it also returns the
+ * leaf's public-key family (EVP_PKEY_EC / EVP_PKEY_RSA / …) so the caller can
+ * detect a stored cert whose algorithm no longer matches the slot it was read
+ * for (e.g. a pre-dual-cert RSA leaf sitting under the flat EC filename).
+ */
 ngx_int_t
 ngx_http_autocert_cert_not_after(const char *path, time_t *out, int *key_id,
     const ngx_str_t *verify_name, const char *key_path, ngx_log_t *log)
@@ -1387,7 +1434,10 @@ ngx_http_autocert_cert_not_after(const char *path, time_t *out, int *key_id,
         if (errno == ENOENT || errno == ENOTDIR) {
             return NGX_DECLINED;            /* no cert stored yet */
         }
-        return NGX_ERROR;                   /* ELOOP (symlink), EACCES, ... */
+        if (errno == ELOOP) {
+            return NGX_ABORT;               /* symlinked store entry */
+        }
+        return NGX_ERROR;           /* EACCES, descriptor pressure, ... */
     }
 
     bio = BIO_new_fd(fd, BIO_CLOSE);        /* BIO owns + closes fd */
@@ -1396,11 +1446,17 @@ ngx_http_autocert_cert_not_after(const char *path, time_t *out, int *key_id,
         return NGX_ERROR;
     }
 
+    ERR_clear_error();
+    errno = 0;
     leaf = PEM_read_bio_X509(bio, NULL, NULL, NULL);
-    BIO_free(bio);
     if (leaf == NULL) {
-        return NGX_ERROR;
+        rc = ngx_http_autocert_pem_read_transient(errno)
+                 ? NGX_ERROR : NGX_ABORT;
+
+        BIO_free(bio);
+        return rc;
     }
+    BIO_free(bio);
 
     /*
      * Identity check (M2): the freshness path selects the file by name+keytype,
@@ -1425,10 +1481,10 @@ ngx_http_autocert_cert_not_after(const char *path, time_t *out, int *key_id,
     /*
      * Pair check: the stored private key must actually match this leaf.
      * NGX_ABORT here has the same "caller reissues" contract as the identity
-     * check above. NGX_DECLINED from the pair check itself means the open
-     * failed transiently (not a torn pair) -- skip this check for the sweep
-     * and let the remaining freshness tests decide, rather than forcing a
-     * reissue on a passing I/O error. Runs after the identity check so a
+     * check above. NGX_ERROR from the pair check itself means the open failed
+     * transiently (not a torn pair) -- propagate it so the driver backs off
+     * rather than issuing based on the chain's expiry alone. Runs after the
+     * identity check so a
      * wrong-domain leaf is still reported as such, and only when the caller
      * asks (key_path non-NULL).
      */
@@ -1436,15 +1492,15 @@ ngx_http_autocert_cert_not_after(const char *path, time_t *out, int *key_id,
         ngx_int_t  pair_rc;
 
         pair_rc = ngx_http_autocert_key_pairs_with(key_path, leaf, log);
-        if (pair_rc == NGX_ABORT) {
+        if (pair_rc != NGX_OK) {
             X509_free(leaf);
-            return NGX_ABORT;
+            return pair_rc;
         }
     }
 
     ngx_memzero(&tm, sizeof(struct tm));
 
-    rc = NGX_ERROR;
+    rc = NGX_ABORT;
 
     /* ASN1_TIME_to_tm fills a UTC struct tm. */
     if (ASN1_TIME_to_tm(X509_get0_notAfter(leaf), &tm) == 1) {

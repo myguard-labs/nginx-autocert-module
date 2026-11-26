@@ -229,6 +229,11 @@ main(void)
         perror("create privkey-loose.pem");
         return 2;
     }
+    if (fchmod(fd, 0644) == -1) {
+        perror("chmod privkey-loose.pem");
+        (void) close(fd);
+        return 2;
+    }
     (void) close(fd);
     fd = open(path, O_RDONLY);
     if (fd == -1) {

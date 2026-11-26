@@ -35,7 +35,7 @@ case_() {
         echo "ok   $desc (exit $got)"
     else
         echo "FAIL $desc: expected exit $want, got $got" >&2
-        echo "$out" | sed 's/^/       | /' >&2
+        printf '%s\n' "$out" | sed 's/^/       | /' >&2
         rc=1
     fi
 }
@@ -131,6 +131,43 @@ policy_absent_() {
     fi
 }
 
+# policy_count_ <fixture> <subcommand> <grep-ere> <n> -- the pattern must match
+# EXACTLY <n> output lines.
+#
+# Presence and absence both go blind to duplication: one real collision
+# re-reported once per job matches a `policy_msg_` regex just as well as a
+# single correct report, so the only assertion that separates the fixed state
+# from the broken one is the count.
+#
+# `grep -c` prints a count on both matching paths, including no-match (`0`,
+# exit 1), so neither of those needs defending against. Exit >= 2 is the case
+# that does: a malformed ERE authored at a call site makes grep print a
+# diagnostic and NOTHING on stdout, leaving `n` empty. Comparing an empty `n`
+# would still fail the assertion, but with a blank count and the linter's
+# output dumped, pointing the reader at the linter rather than at the typo in
+# the pattern. Hence the explicit status check below. Assignment is kept off
+# the `local` line because `local` would return its own status and mask the
+# substitution's.
+policy_count_() {
+    local fixture="$1" cmd="$2" want_re="$3" want_n="$4" out n grep_rc
+    out="$(env "WORKFLOW_POLICY_ROOT=ci/linter/fixtures/policy/$fixture" \
+        python3 ci/linter/workflow_policy.py "$cmd" 2>&1)"
+    n="$(printf '%s\n' "$out" | grep -cE "$want_re")"
+    grep_rc=$?
+    if [ "$grep_rc" -ge 2 ]; then
+        echo "FAIL policy $cmd: $fixture: grep failed (rc=$grep_rc) on /$want_re/ -- bad pattern?" >&2
+        rc=1
+        return
+    fi
+    if [ "$n" = "$want_n" ]; then
+        echo "ok   policy $cmd: $fixture (/$want_re/ x$n)"
+    else
+        echo "FAIL policy $cmd: $fixture: expected $want_n line(s) matching /$want_re/, got $n" >&2
+        printf '%s\n' "$out" | sed 's/^/       | /' >&2
+        rc=1
+    fi
+}
+
 # THE control that makes the rest mean anything: a fixture tree that is simply
 # a valid workflow must be GREEN on all three. Without it, a red on any bypass
 # fixture could be the fixture shape rather than the bypass.
@@ -185,6 +222,41 @@ policy_ 0 workflow-level-env-declared ports
 # into a self-collision generator. Two jobs, one workflow-level
 # TEST_BASE_PORT, must stay clean.
 policy_ 0 workflow-level-env-shared-two-jobs ports
+
+# The same registration, one file over: when the port a workflow-level `env:`
+# claims is ALREADY held by another FILE, the claimant recorded in `bands` is
+# that other file, so a suppression keyed on "the claimant is me" never fires
+# and every job in the LOSING file re-reports the one collision -- N+1 findings
+# for that file's N jobs, while the winning file contributes none. b.yml is the
+# loser and has two jobs, so the broken shape emits three lines and the fixed
+# one emits a single file-level finding. Exit 1 and the message text are
+# identical either way, which is why the assertion is a COUNT.
+#
+# The two lines below are deliberately NOT folded into one. Folding the exact
+# wording into the count pattern anchors it on the bare "b.yml " prefix, which
+# the per-job repeats do not carry -- so the count would read 1 in the broken
+# shape too, and the control would go green on the very defect it exists for
+# (measured). The wording check and the count therefore need different
+# patterns: `policy_msg_` pins the message text and is green either way by
+# design, `policy_count_` matches the prefix-agnostic tail and is the leg that
+# discriminates.
+policy_msg_ workflow-level-env-cross-file-collision ports \
+    'b\.yml claims TEST_BASE_PORT 19900 and a\.yml claims TEST_BASE_PORT 19900'
+policy_count_ workflow-level-env-cross-file-collision ports \
+    'claims TEST_BASE_PORT 19900 and' 1
+# The per-job repeats carried a "<file>:<job>" prefix; assert that shape is gone
+# rather than only counting, so a future regression that duplicates under some
+# other wording still trips something here.
+policy_absent_ workflow-level-env-cross-file-collision ports \
+    'b\.yml:[^ ]+ claims TEST_BASE_PORT'
+
+# Workflow-level env names in the AC_TEST_PORT[0-9]* family claim bands too.
+# Pin both claimant orderings: file-level env before inline for 19901, and
+# inline before file-level env for 19902.
+policy_msg_ workflow-level-ac-port-cross-file-collision ports \
+    'b-inline\.yml:build claims AC_TEST_PORT 19901 and a-env\.yml claims AC_TEST_PORT 19901'
+policy_msg_ workflow-level-ac-port-cross-file-collision ports \
+    'd-env\.yml claims AC_TEST_PORT2 19902 and c-inline\.yml:build claims AC_TEST_PORT2 19902'
 
 # Two composite actions are both named action.yml, so a `where` built from
 # `path.name` alone names the same string for both sides of a collision and
@@ -370,6 +442,185 @@ case_ 0 "lint-yaml: warning-only YAML passes the gate" \
 printf 'a: 1\na: 2\n' > "$yamlroot/err.yml"
 case_ 1 "lint-yaml: error-level YAML fails the gate" \
     bash -c "cd '$PWD' && ci/linter/lint-yaml.sh '$yamlroot/err.yml'"
+
+# CodeQL's result can carry severity directly, identify a rule by ruleId, or
+# identify it only by ruleIndex. Pin all three resolution paths and the count;
+# a warning-only report is the green control for the gate's passing direction.
+sarifroot="$(mktemp -d)"
+trap 'rm -rf "$badroot" "$yamlroot" "$sarifroot"' EXIT
+cat > "$sarifroot/blocking.sarif" <<'EOF'
+{"runs":[{"tool":{"driver":{"rules":[
+  {"id":"security-by-id","properties":{"security-severity":"7.5"}},
+  {"id":"error-by-default","defaultConfiguration":{"level":"error"}},
+  {"id":"problem-by-index","defaultConfiguration":{"level":"warning"},
+   "properties":{"problem.severity":"error"}}
+]}},"results":[
+  {"ruleId":"result-level","level":"error"},
+  {"ruleId":"security-by-id"},
+  {"ruleId":"error-by-default"},
+  {"ruleIndex":2}
+]}]}
+EOF
+cat > "$sarifroot/warning.sarif" <<'EOF'
+{"runs":[{"tool":{"driver":{"rules":[
+  {"id":"ordinary-warning","defaultConfiguration":{"level":"warning"}}
+]}},"results":[{"ruleId":"ordinary-warning","level":"warning"}]}]}
+EOF
+cat > "$sarifroot/rule-index.sarif" <<'EOF'
+{"runs":[{"tool":{"driver":{"rules":[
+  {"id":"index-zero-decoy","defaultConfiguration":{"level":"warning"}},
+  {"id":"index-one-decoy","defaultConfiguration":{"level":"note"}},
+  {"id":"indexed-error","defaultConfiguration":{"level":"error"}}
+]}},"results":[
+  {"ruleIndex":0},
+  {"ruleIndex":1},
+  {"ruleIndex":2}
+]}]}
+EOF
+cat > "$sarifroot/rule-index-negative.sarif" <<'EOF'
+{"runs":[{"tool":{"driver":{"rules":[
+  {"id":"index-zero","defaultConfiguration":{"level":"warning"}}
+]}},"results":[{"ruleIndex":-1}]}]}
+EOF
+cat > "$sarifroot/rule-index-out-of-range.sarif" <<'EOF'
+{"runs":[{"tool":{"driver":{"rules":[
+  {"id":"index-zero","defaultConfiguration":{"level":"warning"}}
+]}},"results":[{"ruleIndex":1}]}]}
+EOF
+cat > "$sarifroot/rule-index-duplicate-id.sarif" <<'EOF'
+{"runs":[{"tool":{"driver":{"rules":[
+  {"id":"duplicate","defaultConfiguration":{"level":"warning"}},
+  {"id":"duplicate","defaultConfiguration":{"level":"error"}}
+]}},"results":[{"ruleId":"duplicate","ruleIndex":1}]}]}
+EOF
+cat > "$sarifroot/rule-index-mismatch.sarif" <<'EOF'
+{"runs":[{"tool":{"driver":{"rules":[
+  {"id":"first","defaultConfiguration":{"level":"warning"}},
+  {"id":"second","defaultConfiguration":{"level":"warning"}}
+]}},"results":[{"ruleId":"first","ruleIndex":1}]}]}
+EOF
+cat > "$sarifroot/rule-index-hierarchical-id.sarif" <<'EOF'
+{"runs":[{"tool":{"driver":{"rules":[
+  {"id":"security-family","defaultConfiguration":{"level":"error"}}
+]}},"results":[{"ruleId":"security-family/subrule","ruleIndex":0}]}]}
+EOF
+cat > "$sarifroot/rule-index-multi-component-suffix.sarif" <<'EOF'
+{"runs":[{"tool":{"driver":{"rules":[
+  {"id":"security-family","defaultConfiguration":{"level":"error"}},
+  {"id":"security-family/subrule/detail","defaultConfiguration":{"level":"warning"}}
+]}},"results":[{"ruleId":"security-family/subrule/detail","ruleIndex":0}]}]}
+EOF
+cat > "$sarifroot/blocking-second.sarif" <<'EOF'
+{"runs":[{"tool":{"driver":{"rules":[]}},"results":[
+  {"ruleId":"second-file-error-a","level":"error"},
+  {"ruleId":"second-file-error-b","level":"error"}
+]}]}
+EOF
+printf '{' > "$sarifroot/malformed.sarif"
+cat > "$sarifroot/null-results.sarif" <<'EOF'
+{"runs":[{"tool":{"driver":{"rules":[]}},"results":null}]}
+EOF
+cat > "$sarifroot/absent-results.sarif" <<'EOF'
+{"runs":[{"tool":{"driver":{"rules":[]}}}]}
+EOF
+cat > "$sarifroot/empty-runs.sarif" <<'EOF'
+{"runs":[]}
+EOF
+
+codeql_case_() {
+    local want_exit="$1" want_count="$2" desc="$3" out got
+    shift 3
+    out="$(ci/linter/codeql-sarif-verdict.sh "$@" 2>&1)"; got=$?
+    if [ "$got" -eq "$want_exit" ] &&
+       printf '%s\n' "$out" | grep -qx "blocking CodeQL findings: $want_count"; then
+        echo "ok   $desc (count $want_count, exit $got)"
+    else
+        echo "FAIL $desc: expected count $want_count and exit $want_exit, got exit $got" >&2
+        printf '%s\n' "$out" | sed 's/^/       | /' >&2
+        rc=1
+    fi
+}
+
+codeql_case_ 1 4 "CodeQL SARIF: all blocking severity paths resolve" \
+    "$sarifroot/blocking.sarif"
+codeql_case_ 0 0 "CodeQL SARIF: ordinary warning passes" \
+    "$sarifroot/warning.sarif"
+codeql_case_ 1 1 "CodeQL SARIF: ruleIndex selects the indexed rule" \
+    "$sarifroot/rule-index.sarif"
+case_ 2 "CodeQL SARIF: negative ruleIndex fails closed" \
+    ci/linter/codeql-sarif-verdict.sh "$sarifroot/rule-index-negative.sarif"
+case_ 2 "CodeQL SARIF: out-of-range ruleIndex fails closed" \
+    ci/linter/codeql-sarif-verdict.sh "$sarifroot/rule-index-out-of-range.sarif"
+codeql_case_ 1 1 "CodeQL SARIF: ruleIndex disambiguates duplicate rule IDs" \
+    "$sarifroot/rule-index-duplicate-id.sarif"
+case_ 2 "CodeQL SARIF: mismatched ruleId and ruleIndex fail closed" \
+    ci/linter/codeql-sarif-verdict.sh "$sarifroot/rule-index-mismatch.sarif"
+codeql_case_ 1 1 "CodeQL SARIF: hierarchical ruleId agrees with ruleIndex" \
+    "$sarifroot/rule-index-hierarchical-id.sarif"
+case_ 2 "CodeQL SARIF: ruleIndex rejects more than one additional ruleId component" \
+    ci/linter/codeql-sarif-verdict.sh "$sarifroot/rule-index-multi-component-suffix.sarif"
+codeql_case_ 1 6 "CodeQL SARIF: two blocking files are summed" \
+    "$sarifroot/blocking.sarif" "$sarifroot/blocking-second.sarif"
+codeql_case_ 1 4 "CodeQL SARIF: warning after blocking preserves count" \
+    "$sarifroot/blocking.sarif" "$sarifroot/warning.sarif"
+case_ 2 "CodeQL SARIF: malformed JSON fails closed" \
+    ci/linter/codeql-sarif-verdict.sh "$sarifroot/malformed.sarif"
+case_ 2 "CodeQL SARIF: null results fail closed" \
+    ci/linter/codeql-sarif-verdict.sh "$sarifroot/null-results.sarif"
+case_ 2 "CodeQL SARIF: absent results fail closed" \
+    ci/linter/codeql-sarif-verdict.sh "$sarifroot/absent-results.sarif"
+case_ 2 "CodeQL SARIF: empty runs fail closed" \
+    ci/linter/codeql-sarif-verdict.sh "$sarifroot/empty-runs.sarif"
+
+# lint-ca-log-safety: whitespace-tolerant &r->url detection.
+#
+# lint_files() matches only '^src/.*\.[ch]$' and, given explicit args, filters
+# on the string alone without consulting git -- so a fixture rooted under a
+# throwaway '<tmp>/src/...' satisfies the selector as long as the linter's
+# cwd resolves that tmp dir as its git toplevel (it sources lib.sh via
+# `git rev-parse --show-toplevel`). Build a scratch git repo with its own
+# src/ and a copied lib.sh so nothing here touches the real tree or git index.
+calogroot="$(mktemp -d)"
+trap 'rm -rf "$badroot" "$yamlroot" "$sarifroot" "$calogroot"' EXIT
+mkdir -p "$calogroot/src" "$calogroot/ci/linter"
+cp "$ROOT/ci/linter/lib.sh" "$calogroot/ci/linter/lib.sh"
+git -C "$calogroot" init -q .
+
+calog_case() {
+    # calog_case <expected-exit> <description> <statement-body>
+    local expect="$1" desc="$2" body="$3"
+    cat > "$calogroot/src/fixture.c" <<EOF
+void f(ngx_http_request_t *r) {
+    $body
+}
+EOF
+    case_ "$expect" "$desc" \
+        bash -c "cd '$calogroot' && bash '$ROOT/ci/linter/lint-ca-log-safety.sh' src/fixture.c"
+}
+
+calog_case 1 "lint-ca-log-safety: literal &r->url is caught" \
+    'ngx_log_error(NGX_LOG_ERR, r->log, 0, "%V", &r->url);'
+calog_case 1 "lint-ca-log-safety: '& r->url' spacing is caught" \
+    'ngx_log_error(NGX_LOG_ERR, r->log, 0, "%V", & r->url);'
+calog_case 1 "lint-ca-log-safety: '&r -> url' spacing is caught" \
+    'ngx_log_error(NGX_LOG_ERR, r->log, 0, "%V", &r -> url);'
+calog_case 1 "lint-ca-log-safety: '&r->    url' spacing is caught" \
+    'ngx_log_error(NGX_LOG_ERR, r->log, 0, "%V", &r->    url);'
+calog_case 0 "lint-ca-log-safety: wrapped call still passes" \
+    'ngx_log_error(NGX_LOG_ERR, r->log, 0, "%V", ngx_autocert_acme_log_safe(&r->url));'
+calog_case 0 "lint-ca-log-safety: debug level stays exempt" \
+    'ngx_log_debug1(NGX_LOG_DEBUG_HTTP, r->connection->log, 0, "%V", &r->url);'
+calog_case 1 "lint-ca-log-safety: 'not ngx_log_debug' comment does not exempt an ERROR call" \
+    'ngx_log_error(NGX_LOG_ERR, r->log, 0, /* not ngx_log_debug */
+                  "%V", &r->url);'
+calog_case 0 "lint-ca-log-safety: helper call with space before its paren is still stripped" \
+    'ngx_log_error(NGX_LOG_ERR, r->log, 0, "%V", ngx_autocert_acme_log_safe (r->pool, &r->url));'
+calog_case 1 "lint-ca-log-safety: commented-out helper call does not mask a raw &r->url" \
+    'ngx_log_error(NGX_LOG_ERR, r->log, 0,
+                  "%V", /* ngx_autocert_acme_log_safe(r->pool, */ &r->url /* ) */);'
+calog_case 1 "lint-ca-log-safety: legitimate trailing comment after ; still terminates the statement" \
+    'ngx_log_error(NGX_LOG_ERR, r->log, 0, "%V", &r->url); /* trailing comment */
+    ngx_log_error(NGX_LOG_ERR, r->log, 0, "%V", ngx_autocert_acme_log_safe(&r->url));'
 
 if [ "$rc" -eq 0 ]; then
     echo "== lint gate selftest: all controls held =="

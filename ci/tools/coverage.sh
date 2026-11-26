@@ -86,7 +86,9 @@ rm -rf "$unit_build"
 run_server_workload() {
   local prefix module binary
 
-  prefix="$(mktemp -d "$workspace/.build/coverage-server.XXXXXX")"
+  # Linux limits Unix socket paths to 107 bytes. Self-hosted checkout paths
+  # (and TMPDIR) can exceed that before the socket name is even appended.
+  prefix="$(mktemp -d /tmp/autocert-cov.XXXXXX)"
   server_prefix="$prefix"
   module="$build_dir/objs/ngx_http_autocert_module.so"
   binary="$build_dir/objs/nginx"

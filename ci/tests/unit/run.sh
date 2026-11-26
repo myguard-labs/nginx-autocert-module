@@ -15,15 +15,19 @@ if [ -z "${WORKSPACE:-}" ]; then
 fi
 
 # Compiler + optional sanitizer instrumentation. Default (CC unset, SANITIZE
-# unset) is byte-identical to the historical hardcoded `gcc` invocation: CC
-# resolves to plain "gcc" and both flag/lib additions are empty strings, so
-# every gcc line below compiles and links exactly as before.
+# unset) uses the historical `gcc` default: CC resolves once to that executable
+# and both flag/lib additions are empty strings.
 #
 # SANITIZE=1 (or any non-empty value) turns on ASan+UBSan for the WHOLE suite
 # (same flags ci/tests/unit/run-asan.sh already uses for its one test), so the
 # same 12-binary suite this script runs by default can also run instrumented,
 # rather than maintaining a second parallel script per binary.
 CC="${CC:-gcc}"
+if ! SELECTED_CC="$(command -v -- "$CC")"; then
+	echo "✗ selected compiler is not executable: $CC" >&2
+	exit 2
+fi
+CC="$SELECTED_CC"
 SANITIZE_CFLAGS=""
 SANITIZE_LIBS=""
 if [ -n "${SANITIZE:-}" ]; then
@@ -341,6 +345,36 @@ cd "$WORKSPACE"
 	$INET_OBJS -lssl -lcrypto $SANITIZE_LIBS
 "$BUILD_DIR/test_cert_time"
 
+# Renewal read verdict: slice the driver's pure four-way certificate-read
+# decision so missing/invalid pairs issue while transient I/O backs off.
+CC_PROBE_DIR="$(mktemp -d "$BUILD_DIR/cc-probe.XXXXXX")"
+cleanup_cc_probe() {
+	rm -rf "$CC_PROBE_DIR"
+}
+trap cleanup_cc_probe EXIT
+cat >"$CC_PROBE_DIR/compiler" <<'EOF'
+#!/bin/sh
+printf '.\n' >>"$CC_PROBE_MARKER"
+exec "$REAL_CC" "$@"
+EOF
+chmod +x "$CC_PROBE_DIR/compiler"
+env CC_PROBE_MARKER="$CC_PROBE_DIR/used" REAL_CC="$CC" \
+	CC="$CC_PROBE_DIR/compiler" \
+	bash "$WORKSPACE/ci/tests/unit/extract_cert_read_due.sh"
+CC_PROBE_COUNT="$(wc -l <"$CC_PROBE_DIR/used")"
+# Four probe invocations each run in two preprocessing modes.
+[ "$CC_PROBE_COUNT" -eq 8 ] || {
+	echo "extract_cert_read_due.sh used the selected compiler $CC_PROBE_COUNT times, expected 8" >&2
+	exit 1
+}
+cleanup_cc_probe
+trap - EXIT
+# shellcheck disable=SC2086
+"$CC" $SANITIZE_CFLAGS $EXTRA_CFLAGS -Wall -Wextra -Werror $CORE_INC \
+	-I"$WORKSPACE/ci/tests/unit" -o "$BUILD_DIR/test_cert_read_due" \
+	"$WORKSPACE/ci/tests/unit/test_cert_read_due.c" $SANITIZE_LIBS
+"$BUILD_DIR/test_cert_read_due"
+
 # Slice ngx_autocert_account_json_safe + ngx_autocert_account_log_safe from
 # the shipped account source. json_safe depends only on ngx_str_t; log_safe
 # calls nginx core's ngx_escape_json (ngx_string.o) but never touches a pool
@@ -452,6 +486,15 @@ bash "$WORKSPACE/ci/tests/unit/extract_orphan.sh"
 # wrap is disarmed by default (forwards to __real_readdir64), so every other
 # readdir() call in this binary, including count_open_fds()'s own loop, is
 # unaffected unless a test explicitly arms it.
+bash "$WORKSPACE/ci/tests/unit/extract_seedchunk.sh"
+# shellcheck disable=SC2086
+"$CC" $SANITIZE_CFLAGS $EXTRA_CFLAGS -D_GNU_SOURCE -Wall -Wextra -Werror -Ici/tests/unit -I"$WORKSPACE" \
+	$CORE_INC \
+	-o "$BUILD_DIR/test_seed_chunk" \
+	"$WORKSPACE/ci/tests/unit/test_seed_chunk.c" \
+	"$NGX/objs/src/core/ngx_string.o" $SANITIZE_LIBS -Wl,--wrap=readdir64
+WORKSPACE="$WORKSPACE" "$BUILD_DIR/test_seed_chunk"
+
 # win32 store-scan enumeration: the EOF-vs-error channel
 # (ngx_autocert_readdir_err, W12). The A6 walk above distinguishes a clean end
 # of directory from a genuine enumeration failure. On the POSIX arm that
@@ -465,27 +508,20 @@ bash "$WORKSPACE/ci/tests/unit/extract_orphan.sh"
 # .github/workflows/windows-build.yml is build-only and never runs this suite,
 # so that defect has no coverage on the platform where it bites. This test
 # closes that gap on the HOST: extract_win32_readdir.sh slices the production
-# struct, fdopendir, readdir loop and accessor out of src/ngx_autocert_win32.h
-# and compiles them against stand-in Windows types with a scripted
-# NtQueryDirectoryFile -- so a regression that drops `dh->err = 0` from the
-# STATUS_NO_MORE_FILES path recompiles into this test and fails it. Freestanding
-# (no ngx_core.h, no nginx objects): the slice's only nginx-isms are typedefs
-# the test supplies itself.
+# struct, fdopendir, readdir loop, accessor, and closedir out of
+# src/ngx_autocert_win32.h and compiles them against stand-in Windows types
+# with a scripted NtQueryDirectoryFile. It verifies fdopendir initializes the
+# channel clean, clean EOF stays clean despite dirty ambient LastError, and
+# genuine failures latch and report nonzero; it has no structural control for
+# the redundant second zero write at STATUS_NO_MORE_FILES. Freestanding (no
+# ngx_core.h, no nginx objects): the slice's only nginx-isms are typedefs the
+# test supplies itself.
 bash "$WORKSPACE/ci/tests/unit/extract_win32_readdir.sh"
 # shellcheck disable=SC2086
 "$CC" $SANITIZE_CFLAGS $EXTRA_CFLAGS -D_GNU_SOURCE -Wall -Wextra -Werror -Ici/tests/unit \
 	-o "$BUILD_DIR/test_win32_readdir_err" \
 	"$WORKSPACE/ci/tests/unit/test_win32_readdir_err.c" $SANITIZE_LIBS
 "$BUILD_DIR/test_win32_readdir_err"
-
-bash "$WORKSPACE/ci/tests/unit/extract_seedchunk.sh"
-# shellcheck disable=SC2086
-"$CC" $SANITIZE_CFLAGS $EXTRA_CFLAGS -D_GNU_SOURCE -Wall -Wextra -Werror -Ici/tests/unit -I"$WORKSPACE" \
-	$CORE_INC \
-	-o "$BUILD_DIR/test_seed_chunk" \
-	"$WORKSPACE/ci/tests/unit/test_seed_chunk.c" \
-	"$NGX/objs/src/core/ngx_string.o" $SANITIZE_LIBS -Wl,--wrap=readdir64
-WORKSPACE="$WORKSPACE" "$BUILD_DIR/test_seed_chunk"
 
 # Config-time name/contact validation (audit MINOR): server_name/
 # autocert_wildcard values land verbatim, unescaped, in the ACME newOrder

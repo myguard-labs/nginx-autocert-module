@@ -248,7 +248,7 @@ set an instance-wide default in `http{}` that each `server{}` may override.
 | `autocert_challenge http-01\|tls-alpn-01\|dns-01` | http | `http-01` | ACME challenge type. `dns-01` is required for wildcards and requires both DNS hooks. |
 | `autocert_renew_before <time>` | http | `7d` | Renew this long before a cert's `notAfter`. Must be `> 0` and `≤ 89d` — a larger value would push the renew point before issuance and reissue every sweep (self-DoS / CA rate-limit), so it is rejected at config load. |
 | `autocert_runtime_ttl <time>` | http | `7d` | Idle TTL for **runtime-requested** names (the bounded shared registry a consumer module fills — see [Runtime cert requests](#runtime-cert-api-for-other-modules)). A node idle longer than this is evicted, freeing its cap slot and closing its SNI serve gate; its on-disk cert is kept (a re-learned host reuses it). "Idle" means no consumer `ensure()` and no driver activity (issuance outcome / renewal) — a live host is refreshed by both, so only de-labelled hosts age out. `0` disables eviction (learned hosts persist until restart; the 64-name cap can then wedge). Config names are never swept. |
-| `autocert_handshake_load_limit <n>` | http | `64` | Maximum **synchronous certificate loads a worker performs on the TLS handshake path in any one second**, across all names. Serving a cached certificate costs nothing and is not charged; only a name whose cache entry has not been refreshed this second is, and such a refresh is charged **one unit per config-enabled key type** — a dual-key (EC + RSA) deployment therefore spends 2 units per name, so `64` admits 32 name refreshes a second, not 64. Beyond the budget the load is **deferred**: the handshake installs the certificate already cached for that exact name (or, if it has none, lets nginx serve the server's configured/bootstrap certificate, as it does before issuance) and retries on the next handshake in the next second. Another name's certificate is never served and the handshake is never failed. This exists because the per-name once-per-second reload throttle cannot bound a flood of **distinct** SNIs — each is a fresh cache entry and so a fresh open + read + PEM parse on the event loop, with the client choosing how many. The instance-wide ceiling is `worker_processes` × this value loads/second, since each worker enforces its own independent budget. `0` disables the cap (unbounded, pre-1.x behaviour). A worker with more configured names than the budget allows takes `ceil(names / (limit / enabled key types))` seconds to warm its whole cache after start or reload, serving the bootstrap certificate for not-yet-warmed names meanwhile — correct and self-healing, but a real behavior change from the old unbounded default; operators with large name sets may want to raise the limit. Setting the limit *below* the enabled key-type count does not stall: one name still refreshes per second, using that whole second's budget. |
+| `autocert_handshake_load_limit <n>` | http | `64` | Maximum **synchronous certificate loads a worker performs on the TLS handshake path in any one second**, across all names. Serving a cached certificate costs nothing and is not charged; only a name whose cache entry has not been refreshed this second is, and such a refresh is charged **one unit per config-enabled key type** — a dual-key (EC + RSA) deployment therefore spends 2 units per name, so `64` admits 32 name refreshes a second, not 64. Beyond the budget the load is **deferred**: the handshake installs the certificate already cached for that exact name (or, if it has none, lets nginx serve the server's configured/bootstrap certificate, as it does before issuance) and retries on the next handshake in the next second. Another name's certificate is never served and the handshake is never failed. This exists because the per-name once-per-second reload throttle cannot bound a flood of **distinct** SNIs — each is a fresh cache entry and so a fresh open + read + PEM parse on the event loop, with the client choosing how many. The instance-wide ceiling is `worker_processes` × this value loads/second, since each worker enforces its own independent budget. `0` disables the cap (unbounded, pre-1.x behaviour). A worker with more configured names than the budget allows takes `ceil(names / (limit / enabled key types))` seconds to warm its whole cache after start or reload, serving the bootstrap certificate for not-yet-warmed names meanwhile — correct and self-healing, but a real behavior change from the old unbounded default; operators with large name sets may want to raise the limit. Setting the limit *below* the enabled key-type count does not stall: one name still refreshes per second, using that whole second's budget. **Fairness:** a quarter of each second's budget (at least one unit, whenever the limit is 2 or more) is reserved for names a previous second's budget already deferred. In the second a flood starts, its names have never been loaded and so are all first attempts: they can only spend the other three quarters and cannot touch the reserve at all. From the next second onward the flood's own names have themselves been deferred and do compete for the reserve — but only a name this server is configured to serve (directly, by wildcard, or already issued at runtime) ever gets a cache entry, so the set of deferred names is bounded by **your** configured name set and cannot be inflated by however many distinct SNIs a client invents. A deferred name is therefore retried within a small number of seconds, rather than being pushed back for as long as the flood lasts at any size. The guarantee weakens once the deferred set exceeds what one second's budget can refresh: past that point a name that consistently arrives last in each second can still be pushed back, so **size the limit above your configured name count times the number of enabled key types** if you want the strong property. A deferred name that draws on the reserve is not charged twice, and the total per second never exceeds the configured limit. On a worker that is not at its budget the reserve is never reached, so the split has no effect. This retry-only split itself only holds when the limit can fit one whole batch beside the reserve — `limit >= (enabled key types) + reserve`, i.e. `limit >= 3` for a dual EC+RSA deployment (2 key types + 1-unit reserve). Below that threshold a single name's refresh batch does not fit in the general share alone, so it is admitted once per second charged against **both** pools regardless of retry status, and there is no fairness split at that limit. |
 | `autocert_profile <name>` | http | (none) | ACME issuance profile requested in the order (ACME Profiles draft). Let's Encrypt requires `shortlived` to issue an IP-address certificate. Omitted when unset (CA default profile). Restricted to `A-Z a-z 0-9 . _ -`. |
 | `autocert_resolver <addr> [addr…]` | http | falls back to core `resolver` | DNS resolver(s) used to reach the CA host. Same `address[:port] valid= ipv6=` syntax as core `resolver`. |
 | `autocert_resolver_timeout <time>` | http | `30s` | Timeout for that DNS resolution. Must be `<= 3600s` — rejected at config load rather than silently capped at runtime. |
@@ -317,16 +317,21 @@ answers the CA must therefore be (or inherit) an autocert-enabled server — a b
 > `location ^~ /.well-known/acme-challenge/ { }` carve-out remains harmless if
 > you already have one.
 >
-> **Challenge responses are served from server-level config.** Serving before
-> location matching means no `location` has been selected when the token is
-> written, so location-level directives do not apply to the challenge response:
-> `server_tokens`, `access_log off`, `error_page`, and the keepalive settings
-> (`keepalive_timeout`, `keepalive_requests`, `keepalive_time`) are taken from
-> the enclosing `server` (or `http`) level instead. `client_max_body_size` is
-> likewise not enforced for a challenge URI — the module discards any request
-> body as a stream, so an oversized body costs bandwidth, not memory. This
-> applies only to `/.well-known/acme-challenge/` URIs; every other request is
-> configured exactly as before.
+> **Challenge responses are served before location configuration is updated.**
+> No `location` has been selected when the token is written, so location and
+> `limit_except` selection are skipped and location-level directives such as
+> `server_tokens`, `access_log off`, `error_page`, and `client_max_body_size` do
+> not apply. On a reused connection, the connection's `sendfile` setting can
+> retain its value from the prior request; that is harmless for this tiny
+> in-memory response. The request's initial keepalive decision follows its HTTP
+> version and `Connection` header. Skipping
+> `ngx_http_update_location_config()` omits the `keepalive_requests` and
+> `keepalive_time` counter checks. For HTTP/1.x, final request handling still
+> consults the server/default location's `keepalive_timeout` to decide whether
+> to keep the connection open and to set its idle timer. The module discards
+> any request body as a stream, so an oversized body costs bandwidth, not memory.
+> This applies only to `/.well-known/acme-challenge/` URIs; every other request
+> is configured exactly as before.
 
 ### DNS-01 hook contract
 
@@ -344,6 +349,26 @@ argv[1] = "_acme-challenge.<domain>"  # record name; a leading "*." is stripped
 argv[2] = "<txt-value>"               # 43-char base64url(SHA-256(keyauth))
 argv[3] = NULL
 ```
+
+**argv layout:** The positional arguments start immediately after argv[0] with no `--`
+separator. This is deliberate: inserting `--` would change argv[1] for every
+existing hook and is a breaking change to this contract, so it is not done here.
+`argv[1]` always starts with `_` (`_acme-challenge.<name>`), so it can never be
+mistaken for an option. **`argv[2]` cannot make the same guarantee** — it is
+`base64url(SHA-256(keyauth))`, a uniformly-distributed 43-character string over
+the alphabet `[A-Za-z0-9_-]` (RFC 8555 §8.4), and that alphabet includes `-`.
+Roughly **1 in 64** DNS-01 challenges will therefore produce a value whose first
+character is `-`, which a `getopt`-based hook can misparse as an option flag.
+
+Hook authors MUST NOT feed `argv[1]`/`argv[2]` to `getopt` or to any command
+that treats a leading `-` as an option. Instead:
+
+- Read the positionals directly — `name="$1"; value="$2"` — never via `getopt`
+  or `getopts`.
+- Before forwarding either value to another command (`dig`, `curl`, a DNS
+  provider's CLI), place `--` yourself immediately before the positional
+  arguments, e.g. `provider-cli set-txt -- "$name" "$value"`, so the command
+  being invoked cannot reinterpret a leading `-` as one of its own flags.
 
 **No environment variables are added by the module** — the hook inherits the
 worker's environment verbatim. This is the certbot-manual convention: pass your
@@ -743,7 +768,9 @@ publishing the new one.
 ## CI
 
 A failure surfaces as a red run plus the uploaded artifact. `ci-deep.yml` also
-pings Discord on failure; nothing else notifies.
+pings Discord on failure; `notify-scheduled-failure.yml` files/updates a
+tracking issue when a scheduled `build-test.yml` run fails; nothing else
+notifies.
 
 `ci.yml` is the orchestrator and calls the PR-time members below, so a PR asks
 for one run rather than several independent ones.
@@ -756,10 +783,11 @@ for one run rather than several independent ones.
 | `fuzzing.yml` | PR (via `ci.yml`), manual | replay every past crash, then 30s fresh fuzz per target (JSON + HTTP + base64url). Runs beside the e2e critical path, so it adds nothing to the merge budget; the 14400s/target deep fuzz stays in `ci-deep.yml` |
 | `valgrind.yml` | manual | 30s memcheck soak |
 | `codeql.yml` | PR (via `ci.yml`), monthly | CodeQL over the module TU |
-| `asan.yml` | weekly (Sun 03:45 UTC), manual | 30s ASan+UBSan request-storm soak. Green since #160. Two nginx-inherent checks are off: ODR (nginx generates `ngx_module_names` into both the binary and the `.so`) and config-load leaks (the cycle pool is never freed) — see `ci/tools/lsan.supp`. Request-path leaks, UAF, overflow and all UBSan checks stay armed |
+| `asan.yml` | weekly (Sun 03:45 UTC), manual | 30s ASan+UBSan request-storm soak. Two nginx-inherent checks are off: ODR (nginx generates `ngx_module_names` into both the binary and the `.so`) and LSan (worker shutdown orphans stock event arrays, while the self-hosted LXC runner blocks LSan's `ptrace`). Valgrind owns leak detection; UAF, overflow and all UBSan checks stay armed |
 | `ci-deep.yml` | monthly, manual | long fuzz, memcheck + helgrind soaks, security scanners, angie Pebble e2e |
 | `windows-build.yml` | PR touching `src/`, `config`, the pins or the workflow itself; push to master; manual | native win32 build gate: MSVC x64 static link against the pinned nginx, then assert the module reached `objs/ngx_modules.c` and that `nginx -t` accepts `autocert_store_path` while rejecting a bogus directive. Then **starts `nginx.exe`** and verifies the HTTP-01 challenge-serve path (exact key authorization, 404s for unknown/nested tokens, `Content-Length`, and keepalive framing after a GET-with-body), the multi-worker singleton guarantee, and full RFC 8738 IPv4-literal ACME **issuance** against a native `pebble-windows-amd64` binary (no Docker), and a second-issuance **renewal** lane that reissues over an existing live generation and requires a changed certificate serial (win32 has no `RENAME_EXCHANGE`, so the renewal commit path differs from POSIX and needs its own coverage) |
 | `bump.yml` | weekly (Mon 04:00 UTC), manual | regenerate the nginx/angie version + sha256 pins in [`.github/versions.env`](.github/versions.env) and open a PR. Not a gate — it produces a reviewable change instead of letting builds drift onto a new upstream on their own |
+| `notify-scheduled-failure.yml` | on completion of a scheduled `build-test.yml` run | files or comments on a `ci-scheduled-failure`-labeled tracking issue when the scheduled run failed (not cancelled). Split out of `build-test.yml` (kept as its own workflow, `workflow_run`-triggered, rather than a job inside it) so its `issues: write` permission never widens the token every PR and push job in `build-test.yml` runs with |
 
 **nginx and angie are pinned.** `.github/versions.env` is the single source of
 truth for both versions and their tarball sha256s; `resolve` in

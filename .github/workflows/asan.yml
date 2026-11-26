@@ -1,4 +1,4 @@
-# sync-sha: 5d66573972d41080b54cf031d323344037d2c419f1dda6d4b93bbaa5bdffa33b
+# sync-sha: 30f3e2b59e1886f86e0f237fcca5669df83ddea4e7b4811bb75d4fdbe0eff039
 name: ASan
 
 # Manual ASan+UBSan soak — 30s mixed-load soak of the HTTP-01 serve path with an
@@ -57,6 +57,13 @@ jobs:
 
       - name: Build ASan+UBSan nginx + autocert module (dynamic, AUTOCERT_TEST=1)
         run: bash ci/tools/ci-build.sh asan
+
+      - name: Soak harness regression controls
+        env:
+          NGX_BUILD_DIR: ${{ github.workspace }}/nginx-${{ env.NGINX_VERSION }}
+        run: |
+          bash ci/tools/soak-selftest.sh \
+            "$GITHUB_WORKSPACE/nginx-${NGINX_VERSION}/objs/nginx"
 
       - name: ASan+UBSan soak (30s)
         env:

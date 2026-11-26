@@ -1,0 +1,11 @@
+name: a
+on:
+  pull_request:
+env:
+  TEST_BASE_PORT: '19900'
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - run: bash ci/tools/max-port.sh "$TEST_BASE_PORT"
+      - run: python3 ci/tools/test_runtime.py --port "$TEST_BASE_PORT"

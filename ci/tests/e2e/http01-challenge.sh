@@ -98,6 +98,8 @@ for _ in $(seq 1 30); do
 done
 grep autocert "$PREFIX/logs/error.log" || true
 
+# CI environments may inject proxy variables even for loopback URLs. Every
+# challenge probe uses --noproxy '*' so it always reaches this local server.
 echo "== fetch valid token =="
 got=$(curl --noproxy '*' -fsS "http://127.0.0.1:$PORT/.well-known/acme-challenge/$TOKEN")
 if [ "$got" != "$KEYAUTH" ]; then

@@ -36,9 +36,10 @@
 #
 # The test supplies stand-in Windows types and a scripted
 # NtQueryDirectoryFile that returns whatever batch (or NTSTATUS) a case needs.
-# So this is not a re-implementation: a regression that drops `dh->err = 0`
-# from the STATUS_NO_MORE_FILES path, or forgets to set it on a failure path,
-# recompiles into this test and fails it.
+# So this is not a re-implementation: it verifies fdopendir starts with a clean
+# channel, clean EOF stays clean despite dirty ambient LastError, and genuine
+# failures latch and report a nonzero error. It deliberately has no structural
+# control for the redundant second zero write at STATUS_NO_MORE_FILES.
 set -euo pipefail
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -51,7 +52,7 @@ if [ ! -f "$SRC" ]; then
 fi
 
 # Slice from the dir-handle struct's typedef through the end of
-# ngx_autocert_readdir_err(). Anchors are production identifiers, not line
+# ngx_autocert_closedir(). Anchors are production identifiers, not line
 # numbers, so ordinary edits above or below the region do not shift the slice.
 START='ngx_autocert_dirent_t (W12)'
 END='ngx_autocert_closedir(ngx_autocert_dir_t *dh)'
@@ -65,7 +66,7 @@ if ! grep -qF "$END" "$SRC"; then
 	exit 1
 fi
 
-# Emit from the start anchor through the closing brace of the accessor whose
+# Emit from the start anchor through the closing brace of closedir(), whose
 # signature is the end anchor. `tail` latches on that signature; the first
 # line that is exactly "}" after it closes the function and ends the slice.
 {

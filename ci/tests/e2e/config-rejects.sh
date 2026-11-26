@@ -4,10 +4,8 @@
 # module fails configuration — rather than misbehaving at runtime — for invalid
 # directive values.
 #
-# Cases:
-#   - autocert_dns_hook_timeout 0;  (and negative) must be rejected: a
-#     non-positive timeout otherwise reaches the driver as 0 and SIGKILLs every
-#     dns-01 hook on the first poll tick, silently breaking all dns-01 issuance.
+# Covers config-time rejection and acceptance boundaries for directives whose
+# invalid values would otherwise fail later during issuance or runtime.
 #
 # Inputs (env):
 #   SERVER_BIN   - path to the built nginx/angie binary (required)
@@ -20,8 +18,8 @@ NGX_BUILD_DIR="${NGX_BUILD_DIR:-$(cd "$(dirname "$SERVER_BIN")/.." && pwd)}"
 HTTP_SO="$NGX_BUILD_DIR/objs/ngx_http_autocert_module.so"
 [ -f "$HTTP_SO" ] || { echo "missing $HTTP_SO"; exit 1; }
 
-PREFIX="${PREFIX:-/tmp/ac-cfgreject}"
-rm -rf "$PREFIX"
+PREFIX=$(mktemp -d "${TMPDIR:-/tmp}/ac-cfgreject.XXXXXX")
+trap 'rm -rf -- "$PREFIX"' EXIT
 mkdir -p "$PREFIX/logs" "$PREFIX/conf" "$PREFIX/store"
 # store mode must not depend on the caller's umask (the driver refuses a
 # group/other-writable store, and mkdir's mode is umask-filtered).
@@ -66,6 +64,19 @@ EOF
         return 1
     fi
     echo "✓ $label rejected at config time"
+}
+
+# Asserts `nginx -t` accepts a complete config. Capture the output so a failure
+# is diagnosable without piping the server through an early-exiting `grep -q`.
+expect_accept() {
+    local label="$1" out rc=0
+    out=$("$SERVER_BIN" -t -p "$PREFIX" -c "$PREFIX/conf/nginx.conf" 2>&1) || rc=$?
+    if [ "$rc" -ne 0 ]; then
+        echo "::error::$label was rejected"
+        printf '%s\n' "$out" | sed 's/^/    /'
+        return 1
+    fi
+    echo "✓ $label accepted"
 }
 
 # 0 is the value ngx_conf_set_sec_slot accepts but the driver cannot use; our
@@ -113,9 +124,7 @@ http {
     server { listen $PORT; server_name x.example.com; }
 }
 EOF
-"$SERVER_BIN" -t -p "$PREFIX" -c "$PREFIX/conf/nginx.conf" 2>&1 | grep -q "syntax is ok" \
-    || { echo "::error::a valid autocert_dns_hook_timeout was rejected"; exit 1; }
-echo "✓ valid autocert_dns_hook_timeout accepted"
+expect_accept "valid autocert_dns_hook_timeout"
 
 # Phase B dual-cert: autocert_key_type is a 1-4 element list. Two ECDSA types
 # collide on the flat privkey.pem/fullchain.pem name; two RSA types collide on
@@ -157,9 +166,36 @@ http {
     server { listen $PORT; server_name x.example.com; }
 }
 EOF
-"$SERVER_BIN" -t -p "$PREFIX" -c "$PREFIX/conf/nginx.conf" 2>&1 | grep -q "syntax is ok" \
-    || { echo "::error::a valid autocert_renew_before was rejected"; exit 1; }
-echo "✓ valid autocert_renew_before accepted"
+expect_accept "valid autocert_renew_before"
+
+# autocert_handshake_load_limit is parsed by the hand-rolled uint setter
+# (ngx_http_autocert_uint_slot), which rejects non-numeric values and duplicate
+# directives. Either guard must fire at config time, not silently drop the check.
+expect_reject "autocert_handshake_load_limit non-numeric" \
+    "    autocert_handshake_load_limit abc;" \
+    "invalid number \"abc\""
+expect_reject "autocert_handshake_load_limit negative" \
+    "    autocert_handshake_load_limit -1;" \
+    "invalid number \"-1\""
+expect_reject "autocert_handshake_load_limit duplicate" \
+    "    autocert_handshake_load_limit 100;
+    autocert_handshake_load_limit 200;" \
+    "\"autocert_handshake_load_limit\" directive is duplicate"
+
+# Sanity: a valid handshake_load_limit is accepted.
+cat > "$PREFIX/conf/nginx.conf" <<EOF
+load_module $HTTP_SO;
+error_log $PREFIX/logs/error.log;
+events {}
+http {
+    autocert on;
+    autocert_contact a@b.com;
+    autocert_store_path $PREFIX/store;
+    autocert_handshake_load_limit 0;
+    server { listen $PORT; server_name x.example.com; }
+}
+EOF
+expect_accept "autocert_handshake_load_limit 0 (unlimited)"
 
 # ngx_autocert_sec_to_msec_clamped() silently caps resolver_timeout above
 # 3600s to 3600000ms at runtime; reject the confusing gap at config load
@@ -184,9 +220,7 @@ http {
     server { listen $PORT; server_name x.example.com; }
 }
 EOF
-"$SERVER_BIN" -t -p "$PREFIX" -c "$PREFIX/conf/nginx.conf" 2>&1 | grep -q "syntax is ok" \
-    || { echo "::error::a valid autocert_resolver_timeout was rejected"; exit 1; }
-echo "✓ valid autocert_resolver_timeout accepted"
+expect_accept "valid autocert_resolver_timeout"
 
 # --- IP-address certs (RFC 8738) ---------------------------------------------
 
@@ -254,8 +288,6 @@ http {
     server { listen $PORT; server_name 2001:db8::1; }
 }
 EOF
-"$SERVER_BIN" -t -p "$PREFIX" -c "$PREFIX/conf/nginx.conf" 2>&1 | grep -q "syntax is ok" \
-    || { echo "::error::a valid IP-cert + profile config was rejected"; exit 1; }
-echo "✓ IP server_names + autocert_profile accepted under http-01"
+expect_accept "IP server_names + autocert_profile under http-01"
 
 echo "✓✓ config-time rejection checks verified"

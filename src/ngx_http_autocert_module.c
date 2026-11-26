@@ -1641,21 +1641,18 @@ ngx_http_autocert_postconfig(ngx_conf_t *cf)
          * changes behaviour.
          *
          * Limitation of serving this early: at POST_READ no location has
-         * matched yet, so r->loc_conf is still the server's DEFAULT location
-         * config and ngx_http_update_location_config() never runs for a
-         * challenge request. Location-level directives therefore do not apply
-         * to challenge responses -- server_tokens, access_log off, error_page,
-         * and the keepalive_requests / keepalive_time counter checks that
-         * ngx_http_update_location_config() performs against r->connection
-         * are not evaluated for a challenge request at all (that function
-         * only ever CLEARS r->keepalive; skipping it fails open, so a
-         * challenge response can keep alive a connection a matched
-         * location's keepalive_timeout 0 would have closed). Calling
-         * ngx_http_update_location_config() here would not help: there is no
-         * matched location to update from. The challenge response is a fixed
-         * ~87-byte text/plain body on a well-known URI, so serving it from
-         * server-level config is the accepted trade for being ahead of every
-         * rewrite and content handler.
+         * matched yet, so location and limit_except selection are skipped and
+         * ngx_http_update_location_config() never runs for a challenge
+         * request. Location-level directives therefore do not apply, and on a
+         * reused connection r->connection->sendfile can retain its value from
+         * the prior request. That is harmless for this fixed, tiny in-memory
+         * response. r->keepalive is initially derived from the HTTP version
+         * and Connection header. Skipping the update function omits its
+         * keepalive_requests and keepalive_time counter checks. For HTTP/1.x,
+         * final request handling still reads keepalive_timeout from the
+         * server/default location config both to decide whether to keep the
+         * connection open and to set the idle timer. Calling the update
+         * function here would not help because there is no matched location.
          */
         h = ngx_array_push(&cmcf2->phases[NGX_HTTP_POST_READ_PHASE].handlers);
         if (h == NULL) {
@@ -1727,11 +1724,11 @@ ngx_http_autocert_challenge_serve(ngx_http_request_t *r)
 
     /*
      * r->uri is already normalized here: ngx_http_process_request_uri() runs
-     * during request-line parsing, before ANY phase, and resolves %xx escapes,
-     * "." / ".." segments and duplicate slashes. So this literal prefix
-     * compare cannot be bypassed by encoding or traversal, and the token
-     * segment below is a real path segment. A future phase move must preserve
-     * that ordering or this argument no longer holds.
+     * during request-line parsing, before ANY phase, and resolves %xx escapes
+     * and "." / ".." segments. Duplicate slashes are merged by default; with
+     * merge_slashes off they can only make this literal prefix comparison miss
+     * a challenge URI (a false negative), not bypass the token checks. A future
+     * phase move must preserve that ordering or this argument no longer holds.
      */
     if (r->uri.len < pfxlen
         || ngx_strncmp(r->uri.data, NGX_HTTP_AUTOCERT_WK_PREFIX, pfxlen) != 0)

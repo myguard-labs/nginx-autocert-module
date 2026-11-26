@@ -65,7 +65,7 @@ Preference order, and why each tool lands where it does:
 ```sh
 sudo apt-get update
 sudo apt-get install -y --no-install-recommends \
-    shellcheck cppcheck flawfinder yamllint clang-tidy \
+    jq shellcheck cppcheck flawfinder yamllint clang-tidy \
     libperl-critic-perl perl pipx cpanminus
 ```
 

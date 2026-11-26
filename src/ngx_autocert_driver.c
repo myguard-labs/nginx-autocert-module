@@ -1306,10 +1306,20 @@ ngx_autocert_backoff_hold(ngx_autocert_ca_state_t *state, ngx_uint_t index,
 }
 
 
+/* Translate the certificate reader's four-way result into the scheduler's
+ * due/not-due decision. Missing or invalid pairs need issuance; transient I/O
+ * failures must not spend a CA order, and are retried by the next sweep. */
+static ngx_int_t
+ngx_autocert_cert_read_due(ngx_int_t rc)
+{
+    return rc == NGX_DECLINED || rc == NGX_ABORT;
+}
+
+
 /*
  * Decide whether `name` needs an order now: true if no fullchain.pem is stored
- * yet, if it is unreadable/corrupt, or if it is inside the renew_before window
- * (now >= notAfter - renew_before).
+ * yet, if it is invalid, or if it is inside the renew_before window. Transient
+ * read failures back off until a later sweep instead of launching a CA order.
  */
 static ngx_int_t
 ngx_autocert_name_due(ngx_cycle_t *cycle, ngx_autocert_conf_t *acf,
@@ -1466,29 +1476,24 @@ ngx_autocert_name_due(ngx_cycle_t *cycle, ngx_autocert_conf_t *acf,
                                               &stored_id, verifyp,
                                               (char *) key_path, cycle->log);
 
-        if (rc == NGX_DECLINED) {
-            ngx_log_debug1(
-                NGX_LOG_DEBUG_CORE, cycle->log, 0,
-                "autocert: name \"%V\" due because no cert is stored", name );
-            return 1;                   /* no cert yet -> issue */
-        }
-        if (rc == NGX_ABORT) {
-            /* Either the leaf does not cover this name, or the stored
-             * private key does not pair with it (a torn or partially
-             * restored key/chain pair). Both are unserveable and both are
-             * fixed by reissuing. */
-            ngx_log_error(
-                NGX_LOG_NOTICE, cycle->log, 0,
-                "autocert: \"%V\" stored cert does not cover this name or "
-                "does not match the stored private key; reissuing",
-                name );
-            return 1;                   /* identity/pair mismatch -> reissue */
-        }
         if (rc != NGX_OK) {
-            ngx_log_error(NGX_LOG_WARN, cycle->log, 0,
-                          "autocert: cannot read notAfter of \"%s\"; reissuing",
-                          path);
-            return 1;                   /* corrupt/unreadable -> reissue */
+            ngx_int_t  due = ngx_autocert_cert_read_due(rc);
+
+            if (rc == NGX_DECLINED) {
+                ngx_log_debug1(NGX_LOG_DEBUG_CORE, cycle->log, 0,
+                               "autocert: name \"%V\" due because no cert "
+                               "is stored", name);
+            } else if (rc == NGX_ABORT) {
+                ngx_log_error(NGX_LOG_NOTICE, cycle->log, 0,
+                              "autocert: \"%V\" stored cert does not cover "
+                              "this name, is malformed, or does not match "
+                              "the stored private key; reissuing", name);
+            } else {
+                ngx_log_error(NGX_LOG_WARN, cycle->log, 0,
+                              "autocert: cannot read stored key/chain \"%s\"; "
+                              "backing off until the next sweep", path);
+            }
+            return due;
         }
 
         /*
@@ -2618,6 +2623,15 @@ ngx_autocert_runtime_seed_stop(void)
  * idempotent (ensure()+set_state() only fill or confirm gaps), so re-walking
  * from the top is always safe and never double-counts. Ignoring would risk an
  * incomplete zone; queueing would buy nothing a restart does not.
+ *
+ * ARM ORDERING POLICY. Callers seed then immediately arm, and MUST NOT chain
+ * the arm behind the seed's completion. The seed is a best-effort warm start,
+ * never a hard boot dependency, so delaying the driver's arm until a large
+ * store finishes enumerating would convert a performance fix into a behaviour
+ * regression — converting the stall from the event loop to the driver's start
+ * time (which this change exists to remove). The seed continues in the
+ * background across ticks; the driver's arm and kick timer work independent
+ * of it.
  */
 static void
 ngx_autocert_runtime_seed(ngx_cycle_t *cycle)
@@ -3199,14 +3213,7 @@ ngx_autocert_relock_handler(ngx_event_t *ev)
          * taken here, so this worker's shm view may still be missing markers
          * a prior generation never got to (or a fresh restart never had). */
         ngx_autocert_runtime_seed(cycle);
-        /* ARM ORDERING: arm immediately, do NOT chain arm behind the seed's
-         * completion. The seed is documented above as a best-effort warm
-         * start, never a hard boot dependency, so delaying the driver's arm
-         * until a large store finishes enumerating would convert a
-         * performance fix into a behaviour regression — the exact stall this
-         * change exists to remove, just moved from the event loop to the
-         * driver's start time. The seed continues in the background across
-         * ticks; the kick timer's own work is independent of it. */
+        /* ARM ORDERING POLICY — see ngx_autocert_runtime_seed() docblock. */
         ngx_autocert_driver_arm(cycle);
         return;                             /* acquired; stop retrying */
 
@@ -3242,14 +3249,7 @@ ngx_autocert_driver_init_process(ngx_cycle_t *cycle)
          * ngx_autocert_name_is_config/name_due for anything already settled).
          */
         ngx_autocert_runtime_seed(cycle);
-        /* ARM ORDERING: arm immediately, do NOT chain arm behind the seed's
-         * completion. The seed is documented above as a best-effort warm
-         * start, never a hard boot dependency, so delaying the driver's arm
-         * until a large store finishes enumerating would convert a
-         * performance fix into a behaviour regression — the exact stall this
-         * change exists to remove, just moved from the event loop to the
-         * driver's start time. The seed continues in the background across
-         * ticks; the kick timer's own work is independent of it. */
+        /* ARM ORDERING POLICY — see ngx_autocert_runtime_seed() docblock. */
         ngx_autocert_driver_arm(cycle);
         break;
 

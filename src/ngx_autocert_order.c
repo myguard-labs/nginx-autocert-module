@@ -1559,6 +1559,16 @@ ngx_autocert_order_dns_hook(ngx_autocert_order_t *order, ngx_str_t *hook,
     ngx_memcpy(txt_cstr, order->dns_txt_value.data, order->dns_txt_value.len);
     txt_cstr[order->dns_txt_value.len] = '\0';
 
+    /* argv layout: { hook, "_acme-challenge.<name>", <txt>, NULL }. No `--`
+     * separator. argv[1] always starts with '_' and is never option-like.
+     * argv[2] is base64url(SHA-256(keyauth)): a uniform 43-char string over
+     * [A-Za-z0-9_-], so it CAN start with '-' (~1/64 of challenges) and a
+     * getopt-based hook can misparse it as a flag. Inserting `--` here was
+     * considered and rejected: it would change argv[1] for every existing
+     * hook, a breaking change to this documented contract. The mitigation
+     * is the README "DNS-01 hook contract" guidance: read argv[1]/argv[2]
+     * positionally (no getopt), and place `--` before forwarding them to
+     * any other command. */
     argv[0] = (char *) hook_cstr;
     argv[1] = (char *) name_cstr;
     argv[2] = (char *) txt_cstr;
@@ -2131,26 +2141,41 @@ ngx_autocert_keygen_post(ngx_autocert_order_t *order, ngx_uint_t curve)
 
     if (ngx_thread_task_post(tp, ngx_autocert_keygen.task) != NGX_OK) {
         /*
-         * DISCARD the cached task rather than reuse it. ngx_thread_task_post()
-         * sets task->event.active = 1 BEFORE the ngx_thread_cond_signal() that
-         * can fail, and that failure path returns without clearing it and
-         * without enqueueing the task — so nothing will ever clear `active`,
-         * because only ngx_thread_pool_handler() does. Every other nginx
-         * consumer allocates a fresh task per request and never notices; this
-         * slot reuses ONE task for the life of the worker, which would turn
-         * that into a permanent wedge: every later post would trip the
-         * "task #N already active" guard and RSA issuance would stop until the
-         * worker restarted.
+         * ngx_thread_task_post() sets task->event.active = 1 (line 252 of
+         * ngx_thread_pool.c) only after every pre-active exit has already
+         * returned: the already-active guard at line 233, the mutex-lock
+         * failure at line 239, and the queue-overflow exit at lines 243-249.
+         * All three leave active=0 and the task is reusable. Exactly one exit
+         * comes AFTER active is set: the cond_signal failure at lines
+         * 257-259, which is extremely rare, and it returns with active=1
+         * still set, so nothing will ever clear it (only
+         * ngx_thread_pool_handler() does that). Every other nginx consumer
+         * allocates a fresh task per request; this slot reuses ONE task for
+         * the worker's lifetime. If we kept a poisoned task, every later
+         * post would trip the "task #N already active" guard and RSA
+         * issuance would stop until worker restart.
          *
-         * The poisoned task is deliberately LEAKED, not freed: it may still be
-         * referenced by a pool whose state we cannot reason about. The leak is
-         * one ngx_thread_task_t, bounded to a genuinely broken thread pool, and
-         * strictly better than wedging renewals. (The queue-overflow path
-         * returns before setting `active`, so this discards a still-usable task
-         * in that case — a negligible cost for not having to distinguish them.)
+         * Test the observable (event.active) to distinguish the cases: if
+         * active is set, the cond_signal failure happened and the task must
+         * be discarded; if clear, it is one of the pre-active exits and is
+         * reusable. On the cond_signal path the task was never linked into
+         * the pool's queue (that happens at lines 262-263, after the failing
+         * call) and tp->waiting was never incremented (line 265), so no pool
+         * thread can ever see or run it — it is unreachable, not in flight.
+         * It is still permanently stuck with active=1, a flag only
+         * ngx_thread_pool_handler() clears; rather than hand-clear another
+         * subsystem's state, we drop the reference and allocate fresh, at the
+         * cost of one bounded ngx_thread_task_t leaked on a path that
+         * requires a broken thread pool.
          */
         ngx_autocert_keygen.order = NULL;
-        ngx_autocert_keygen.task = NULL;
+
+        if (ngx_autocert_keygen.task->event.active) {
+            /* Cond_signal failed, task is permanently stuck with active=1.
+             * Leak it and allocate fresh on next entry. */
+            ngx_autocert_keygen.task = NULL;
+        }
+        /* Otherwise reuse the task on the next call. */
 
         /*
          * Then fall back inline like every other degraded path. The dominant
@@ -3732,14 +3757,27 @@ ngx_autocert_order_publish_files_at(ngx_autocert_order_t *order, int cfd,
     /*
      * Publish ONLY this order's own key_type: priv, chain, leaf, rest (see
      * ORDERING above). The other keytype's files are hardlink-seeded and
-     * deliberately left alone. A file absent from staging (leaf/rest under
-     * the secure store layout) is simply not published.
+     * deliberately left alone. Priv and chain are MANDATORY for this keytype;
+     * missing or non-regular errors terminate the loop and trigger PARTIAL
+     * publish error handling. Leaf and rest are legitimately absent under
+     * the secure store layout: a missing one is skipped silently, and a
+     * non-regular one is logged at ERROR but still skipped, never fatal.
      */
     for (i = 0; (name = publish_order[i]) != NULL; i++) {
         ngx_autocert_stat_t  st;
+        int                  is_mandatory = (name == priv_name ||
+                                             name == chain_name);
 
         if (ngx_autocert_fstatat(sfd, name, &st, AT_SYMLINK_NOFOLLOW) == -1) {
             if (ngx_errno == NGX_ENOENT) {
+                if (is_mandatory) {
+                    ngx_log_error(NGX_LOG_ERR, order->log, ngx_errno,
+                                  "autocert: publish \"%s\" missing from "
+                                  "staging", name);
+                    failed = name;
+                    rc = NGX_ERROR;
+                    break;
+                }
                 continue;
             }
             ngx_log_error(NGX_LOG_ERR, order->log, ngx_errno,
@@ -3749,6 +3787,17 @@ ngx_autocert_order_publish_files_at(ngx_autocert_order_t *order, int cfd,
             break;
         }
         if (!S_ISREG(st.st_mode)) {
+            if (is_mandatory) {
+                ngx_log_error(NGX_LOG_ERR, order->log, 0,
+                              "autocert: publish \"%s\" not a regular file",
+                              name);
+                failed = name;
+                rc = NGX_ERROR;
+                break;
+            }
+            ngx_log_error(NGX_LOG_ERR, order->log, 0,
+                          "autocert: publish \"%s\" not a regular file; "
+                          "skipping", name);
             continue;
         }
 

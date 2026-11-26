@@ -1,4 +1,4 @@
-# sync-sha: be0e18d34e0b1c318e0a924d749a72417d0009a1fac7b534949f91629ecb2d22
+# sync-sha: 967512c5b1a6c42c9e13b2852175ca06f7f058c1ba6105e15cc33227555e8af9
 name: Windows build
 
 # Native Windows port gate (W17). Proves the module compiles and links on
@@ -1574,8 +1574,10 @@ jobs:
           }
           Write-Host "using openssl at $openssl ($($vOut.Trim()))"
 
-          $chain = "$root/store/$hostIp/fullchain.pem"
-          $key   = "$root/store/$hostIp/privkey.pem"
+          $chain    = "$root/store/$hostIp/fullchain.pem"
+          $key      = "$root/store/$hostIp/privkey.pem"
+          $chainRsa = "$root/store/$hostIp/fullchain.rsa.pem"
+          $keyRsa   = "$root/store/$hostIp/privkey.rsa.pem"
 
           # Hoisted ABOVE the outer try: the finally blocks below restore
           # $ErrorActionPreference from $prev, and a throw BEFORE the inner
@@ -1592,11 +1594,13 @@ jobs:
             } catch { return $null }
           }
 
-          # Wait for the store to hold a cert whose serial differs from
-          # $notSerial (pass $null for "any cert at all"). Returns the serial.
-          function Wait-Serial([string]$notSerial, [int]$tries = 90) {
+          # Wait for the store to hold a cert at the given path whose serial
+          # differs from $notSerial (pass $null for "any cert at all").
+          # Returns the serial.
+          function Wait-Serial([string]$certPath, [string]$notSerial, `
+                               [int]$tries = 90) {
             foreach ($i in 1..$tries) {
-              $s = Get-Serial $chain
+              $s = Get-Serial $certPath
               if ($s -and ($null -eq $notSerial -or $s -ne $notSerial)) { return $s }
               Start-Sleep -Milliseconds 500
             }
@@ -1633,6 +1637,11 @@ jobs:
               '    autocert_challenge http-01;',
               # 2h > the 1h Pebble lifetime => always inside the renew window.
               '    autocert_renew_before 2h;',
+              # One EC + one RSA => the dual-cert store path, which is what
+              # exercises the hardlink-seeded other-keytype interaction.
+              # "ec" is NOT a valid spelling; the EC types are p384/p256 and
+              # their OpenSSL aliases. "rsa" aliases rsa3072.
+              '    autocert_key_type p384 rsa;',
               '    server {',
               "        listen $httpPort;",
               "        server_name ${hostIp};",
@@ -1654,21 +1663,31 @@ jobs:
             $proc = Start-Process -FilePath (Resolve-Path .\objs\nginx.exe) `
                       -ArgumentList '-p', $root, '-c', 'conf/nginx.conf' `
                       -PassThru -NoNewWindow
-            $serial1 = $null
+            $serial1Ec = $null
+            $serial1Rsa = $null
             try {
               Start-Sleep -Seconds 2
               if ($proc.HasExited) {
                 Get-Content "$root/logs/error.log" -ErrorAction SilentlyContinue | Write-Host
                 throw "nginx.exe exited immediately with $($proc.ExitCode)"
               }
-              $serial1 = Wait-Serial $null
-              if (-not $serial1) {
+              # Wait for BOTH certs to exist as an existence check (proves both
+              # slots got issued; keeps distinct EC/RSA error messages).
+              $existEc = Wait-Serial $chain $null
+              if (-not $existEc) {
                 Get-Content "$root/logs/error.log" -Tail 60 -ErrorAction SilentlyContinue | Write-Host
                 Get-Content $pebbleOut, $pebbleErr -ErrorAction SilentlyContinue |
                   Select-Object -Last 40 | Write-Host
-                throw "pass 1: no certificate was issued"
+                throw "pass 1: no EC certificate was issued"
               }
-              Write-Host "OK pass 1 issued: $serial1"
+              $existRsa = Wait-Serial $chainRsa $null
+              if (-not $existRsa) {
+                Get-Content "$root/logs/error.log" -Tail 60 -ErrorAction SilentlyContinue | Write-Host
+                Get-Content $pebbleOut, $pebbleErr -ErrorAction SilentlyContinue |
+                  Select-Object -Last 40 | Write-Host
+                throw "pass 1: no RSA certificate was issued"
+              }
+              Write-Host "OK pass 1 issued EC and RSA certificates (existence verified)"
             }
             finally {
               $ErrorActionPreference = 'Continue'
@@ -1678,16 +1697,58 @@ jobs:
               }
               Get-Process -Name nginx -ErrorAction SilentlyContinue |
                 Stop-Process -Force -ErrorAction SilentlyContinue
+
+              # Wait for all nginx processes to exit: both the main $proc handle
+              # and any stragglers found by name. Bounded timeout with polling.
+              $stopTimeout = 30000  # 30 seconds total
+              $pollInterval = 250   # 250ms between checks
+              $stopStart = [System.Diagnostics.Stopwatch]::StartNew()
+              $allExited = $false
+              while ($stopStart.ElapsedMilliseconds -lt $stopTimeout) {
+                $procStillRunning = $false
+                try { if ($proc) { $proc.Refresh() } } catch { }
+                if ($proc -and -not $proc.HasExited) { $procStillRunning = $true }
+
+                $strayNginx = Get-Process -Name nginx -ErrorAction SilentlyContinue
+                if ($strayNginx) { $procStillRunning = $true }
+
+                if (-not $procStillRunning) {
+                  $allExited = $true
+                  break
+                }
+                Start-Sleep -Milliseconds $pollInterval
+              }
+
               $ErrorActionPreference = $prev
+              if (-not $allExited) {
+                throw "nginx process(es) did not exit after 30-second force-stop timeout"
+              }
             }
+
+            # Re-read both serials AFTER nginx is stopped and confirmed exited.
+            # Every nginx process observed to exit, else the step above throws.
+            # The store is immutable so no renewal can drift the baseline while
+            # pass 2 waits for a different serial.
+            $serial1Ec = Get-Serial $chain
+            if (-not $serial1Ec) {
+              throw "pass 1: EC certificate missing or unreadable after nginx stop"
+            }
+            $serial1Rsa = Get-Serial $chainRsa
+            if (-not $serial1Rsa) {
+              throw "pass 1: RSA certificate missing or unreadable after nginx stop"
+            }
+            Write-Host "OK pass 1 baselines re-read after stop: EC: $serial1Ec RSA: $serial1Rsa"
 
             # ---------- pass 2: renewal over the EXISTING live dir ----------
             # A fresh nginx rescans the store, finds the 1h cert inside the 2h
             # renew window, and reissues. THIS is the commit path that was
             # broken on win32: the live <seg> dir now exists, so the store
             # takes the replace-an-existing-generation branch.
+            # With a dual-keytype config, BOTH slots must renew independently
+            # and each slot must pair internally.
             Write-Host "== pass 2: renewal (live cert already present) =="
             if (-not (Test-Path $chain)) { throw "pass 2: pass-1 chain vanished" }
+            if (-not (Test-Path $chainRsa)) { throw "pass 2: pass-1 RSA chain vanished" }
             Move-Item "$root/logs/error.log" "$root/logs/error.pass1.log" -Force `
               -ErrorAction SilentlyContinue
 
@@ -1701,27 +1762,45 @@ jobs:
                 throw "nginx.exe exited immediately with $($proc2.ExitCode)"
               }
 
-              $serial2 = Wait-Serial $serial1
-              if (-not $serial2) {
+              $serial2Ec = Wait-Serial $chain $serial1Ec
+              if (-not $serial2Ec) {
                 Write-Host "== nginx error.log (pass 2, last 80 lines) =="
                 Get-Content "$root/logs/error.log" -Tail 80 -ErrorAction SilentlyContinue | Write-Host
                 Get-Content $pebbleOut, $pebbleErr -ErrorAction SilentlyContinue |
                   Select-Object -Last 40 | Write-Host
-                throw ("RENEWAL FAILED: the stored certificate still has the " +
-                       "pass-1 serial $serial1 -- the second issuance never " +
+                throw ("RENEWAL FAILED (EC): the stored certificate still has the " +
+                       "pass-1 serial $serial1Ec -- the second issuance never " +
                        "replaced the live generation")
               }
-              Write-Host "OK pass 2 renewed: $serial1 -> $serial2"
+              $serial2Rsa = Wait-Serial $chainRsa $serial1Rsa
+              if (-not $serial2Rsa) {
+                Write-Host "== nginx error.log (pass 2, last 80 lines) =="
+                Get-Content "$root/logs/error.log" -Tail 80 -ErrorAction SilentlyContinue | Write-Host
+                Get-Content $pebbleOut, $pebbleErr -ErrorAction SilentlyContinue |
+                  Select-Object -Last 40 | Write-Host
+                throw ("RENEWAL FAILED (RSA): the stored certificate still has the " +
+                       "pass-1 serial $serial1Rsa -- the second issuance never " +
+                       "replaced the live generation")
+              }
+              Write-Host "OK pass 2 renewed EC: $serial1Ec -> $serial2Ec RSA: $serial1Rsa -> $serial2Rsa"
 
-              # The renewed pair must be internally consistent: a torn commit
+              # The renewed EC pair must be internally consistent: a torn commit
               # that published a new chain beside the old key would show up
               # here as a pubkey mismatch.
-              $certPub = & $openssl x509 -in $chain -noout -pubkey 2>$null
-              $keyPub  = & $openssl pkey -in $key -pubout 2>$null
-              if (($certPub -join "`n") -ne ($keyPub -join "`n")) {
-                throw "renewed certificate pubkey != stored private key (torn commit)"
+              $certPubEc = & $openssl x509 -in $chain -noout -pubkey 2>$null
+              $keyPubEc  = & $openssl pkey -in $key -pubout 2>$null
+              if (($certPubEc -join "`n") -ne ($keyPubEc -join "`n")) {
+                throw "renewed EC certificate pubkey != stored private key (torn commit)"
               }
-              Write-Host "OK renewed key/chain pair is consistent"
+              Write-Host "OK renewed EC key/chain pair is consistent"
+
+              # The renewed RSA pair must also be internally consistent.
+              $certPubRsa = & $openssl x509 -in $chainRsa -noout -pubkey 2>$null
+              $keyPubRsa  = & $openssl pkey -in $keyRsa -pubout 2>$null
+              if (($certPubRsa -join "`n") -ne ($keyPubRsa -join "`n")) {
+                throw "renewed RSA certificate pubkey != stored private key (torn commit)"
+              }
+              Write-Host "OK renewed RSA key/chain pair is consistent"
 
               # The staging dir must not survive a successful commit.
               if (Test-Path "$root/store/$hostIp.tmp") {
@@ -1750,7 +1829,32 @@ jobs:
               }
               Get-Process -Name nginx -ErrorAction SilentlyContinue |
                 Stop-Process -Force -ErrorAction SilentlyContinue
+
+              # Wait for all nginx processes to exit: both the main $proc2 handle
+              # and any stragglers found by name. Bounded timeout with polling.
+              $stopTimeout = 30000  # 30 seconds total
+              $pollInterval = 250   # 250ms between checks
+              $stopStart = [System.Diagnostics.Stopwatch]::StartNew()
+              $allExited = $false
+              while ($stopStart.ElapsedMilliseconds -lt $stopTimeout) {
+                $procStillRunning = $false
+                try { if ($proc2) { $proc2.Refresh() } } catch { }
+                if ($proc2 -and -not $proc2.HasExited) { $procStillRunning = $true }
+
+                $strayNginx = Get-Process -Name nginx -ErrorAction SilentlyContinue
+                if ($strayNginx) { $procStillRunning = $true }
+
+                if (-not $procStillRunning) {
+                  $allExited = $true
+                  break
+                }
+                Start-Sleep -Milliseconds $pollInterval
+              }
+
               $ErrorActionPreference = $prev
+              if (-not $allExited) {
+                throw "nginx process(es) did not exit after 30-second force-stop timeout"
+              }
             }
           }
           finally {
