@@ -67,6 +67,10 @@ fi
 NGX_BUILD_DIR="$_abs"
 unset _abs
 
+# ABI guard runs before any SSL srv_conf access, using the real core types.
+env WORKSPACE="$WORKSPACE" NGX_BUILD_DIR="$NGX_BUILD_DIR" CC="$CC" \
+	bash "$WORKSPACE/ci/tests/unit/test_ssl_abi.sh"
+
 # Build directory for binaries (use scratch under repo root)
 BUILD_DIR="${WORKSPACE}/.build/unit"
 mkdir -p "$BUILD_DIR"
