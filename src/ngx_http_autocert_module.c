@@ -68,6 +68,7 @@ static char *ngx_http_autocert_init_main_conf(ngx_conf_t *cf, void *conf);
 static void *ngx_http_autocert_create_srv_conf(ngx_conf_t *cf);
 static char *ngx_http_autocert_merge_srv_conf(ngx_conf_t *cf, void *parent,
     void *child);
+static ngx_int_t ngx_http_autocert_preconfig(ngx_conf_t *cf);
 static ngx_int_t ngx_http_autocert_postconfig(ngx_conf_t *cf);
 static ngx_int_t ngx_http_autocert_challenge_handler(ngx_http_request_t *r);
 static ngx_int_t ngx_http_autocert_challenge_serve(ngx_http_request_t *r);
@@ -363,7 +364,7 @@ ngx_http_autocert_exit_process(ngx_cycle_t *cycle)
 
 
 static ngx_http_module_t  ngx_http_autocert_module_ctx = {
-    NULL,                                  /* preconfiguration */
+    ngx_http_autocert_preconfig,           /* preconfiguration */
     ngx_http_autocert_postconfig,          /* postconfiguration */
 
     ngx_http_autocert_create_main_conf,    /* create main configuration */
@@ -390,6 +391,69 @@ ngx_module_t ngx_http_autocert_module = {
     ngx_http_autocert_exit_process, /* exit process (tears ACME down) */
     NULL,                           /* exit master */
     NGX_MODULE_V1_PADDING };
+
+/*
+ * Compare with the running SSL module's directive table before parsing any
+ * autocert directive: those can seed certificate arrays in its srv_conf.
+ * Package builds may pin NGX_MODULE_SIGNATURE even when ngx_ssl_t grows, so
+ * the loader signature alone does not protect these embedded field offsets.
+ * Pointer plausibility cannot detect drift onto another valid pointer.
+ * This checks the certificate-array layout, not arbitrary core ABI changes;
+ * modules must still be built against the binary's exact source tree.
+ */
+static ngx_int_t
+ngx_http_autocert_preconfig(ngx_conf_t *cf)
+{
+    ngx_command_t  *cmd;
+    ngx_uint_t      found = 0;
+    size_t          offset;
+    ngx_uint_t      field;
+
+    cmd = ngx_http_ssl_module.commands;
+    if (cmd == NULL) {
+        goto mismatch;
+    }
+
+    for ( ; cmd->name.len; cmd++) {
+        if (cmd->name.len == sizeof("ssl_certificate") - 1
+            && ngx_strncmp(cmd->name.data, "ssl_certificate",
+                           sizeof("ssl_certificate") - 1) == 0)
+        {
+            offset = offsetof(ngx_http_ssl_srv_conf_t, certificates);
+            field = 1;
+
+        } else if (cmd->name.len == sizeof("ssl_certificate_key") - 1
+                   && ngx_strncmp(cmd->name.data, "ssl_certificate_key",
+                                  sizeof("ssl_certificate_key") - 1) == 0)
+        {
+            offset = offsetof(ngx_http_ssl_srv_conf_t, certificate_keys);
+            field = 2;
+
+        } else {
+            continue;
+        }
+
+        if (cmd->conf != NGX_HTTP_SRV_CONF_OFFSET
+            || !(cmd->type & NGX_HTTP_SRV_CONF)
+            || cmd->offset != offset)
+        {
+            goto mismatch;
+        }
+        found |= field;
+    }
+
+    if (found == 3) {
+        return NGX_OK;
+    }
+
+mismatch:
+    ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                      "autocert: ngx_http_ssl_srv_conf_t ABI mismatch — "
+                      "rebuild the module against this exact nginx/angie "
+                      "source tree");
+    return NGX_ERROR;
+}
+
 
 static void *
 ngx_http_autocert_create_main_conf(ngx_conf_t *cf)
