@@ -1,4 +1,4 @@
-# sync-sha: 4eb566c669be021531c55c703a7025ecce46cdece128918ce91ce2f3326e07d2
+# sync-sha: 69a4cf733c76c39f8f557eea779715bcaa80d11c06d5338daa169792d4a9a540
 name: Valgrind
 
 # Manual Valgrind memcheck lite soak — 30s soak of the HTTP-01 serve path, no
@@ -27,7 +27,7 @@ jobs:
     timeout-minutes: 45
     steps:
       - name: Checkout module
-        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 

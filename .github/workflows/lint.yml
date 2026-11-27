@@ -1,4 +1,4 @@
-# sync-sha: d8f7ebe00c498968efddf52d02f254d399cd08b6c9cf1898ae02fd94e44e7aba
+# sync-sha: bc4a552f01938004dcfa5cce575421120580736c34b0277763d246a1b63f28ae
 name: Lint
 
 # The same ci/linter/ scripts a developer runs locally, run again on the PR --
@@ -44,7 +44,7 @@ jobs:
     timeout-minutes: 15
     steps:
       - name: Checkout module
-        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
