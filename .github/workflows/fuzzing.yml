@@ -1,4 +1,4 @@
-# sync-sha: 81f4f0d4ecc5edfb9d69dcd175fb4ededdd56a1e4c157833a03f329def0c2118
+# sync-sha: c2374d4a306477dd5ce339b49404e7a3644f0bdb0393c3c83345bbbb817f2114
 name: Fuzzing
 
 # Fast fuzz regression — 30s/target on the JSON + HTTP + base64url ACME parsers
@@ -36,7 +36,7 @@ jobs:
     timeout-minutes: 30
     steps:
       - name: Checkout module
-        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
@@ -92,7 +92,7 @@ jobs:
 
       - name: Upload crash artifacts
         if: failure()
-        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: fuzz-fast-crashes
           path: |

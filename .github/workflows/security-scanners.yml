@@ -1,4 +1,4 @@
-# sync-sha: 58dd0603e6edb2e80c4cb0ee4a5152a18290283fb48d5059561436cda39b432f
+# sync-sha: e26d04d70df312104a24d5b3bff871a6019b72b9d6cb79c3132545f06d314981
 name: Security scanners
 
 # Static / security scanners gate on every PR/push — flawfinder, clang-tidy
@@ -38,7 +38,7 @@ jobs:
     timeout-minutes: 20
     steps:
       - name: Checkout module
-        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Setup scanner deps + ccache
@@ -130,7 +130,7 @@ jobs:
           exit "${PIPESTATUS[0]}"
       - name: Upload reports
         if: always()
-        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: security-reports
           path: |
@@ -148,7 +148,7 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: Checkout module (full history)
-        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
           # Full history, not just HEAD: a secret committed and later removed

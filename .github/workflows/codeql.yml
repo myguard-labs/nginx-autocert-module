@@ -1,4 +1,4 @@
-# sync-sha: e5e46baadad99b2c8ea6509b5b43f9c951ef1b3a8acb7c864986944bcb1ad52e
+# sync-sha: 43ad99dc1a6d3b283dc7e8ce682fbee6f726cb46b221635bf314d32051849435
 name: CodeQL
 
 env:
@@ -37,7 +37,7 @@ jobs:
       security-events: write  # Upload CodeQL SARIF to the Security tab.
     steps:
       - name: Checkout module
-        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
@@ -50,7 +50,7 @@ jobs:
             build-essential curl libpcre2-dev libssl-dev zlib1g-dev
 
       - name: Initialize CodeQL
-        uses: github/codeql-action/init@8aad20d150bbac5944a9f9d289da16a4b0d87c1e # v4
+        uses: github/codeql-action/init@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
         with:
           languages: c-cpp
           queries: security-extended
@@ -67,7 +67,7 @@ jobs:
         run: test -f "$GITHUB_WORKSPACE/nginx-${NGINX_VERSION}/objs/ngx_http_autocert_module.so"
 
       - name: Analyze
-        uses: github/codeql-action/analyze@8aad20d150bbac5944a9f9d289da16a4b0d87c1e # v4
+        uses: github/codeql-action/analyze@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
         with:
           category: /language:c-cpp
           output: sarif-results

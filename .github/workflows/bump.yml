@@ -1,4 +1,4 @@
-# sync-sha: b5442c17be95a7a3fa52ebfb58cac25f9abccd45ce9b0f63bbd8363b28ef7d12
+# sync-sha: e661052b900be41e7ec3f10bfb4e1a9304d834562e55e06b66d06ff95c55b5e8
 name: Bump versions
 
 # Weekly: check nginx.org/angie.software for newer releases than what is
@@ -46,7 +46,7 @@ jobs:
     timeout-minutes: 15
     steps:
       - name: Checkout
-        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
           fetch-depth: 0
