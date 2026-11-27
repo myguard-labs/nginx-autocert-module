@@ -20,7 +20,8 @@ if [ -n "${SANITIZE:-}" ]; then
 fi
 "${CC:-cc}" "${flags[@]}" -I"$BUILD" -I"$NGX_BUILD_DIR/objs" \
 	-I"$NGX_BUILD_DIR/src/core" -I"$NGX_BUILD_DIR/src/event" \
-	-I"$NGX_BUILD_DIR/src/event/modules" -I"$NGX_BUILD_DIR/src/os/unix" \
+	-I"$NGX_BUILD_DIR/src/event/modules" -I"$NGX_BUILD_DIR/src/event/quic" \
+	-I"$NGX_BUILD_DIR/src/os/unix" \
 	-I"$NGX_BUILD_DIR/src/http" -I"$NGX_BUILD_DIR/src/http/modules" \
 	-I"$NGX_BUILD_DIR/src/http/v2" -I"$NGX_BUILD_DIR/src/http/v3" \
 	"$DIR/test_ssl_abi.c" -o "$BUILD/test_ssl_abi"
